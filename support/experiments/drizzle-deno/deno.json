@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "@libsql/client": "npm:@libsql/client@^0.15.12",
+    "drizzle-kit": "npm:drizzle-kit@^0.31.4"
+  }
+}
