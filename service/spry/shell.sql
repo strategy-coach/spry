@@ -74,4 +74,4 @@ SELECT 'shell' AS component,
                   )
               )
           ) as menu_item,       
-       'Spry v0.0.1 Web UI (v' || sqlpage.version() || ') ' || '📄 [' || substr(sqlpage.path(), 2) || '](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/console/sqlpage-files/sqlpage-file.sql?path=' || substr(sqlpage.path(), LENGTH(COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) + 2 ) || ')' as footer;
+       'Spry BaaS v0.0.1 Web UI (v' || sqlpage.version() || ') ' || '📄 [' || substr(sqlpage.path(), 2) || '](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/console/sqlpage-files/sqlpage-file.sql?path=' || substr(sqlpage.path(), LENGTH(COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) + 2 ) || ')' as footer;

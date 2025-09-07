@@ -1,10 +1,6 @@
 -- TODO: explain how this file is used to generate "default" or auto-generated content for all tables
 --       it's especially useful to see how to generate API endpoints, etc. automatically
 
--- select 
---     'text' as component,
---     'count(*) from sqlpage_files: ' || (select count(*) from sqlpage_files) as contents_md;
-
 -- the "auto-generated" tables will be in '*.auto.sql' with redirects
 DELETE FROM sqlpage_files WHERE path like 'spry/console/content/table/%.auto.sql';
 DELETE FROM sqlpage_files WHERE path like 'spry/console/content/view/%.auto.sql';
@@ -56,22 +52,14 @@ SELECT
         ''(Page '' || $current_page || '' of '' || $total_pages || '') '' ||
         (SELECT CASE WHEN $current_page < $total_pages THEN ''[Next](?limit='' || $limit || ''&offset='' || ($offset + $limit) || '')'' ELSE '' '' END)
         AS contents_md;'
-FROM console_content_tabular;
+FROM spry_console_content_tabular;
 
 -- if there are no overrides, create some defaults
+-- `INSERT OR IGNORE` is used so that if custom pages exist, we don't touch them
 INSERT OR IGNORE INTO sqlpage_files (path, contents)
 SELECT
     'spry/console/content/' || tabular_nature || '/' || tabular_name || '.sql',
     'SELECT ''redirect'' AS component, COALESCE(sqlpage.environment_variable(''SQLPAGE_SITE_PREFIX''), '''''') || ''/spry/console/content/' || tabular_nature || '/' || tabular_name || '.auto.sql'' AS link WHERE $stats IS NULL;
 ' ||
     'SELECT ''redirect'' AS component, COALESCE(sqlpage.environment_variable(''SQLPAGE_SITE_PREFIX''), '''''') || ''/spry/console/content/' || tabular_nature || '/' || tabular_name || '.auto.sql?stats='' || $stats AS link WHERE $stats IS NOT NULL;'
-FROM console_content_tabular;
-
--- select 
---     'text' as component,
---     'count(*) from sqlpage_files: ' || (select count(*) from sqlpage_files) as contents_md;
-
--- TODO: add ${this.upsertNavSQL(...)} if we want each of the above to be navigable through DB rows
-
-SELECT 'redirect' AS component, COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/sqlpage-files/content.sql' as link WHERE $redirect is NULL;
-SELECT 'redirect' AS component, COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || $redirect as link WHERE $redirect is NOT NULL;
+FROM spry_console_content_tabular;

@@ -10,9 +10,9 @@ SELECT 'table' AS component;
 SELECT
     column_name AS "Column",
     data_type AS "Type"
-FROM console_information_schema_view
+FROM spry_console_info_schema_view
 WHERE view_name = $name;
 
 SELECT 'title' AS component, 'SQL DDL' as contents, 2 as level;
 SELECT 'code' AS component;
-SELECT 'sql' as language, (SELECT sql_ddl FROM console_information_schema_view WHERE view_name = $name) as contents;
+SELECT 'sql' as language, (SELECT sql_ddl FROM spry_console_info_schema_view WHERE view_name = $name) as contents;

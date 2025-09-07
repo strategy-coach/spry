@@ -108,7 +108,7 @@ SELECT 'table' AS component,
 SELECT '[' || view_name || '](/console/info-schema/view.sql?name=' || view_name || ')' AS "View",
 COUNT(column_name) AS "Column Count",
 REPLACE(content_web_ui_link_abbrev_md, '$SITE_PREFIX_URL', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) AS "Content"
-FROM console_information_schema_view
+FROM spry_console_info_schema_view
 WHERE view_name LIKE 'surveilr_doctor%'
 GROUP BY view_name;
         
