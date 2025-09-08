@@ -3,10 +3,8 @@
 // Walk one or more roots, filter with include/exclude globs, and hand each file to a handler.
 // Entire logic lives in the Cliffy action; uses Deno std `walk`.
 
-import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { walk } from "jsr:@std/fs@1/walk";
 import {
-  basename,
   dirname,
   fromFileUrl,
   globToRegExp,
@@ -15,7 +13,9 @@ import {
   relative,
   resolve,
 } from "jsr:@std/path@1";
+import { brightRed, dim, yellow } from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@^4.1.5";
+import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { annotationsParser } from "../lib/universal/annotations.ts";
 import { drizzle } from "npm:drizzle-orm/libsql";
 import * as m from "../service/lib/models.ts";
@@ -75,7 +75,7 @@ export function inlinedSQL(q: { sql: string; params: unknown[] }): string {
     p++;
   }
 
-  return out;
+  return out + ";";
 }
 
 type Encountered = {
@@ -109,19 +109,12 @@ const spryRoute = annotationsParser(
   }).strict(),
 );
 
-type Source = {
-  readonly encountered: Readonly<Encountered>;
-  readonly entry: z.infer<typeof spryEntry.schema>;
-  readonly route: z.infer<typeof spryRoute.schema>;
-};
-
-// needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
-const db = drizzle({ connection: { url: ":memory:" } });
-
-async function ingest(encountered: Readonly<Encountered>) {
+async function discover(encountered: Readonly<Encountered>) {
   const isInRoot = dirname(encountered.relPath) == ".";
   const content = await Deno.readTextFile(encountered.path);
-  const anns = spryEntry.parse(content, (obj, ensure) => {
+  let isEntryAnnotated = false;
+  const entry = spryEntry.parse(content, (obj, ensure) => {
+    isEntryAnnotated = Object.hasOwn(obj, "nature");
     ensure(obj, "nature", "page");
     ensure(obj, "absPath", encountered.path);
     ensure(obj, "relPath", encountered.relPath);
@@ -129,129 +122,169 @@ async function ingest(encountered: Readonly<Encountered>) {
   });
   const route = spryRoute.parse(content, (obj, ensure) => {
     if (Object.entries(obj).length === 0) return false;
-    ensure(obj, "namespace", encountered.path);
+    ensure(obj, "namespace", "spry");
     if (!isInRoot) {
+      let parentPath = dirname(dirname(encountered.relPath));
+      if (parentPath === ".") parentPath = "spry";
       ensure(
         obj,
         "parentPath",
-        `${dirname(dirname(encountered.relPath))}/index.sql`,
+        `/${parentPath}/index.sql`,
       );
     }
-    ensure(obj, "path", encountered.relPath);
-    ensure(obj, "caption", basename(encountered.relPath));
+    ensure(obj, "path", `/${encountered.relPath}`);
     return true;
   });
-  if (anns?.success && Object.entries(anns.data).length > 0) {
-    console.log(anns.data.relPath, isInRoot);
+  return { encountered, isInRoot, isEntryAnnotated, entry, route };
+}
+
+async function walkRoots(
+  init: {
+    root: string[];
+    include?: string[] | undefined;
+    exclude?: string[] | undefined;
+  },
+  ingest: (encountered: Readonly<Encountered>) => void | Promise<void>,
+) {
+  const baseDir = dirname(fromFileUrl(import.meta.url));
+  const roots = (init.root ?? []).map((
+    r,
+  ) => (isAbsolute(r) ? r : resolve(baseDir, r)));
+  if (roots.length === 0) {
+    console.error("error: at least one --root is required");
+    Deno.exit(2);
   }
-  if (anns?.error) console.error(z.prettifyError(anns.error));
-  if (route?.success && Object.entries(route.data).length > 0) {
-    console.log(route.data);
-    console.log(
-      inlinedSQL(
-        // TODO: fix the type-safety issue here
-        // deno-lint-ignore no-explicit-any
-        db.insert(m.spryNavigation).values(route.data as any).toSQL(),
-      ),
-    );
+
+  // Validate roots
+  for (const r of roots) {
+    try {
+      const st = await Deno.stat(r);
+      if (!st.isDirectory) throw new Error("not a directory");
+    } catch {
+      console.error(`error: invalid root: ${r}`);
+      Deno.exit(2);
+    }
   }
-  if (route?.error) {
-    console.error(
-      z.prettifyError(route.error),
-      "in @route annotation",
-      encountered.relPath,
+
+  const seen = new Set<string>();
+  for (const root of roots) {
+    // Pre-compile include/exclude patterns against ABSOLUTE paths.
+    const includeGlobs = init.include ?? [];
+    const excludeGlobs = init.exclude ?? [];
+    const includeRes = includeGlobs.map((g) =>
+      globToRegExp(isAbsolute(g) ? g : join(root, g), {
+        extended: true,
+        globstar: true,
+      })
     );
+    const excludeRes = excludeGlobs.map((g) =>
+      globToRegExp(isAbsolute(g) ? g : join(root, g), {
+        extended: true,
+        globstar: true,
+      })
+    );
+    const includeAll = includeRes.length === 0;
+
+    for await (
+      const entry of walk(root, {
+        includeDirs: false,
+        followSymlinks: false,
+      })
+    ) {
+      const abs = entry.path;
+      if (seen.has(abs)) continue; // skip dupes if roots overlap
+
+      const passesInclude = includeAll ||
+        includeRes.some((re) => re.test(abs));
+      if (!passesInclude) continue;
+
+      const hitsExclude = excludeRes.some((re) => re.test(abs));
+      if (hitsExclude) continue;
+
+      seen.add(abs);
+      const relPath = relative(root, abs);
+      await ingest({
+        root,
+        path: abs,
+        relPath,
+      });
+    }
   }
 }
+
+const cmd = (
+  descr: string,
+  ingest: (encountered: Readonly<Encountered>) => void | Promise<void>,
+) =>
+  new Command()
+    .description(descr)
+    .option("-r, --root <dir:string>", "Root directory (repeatable).", {
+      collect: true,
+      required: true,
+    })
+    .option(
+      "-i, --include <glob:string>",
+      "Include glob(s). Repeatable. Defaults to all files.",
+      { collect: true },
+    )
+    .option(
+      "-x, --exclude <glob:string>",
+      "Exclude glob(s). Repeatable. Defaults to none.",
+      { collect: true },
+    ).action(async (options) => {
+      await walkRoots(options, ingest);
+    });
 
 await new Command()
   .name("spryctl")
   .description("Walk roots and process files with include/exclude globs.")
-  .example("just SQL", `./spryctl.ts -r . -i "**/*.sql"`)
+  .example(
+    "just SQL",
+    `./spryctl.ts ls -r . -i "**/*.sql" -x "sqlpage/migrations/**"`,
+  )
   .example(
     "specific path with excludes",
-    `./spryctl.ts -r . -i "spry/**" -x "deno.*" -x "spryctl.ts" -x "*.db"`,
+    `./spryctl.ts emit -r . -i "spry/**" -x "deno.*" -x "spryctl.ts" -x "*.db"`,
   )
-  .option("-r, --root <dir:string>", "Root directory (repeatable).", {
-    collect: true,
-    required: true,
-  })
-  .option(
-    "-i, --include <glob:string>",
-    "Include glob(s). Repeatable. Defaults to all files.",
-    { collect: true },
+  .command(
+    "ls",
+    cmd("List files that would be processed.", async (enc) => {
+      const { entry, isEntryAnnotated } = await discover(enc);
+      console.log(
+        isEntryAnnotated ? "📝" : dim("❔"),
+        dim(entry?.success ? entry.data.nature : "unknown"),
+        enc.relPath,
+      );
+      if (entry?.error) console.error(brightRed(z.prettifyError(entry.error)));
+    }),
   )
-  .option(
-    "-x, --exclude <glob:string>",
-    "Exclude glob(s). Repeatable. Defaults to none.",
-    { collect: true },
-  )
-  .action(
-    async (opts) => {
-      const baseDir = dirname(fromFileUrl(import.meta.url));
-      const roots = (opts.root ?? []).map((
-        r,
-      ) => (isAbsolute(r) ? r : resolve(baseDir, r)));
-      if (roots.length === 0) {
-        console.error("error: at least one --root is required");
-        Deno.exit(2);
-      }
-
-      // Validate roots
-      for (const r of roots) {
-        try {
-          const st = await Deno.stat(r);
-          if (!st.isDirectory) throw new Error("not a directory");
-        } catch {
-          console.error(`error: invalid root: ${r}`);
-          Deno.exit(2);
-        }
-      }
-
-      const seen = new Set<string>();
-      for (const root of roots) {
-        // Pre-compile include/exclude patterns against ABSOLUTE paths.
-        const includeGlobs = opts.include ?? [];
-        const excludeGlobs = opts.exclude ?? [];
-        const includeRes = includeGlobs.map((g) =>
-          globToRegExp(isAbsolute(g) ? g : join(root, g), {
-            extended: true,
-            globstar: true,
-          })
-        );
-        const excludeRes = excludeGlobs.map((g) =>
-          globToRegExp(isAbsolute(g) ? g : join(root, g), {
-            extended: true,
-            globstar: true,
-          })
-        );
-        const includeAll = includeRes.length === 0;
-
-        for await (
-          const entry of walk(root, {
-            includeDirs: false,
-            followSymlinks: false,
-          })
-        ) {
-          const abs = entry.path;
-          if (seen.has(abs)) continue; // skip dupes if roots overlap
-
-          const passesInclude = includeAll ||
-            includeRes.some((re) => re.test(abs));
-          if (!passesInclude) continue;
-
-          const hitsExclude = excludeRes.some((re) => re.test(abs));
-          if (hitsExclude) continue;
-
-          seen.add(abs);
-          const relPath = relative(root, abs);
-          await ingest({
-            root,
-            path: abs,
-            relPath,
-          });
-        }
-      }
-    },
+  .command(
+    "emit",
+    new Command()
+      .description("Process files and emit results.")
+      .command(
+        "routes",
+        cmd("Emit navigation routes.", async (enc) => {
+          // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
+          const db = drizzle({ connection: { url: ":memory:" } });
+          const { route } = await discover(enc);
+          if (route?.success && Object.entries(route.data).length > 0) {
+            console.log(
+              inlinedSQL(
+                // TODO: fix the type-safety issue here
+                // deno-lint-ignore no-explicit-any
+                db.insert(m.spryNavigation).values(route.data as any).toSQL(),
+              ),
+            );
+          }
+          if (route?.error) {
+            console.error(
+              brightRed(z.prettifyError(route.error)),
+              "in @route annotation",
+              yellow(enc.relPath),
+            );
+          }
+        }),
+      ),
   )
   .parse(Deno.args);
