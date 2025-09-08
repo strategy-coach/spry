@@ -3,11 +3,18 @@
 import {
     assert,
     assertEquals,
+    assertMatch,
     assertNotStrictEquals,
     assertStrictEquals,
 } from "jsr:@std/assert@1";
 
-import { ensureTrailingSemicolon, isSQL, raw, SQL } from "./sql-text.ts"; // adjust path
+import {
+    ensureTrailingSemicolon,
+    inlinedSQL,
+    isSQL,
+    raw,
+    SQL,
+} from "./sql-text.ts"; // adjust path
 
 Deno.test("isSQL type guard", () => {
     const q = SQL`select ${1}`;
@@ -171,4 +178,124 @@ Deno.test("ensureTrailingSemicolon()", () => {
     assertEquals(ensureTrailingSemicolon("select 1"), "select 1;");
     assertEquals(ensureTrailingSemicolon("select 1;   "), "select 1;");
     assertEquals(ensureTrailingSemicolon("select 1;;; \n"), "select 1;");
+});
+
+Deno.test("inlinedSQL", async (t) => {
+    await t.step("replaces simple scalars and appends semicolon", () => {
+        const out = inlinedSQL({
+            sql: "select * from t where id = ? and ok = ?",
+            params: [123, true],
+        });
+        assertEquals(out, "select * from t where id = 123 and ok = TRUE;");
+        assertMatch(out, /;$/);
+    });
+
+    await t.step("leaves placeholders inside quoted strings untouched", () => {
+        const out = inlinedSQL({
+            sql: "select '?' as q, '?'||col as s, col2 = ?",
+            params: [7],
+        });
+        assertEquals(out, "select '?' as q, '?'||col as s, col2 = 7;");
+    });
+
+    await t.step("honors doubled '' escapes inside quoted strings", () => {
+        const out = inlinedSQL({
+            sql: "select 'it''s fine ? here' as s, x = ?",
+            params: [1],
+        });
+        assertEquals(out, "select 'it''s fine ? here' as s, x = 1;");
+    });
+
+    await t.step("string escaping doubles single quotes", () => {
+        const out = inlinedSQL({
+            sql: "insert into users(name) values(?)",
+            params: ["O'Hara"],
+        });
+        assertEquals(out, "insert into users(name) values('O''Hara');");
+    });
+
+    await t.step("numbers: finite vs non-finite", () => {
+        const out = inlinedSQL({
+            sql: "values(?, ?, ?)",
+            params: [3.14, NaN, Infinity],
+        });
+        assertEquals(out, "values(3.14, null, null);");
+    });
+
+    await t.step("bigint literal", () => {
+        const out = inlinedSQL({
+            sql: "select ? as big",
+            params: [12345678901234567890n],
+        });
+        assertEquals(out, "select 12345678901234567890 as big;");
+    });
+
+    await t.step("boolean renders TRUE/FALSE", () => {
+        const out = inlinedSQL({
+            sql: "select ?, ?",
+            params: [true, false],
+        });
+        assertEquals(out, "select TRUE, FALSE;");
+    });
+
+    await t.step("Date is ISO string in UTC", () => {
+        const d = new Date("2023-01-02T03:04:05.678Z");
+        const out = inlinedSQL({
+            sql: "insert into logs(ts) values(?)",
+            params: [d],
+        });
+        assertEquals(
+            out,
+            "insert into logs(ts) values('2023-01-02T03:04:05.678Z');",
+        );
+    });
+
+    await t.step("Uint8Array to hex blob", () => {
+        const out = inlinedSQL({
+            sql: "insert into files(bin) values(?)",
+            params: [new Uint8Array([0, 255, 16])],
+        });
+        assertEquals(out, "insert into files(bin) values(X'00ff10');");
+    });
+
+    await t.step("object/array fallback to JSON in single quotes", () => {
+        const out = inlinedSQL({
+            sql: "insert into meta(js) values(?), (?)",
+            params: [{ a: 1, s: "b'c" }, [1, 2, 3]],
+        });
+        assertEquals(
+            out,
+            "insert into meta(js) values('{\"a\":1,\"s\":\"b''c\"}'), ('[1,2,3]');",
+        );
+    });
+
+    await t.step("null and undefined become null", () => {
+        const out = inlinedSQL({
+            sql: "values(?, ?)",
+            params: [null, undefined],
+        });
+        assertEquals(out, "values(null, null);");
+    });
+
+    await t.step("extra placeholders vs extra params", () => {
+        const out1 = inlinedSQL({
+            sql: "select ?, ?, ?",
+            params: [1],
+        });
+        assertEquals(out1, "select 1, ?, ?;");
+
+        const out2 = inlinedSQL({
+            sql: "select ?",
+            params: [1, 2, 3],
+        });
+        assertEquals(out2, "select 1;");
+    });
+
+    await t.step("question marks in various contexts", () => {
+        const out = inlinedSQL({
+            sql: "where a='?''?' and b=? and c='x?y' and d=?",
+            params: [10, 20],
+        });
+        assertEquals(out, "where a='?''?' and b=10 and c='x?y' and d=20;");
+    });
 });

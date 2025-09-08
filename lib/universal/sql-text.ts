@@ -300,3 +300,99 @@ export function SQL(strings: TemplateStringsArray, ...exprs: Interp[]): SQL {
 /** Ensure a string ends with exactly one semicolon. */
 export const ensureTrailingSemicolon = (str: string) =>
     str.replace(/;*\s*$/, ";");
+
+/**
+ * Inline parameter placeholders (`?`) in a SQL template with literal values.
+ * Will work for any type of SQL text, but is especially useful for converting
+ * from a Drizzle ORM query (which uses `?` placeholders) into a human-readable
+ * SQL string with all parameters inlined.
+ *
+ * - Only replaces `?` placeholders that are **outside** single-quoted SQL string
+ *   literals. Anything inside `'...'` (including doubled `''` escape sequences)
+ *   is left untouched.
+ * - Values are rendered as SQL-ish literals:
+ *   - `string` → wrapped in single quotes with internal `'` doubled (e.g. `O'Hara` → `'O''Hara'`).
+ *   - `number` → finite numbers serialized as-is; `NaN`/`±Infinity` → `null`.
+ *   - `bigint` → `toString()` (no quotes).
+ *   - `boolean` → `TRUE` / `FALSE`.
+ *   - `Date` → ISO string in single quotes (UTC).
+ *   - `Uint8Array` → hex blob like `X'00ff10'`.
+ *   - `null`/`undefined` → `null`.
+ *   - any other object/array → `JSON.stringify` wrapped in single quotes; any `'` are doubled.
+ * - If there are more `?` than values, the remaining `?` are left as-is.
+ *   Extra values in `params` are ignored.
+ * - The returned SQL always has a trailing semicolon appended.
+ *
+ * ⚠️ **Note:** This is intended for debugging/logging or generating readable SQL.
+ * It does **not** guarantee safety against SQL injection and should not be used
+ * to execute queries against a database.
+ *
+ * @param q - Query descriptor
+ * @param q.sql - SQL text containing `?` placeholders
+ * @param q.params - Positional parameter values to inline
+ * @returns SQL string with parameters inlined as literals, ending with `;`.
+ *
+ * @example
+ * inlinedSQL({
+ *   sql: "select * from users where id = ? and name like ? and note = '?'",
+ *   params: [42, "%Ann%"]
+ * });
+ * // "select * from users where id = 42 and name like '%Ann%' and note = '?' ;"
+ */
+export function inlinedSQL(q: { sql: string; params: unknown[] }): string {
+    function literal(v: unknown): string {
+        if (v === null || v === undefined) return "null";
+        if (typeof v === "string") return `'${v.replace(/'/g, "''")}'`;
+        if (typeof v === "number") {
+            return Number.isFinite(v) ? String(v) : "null";
+        }
+        if (typeof v === "bigint") return v.toString();
+        if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+        if (v instanceof Date) return `'${v.toISOString()}'`;
+        if (v instanceof Uint8Array) {
+            return "X'" + Array.from(v).map((b) =>
+                b.toString(16).padStart(2, "0")
+            ).join("") + "'";
+        }
+        return `'${JSON.stringify(v).replace(/'/g, "''")}'`;
+    }
+
+    const { sql, params } = q;
+    let i = 0, p = 0;
+    let out = "";
+    const n = sql.length;
+
+    while (p < n) {
+        const ch = sql[p];
+
+        if (ch === "'") {
+            // copy string literal verbatim, honoring doubled '' escapes
+            out += ch;
+            p++;
+            while (p < n) {
+                const c = sql[p];
+                out += c;
+                p++;
+                if (c === "'") {
+                    if (p < n && sql[p] === "'") {
+                        out += "'";
+                        p++;
+                    } // escaped quote
+                    else break; // end of string
+                }
+            }
+            continue;
+        }
+
+        if (ch === "?") {
+            out += i < params.length ? literal(params[i++]) : "?";
+            p++;
+            continue;
+        }
+
+        out += ch;
+        p++;
+    }
+
+    return out + ";";
+}
