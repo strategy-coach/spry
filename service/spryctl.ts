@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-run --allow-env --allow-net --allow-read --allow-write --node-modules-dir --allow-sys --allow-ffi 
+#!/usr/bin/env -S deno run -A 
 
 // Walk one or more roots, filter with include/exclude globs, and hand each file to a handler.
 // Entire logic lives in the Cliffy action; uses Deno std `walk`.
@@ -120,8 +120,10 @@ async function discover(encountered: Readonly<Encountered>) {
     ensure(obj, "relPath", encountered.relPath);
     return true;
   });
+  let isRouteAnnotated = false;
   const route = spryRoute.parse(content, (obj, ensure) => {
     if (Object.entries(obj).length === 0) return false;
+    isRouteAnnotated = true;
     ensure(obj, "namespace", "spry");
     if (!isInRoot) {
       let parentPath = dirname(dirname(encountered.relPath));
@@ -135,7 +137,14 @@ async function discover(encountered: Readonly<Encountered>) {
     ensure(obj, "path", `/${encountered.relPath}`);
     return true;
   });
-  return { encountered, isInRoot, isEntryAnnotated, entry, route };
+  return {
+    encountered,
+    isInRoot,
+    isEntryAnnotated,
+    entry,
+    isRouteAnnotated,
+    route,
+  };
 }
 
 async function walkRoots(
@@ -267,22 +276,24 @@ await new Command()
         cmd("Emit navigation routes.", async (enc) => {
           // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
           const db = drizzle({ connection: { url: ":memory:" } });
-          const { route } = await discover(enc);
-          if (route?.success && Object.entries(route.data).length > 0) {
-            console.log(
-              inlinedSQL(
-                // TODO: fix the type-safety issue here
-                // deno-lint-ignore no-explicit-any
-                db.insert(m.spryNavigation).values(route.data as any).toSQL(),
-              ),
-            );
-          }
-          if (route?.error) {
-            console.error(
-              brightRed(z.prettifyError(route.error)),
-              "in @route annotation",
-              yellow(enc.relPath),
-            );
+          const { isRouteAnnotated, route } = await discover(enc);
+          if (isRouteAnnotated) {
+            if (route?.error) {
+              console.error(
+                brightRed(z.prettifyError(route.error)),
+                "in @route annotation",
+                yellow(enc.relPath),
+              );
+            } else {
+              console.log(
+                inlinedSQL(
+                  // TODO: fix the type-safety issue here
+                  // deno-lint-ignore no-explicit-any
+                  db.insert(m.spryNavigation).values(route?.data as any)
+                    .toSQL(),
+                ),
+              );
+            }
           }
         }),
       ),
