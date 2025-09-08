@@ -9,7 +9,7 @@ select
     'Regenerate `spry_table_info` if something does not look right. Last generated: ' || (SELECT oldest_row_age from spry_table_info_gen_stats) || ' ago.' as contents_md;
 
 SELECT 'button' AS component, 'center' AS justify;
-SELECT COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/api/populate-spry-table-info.sql' AS link, 'info' AS color, 'Rebuild spry_table_info table' AS title;
+SELECT COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/action/populate-spry-table-info.sql' AS link, 'info' AS color, 'Rebuild spry_table_info table' AS title;
 
 SELECT 'title' AS component, 'Tables' as contents;
 SELECT 'table' AS component,

@@ -5,11 +5,11 @@ SELECT 'title' AS component, 'SQLPage pages generated from tables and views' AS 
 SELECT 'text' AS component, '
   - `*.auto.sql` pages are auto-generated "default" content pages for each table and view defined in the database.
   - The `*.sql` companions may be auto-generated redirects to their `*.auto.sql` pair or an app/service might override the `*.sql` to not redirect and supply custom content for any table or view.
-  - [View populate-table-content.sql](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/sqlpage-files/sqlpage-file.sql?path=/spry/console/api/populate-table-content.sql' || ')
+  - [View populate-table-content.sql](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/sqlpage-files/sqlpage-file.sql?path=/spry/console/action/populate-table-content.sql' || ')
   ' AS contents_md;
 
 SELECT 'button' AS component, 'center' AS justify;
-SELECT COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/api/populate-table-content.sql' AS link, 'info' AS color, 'Regenerate all "default" table/view content pages' AS title;
+SELECT COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/action/populate-table-content.sql' AS link, 'info' AS color, 'Regenerate all "default" table/view content pages' AS title;
 
 SELECT 'title' AS component, 'Redirected or overriden content pages' as contents;
 SELECT 'table' AS component,

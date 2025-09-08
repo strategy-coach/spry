@@ -21,64 +21,8 @@ import { annotationsParser } from "../lib/universal/annotations.ts";
 import { drizzle } from "npm:drizzle-orm/libsql";
 import * as m from "../service/lib/models.ts";
 import { eq } from "npm:drizzle-orm";
-
-// Given a query with `?` params, return the SQL with params inlined as literals.
-// Replaces only placeholders outside single-quoted strings; anything inside '...' is left untouched.
-export function inlinedSQL(q: { sql: string; params: unknown[] }): string {
-  function literal(v: unknown): string {
-    if (v === null || v === undefined) return "null";
-    if (typeof v === "string") return `'${v.replace(/'/g, "''")}'`;
-    if (typeof v === "number") return Number.isFinite(v) ? String(v) : "null";
-    if (typeof v === "bigint") return v.toString();
-    if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-    if (v instanceof Date) return `'${v.toISOString()}'`;
-    if (v instanceof Uint8Array) {
-      return "X'" + Array.from(v).map((b) =>
-        b.toString(16).padStart(2, "0")
-      ).join("") + "'";
-    }
-    return `'${JSON.stringify(v).replace(/'/g, "''")}'`;
-  }
-
-  const { sql, params } = q;
-  let i = 0, p = 0;
-  let out = "";
-  const n = sql.length;
-
-  while (p < n) {
-    const ch = sql[p];
-
-    if (ch === "'") {
-      // copy string literal verbatim, honoring doubled '' escapes
-      out += ch;
-      p++;
-      while (p < n) {
-        const c = sql[p];
-        out += c;
-        p++;
-        if (c === "'") {
-          if (p < n && sql[p] === "'") {
-            out += "'";
-            p++;
-          } // escaped quote
-          else break; // end of string
-        }
-      }
-      continue;
-    }
-
-    if (ch === "?") {
-      out += i < params.length ? literal(params[i++]) : "?";
-      p++;
-      continue;
-    }
-
-    out += ch;
-    p++;
-  }
-
-  return out + ";";
-}
+import Table from "npm:cli-table3@0.6.5";
+import { inlinedSQL } from "../lib/universal/sql-text.ts";
 
 type Encountered = {
   root: string;
@@ -89,7 +33,13 @@ type Encountered = {
 const spryEntry = annotationsParser(
   "spry",
   z.object({
-    nature: z.enum(["api", "page"]).default("page"),
+    nature: z.enum(["action", "api", "page", "sql-sp"]).default("page")
+      .describe(
+        `The nature of this file, influencing how it's treated by the system, defaults to 'page'. 
+         Possible values are 'action' for code that executes and redirects back to page, 'api' for
+         API endpoints, 'page' for standard web pages, and 'sql-sp' for SQL stored procedures.`,
+      ),
+    // Additional fields can be added here as needed
     absPath: z.string(),
     relPath: z.string(),
   }).strict(),
@@ -150,13 +100,17 @@ async function discover(encountered: Readonly<Encountered>) {
   };
 }
 
-async function walkRoots(
+async function walkRoots<Context>(
   init: {
+    ctx: Context;
     root: string[];
     include?: string[] | undefined;
     exclude?: string[] | undefined;
   },
-  ingest: (encountered: Readonly<Encountered>) => void | Promise<void>,
+  ingest: (
+    ctx: Context,
+    encountered: Readonly<Encountered>,
+  ) => void | Promise<void>,
 ) {
   const baseDir = dirname(fromFileUrl(import.meta.url));
   const roots = (init.root ?? []).map((
@@ -215,7 +169,7 @@ async function walkRoots(
 
       seen.add(abs);
       const relPath = relative(root, abs);
-      await ingest({
+      await ingest(init.ctx, {
         root,
         path: abs,
         relPath,
@@ -224,9 +178,14 @@ async function walkRoots(
   }
 }
 
-const cmd = (
+const cmd = <Context>(
   descr: string,
-  ingest: (encountered: Readonly<Encountered>) => void | Promise<void>,
+  ingest: (
+    ctx: Context,
+    encountered: Readonly<Encountered>,
+  ) => void | Promise<void>,
+  before?: () => Context | Promise<Context>,
+  after?: (ctx?: Context) => void | Promise<void>,
 ) =>
   new Command()
     .description(descr)
@@ -244,7 +203,9 @@ const cmd = (
       "Exclude glob(s). Repeatable. Defaults to none.",
       { collect: true },
     ).action(async (options) => {
-      await walkRoots(options, ingest);
+      const ctx: Context = before ? (await before()) : {} as Context;
+      await walkRoots<Context>({ ...options, ctx }, ingest);
+      if (after) await after(ctx);
     });
 
 await new Command()
@@ -265,15 +226,22 @@ await new Command()
   .command("help", new HelpCommand().global())
   .command(
     "ls",
-    cmd("List files that would be processed.", async (enc) => {
-      const { entry, isEntryAnnotated } = await discover(enc);
-      console.log(
-        isEntryAnnotated ? "📝" : dim("❔"),
-        dim(entry?.success ? entry.data.nature : "unknown"),
-        enc.relPath,
-      );
-      if (entry?.error) console.error(brightRed(z.prettifyError(entry.error)));
-    }),
+    cmd(
+      "List files that would be processed.",
+      async (ctx, enc) => {
+        const { entry, isEntryAnnotated } = await discover(enc);
+        ctx.table.push([
+          isEntryAnnotated ? "📝" : dim("❔"),
+          dim(entry?.success ? entry.data.nature : "unknown"),
+          enc.relPath,
+          entry?.error ? z.prettifyError(entry.error) : "",
+        ]);
+      },
+      () => ({
+        table: new Table({ head: ["", "Nature", "Path", "Ann Error"] }),
+      }),
+      (ctx) => console.log(ctx?.table.toString()),
+    ),
   )
   .command(
     "emit",
@@ -281,7 +249,7 @@ await new Command()
       .description("Process files and emit results.")
       .command(
         "routes",
-        cmd("Emit navigation routes.", async (enc) => {
+        cmd("Emit navigation routes.", async (_, enc) => {
           // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
           const db = drizzle({ connection: { url: ":memory:" } });
           const { isRouteAnnotated, route } = await discover(enc);
@@ -306,7 +274,7 @@ await new Command()
         }),
       ).command(
         "sqlpage-files",
-        cmd("Emit navigation routes.", async (enc) => {
+        cmd("Emit navigation routes.", async (_, enc) => {
           // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
           const db = drizzle({ connection: { url: ":memory:" } });
           const { content } = await discover(enc);
