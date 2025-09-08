@@ -16,9 +16,11 @@ import {
 import { brightRed, dim, yellow } from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@^4.1.5";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import { annotationsParser } from "../lib/universal/annotations.ts";
 import { drizzle } from "npm:drizzle-orm/libsql";
 import * as m from "../service/lib/models.ts";
+import { eq } from "npm:drizzle-orm";
 
 // Given a query with `?` params, return the SQL with params inlined as literals.
 // Replaces only placeholders outside single-quoted strings; anything inside '...' is left untouched.
@@ -138,6 +140,7 @@ async function discover(encountered: Readonly<Encountered>) {
     return true;
   });
   return {
+    content,
     encountered,
     isInRoot,
     isEntryAnnotated,
@@ -252,9 +255,14 @@ await new Command()
     `./spryctl.ts ls -r . -i "**/*.sql" -x "sqlpage/migrations/**"`,
   )
   .example(
+    "populate sqlpage_files table",
+    `./spryctl.ts emit sqlpage-files -r . -i "**/*.sql" -x "sqlpage/migrations/**" | sqlite3 sqlpage.db`,
+  )
+  .example(
     "specific path with excludes",
     `./spryctl.ts emit -r . -i "spry/**" -x "deno.*" -x "spryctl.ts" -x "*.db"`,
   )
+  .command("help", new HelpCommand().global())
   .command(
     "ls",
     cmd("List files that would be processed.", async (enc) => {
@@ -295,6 +303,25 @@ await new Command()
               );
             }
           }
+        }),
+      ).command(
+        "sqlpage-files",
+        cmd("Emit navigation routes.", async (enc) => {
+          // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
+          const db = drizzle({ connection: { url: ":memory:" } });
+          const { content } = await discover(enc);
+          const spf = m.sqlpageFiles;
+          console.log(
+            inlinedSQL(db.delete(spf).where(eq(spf.path, enc.relPath)).toSQL()),
+          );
+          console.log(
+            inlinedSQL(
+              db.insert(m.sqlpageFiles).values({
+                path: enc.relPath,
+                contents: content,
+              }).toSQL(),
+            ),
+          );
         }),
       ),
   )
