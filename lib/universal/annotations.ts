@@ -1,10 +1,91 @@
-// annotations.ts
-// Parse and discover SQL annotations like:
-//   -- @<identity>.<arg> <value> [@<identity>.<arg> <value> ...]
-// Uses Zod for typing/validation (parse), and discovery returns raw info without validation.
-
+/**
+ * @module annotations
+ *
+ * Utilities for parsing and discovering SQL or any other text file comment
+ * annotations such as:
+ *
+ *   -- @<identity>.<arg> <value> [@<identity>.<arg> <value> ...]
+ *
+ * This module exposes a factory, {@link annotationsParser}, that builds
+ * parsers scoped to a specific `identity` (e.g., "sql" → @sql.arg value).
+ *
+ * It provides two complementary capabilities:
+ *
+ * 1. Parsing + Validation — `parse(text, [predicate])`
+ *    Aggregates matched annotations into a plain object and validates it
+ *    against a user-supplied Zod schema. Returns Zod’s `safeParse` result,
+ *    or `undefined` if the optional `predicate` returns `false`.
+ *
+ * 2. Discovery (no validation) — `discover(text)`
+ *    Returns a rich summary of all matched annotations, including counts,
+ *    unique values, first/last values, and precise source positions.
+ *
+ * Typical use cases include:
+ * - Embedding structured metadata in SQL files or migrations.
+ * - Enforcing annotation schemas via Zod.
+ * - Tooling, linting, and editor integration via `discover`.
+ */
 import { z } from "jsr:@zod/zod@^4.1.5";
 
+/**
+ * Build a parser/discovery utility for structured SQL or any other text file
+ * comment annotations of the form:
+ *
+ *   -- @<identity>.<arg> <value> [@<identity>.<arg> <value> ...]
+ *
+ * The factory returns an object with:
+ *
+ * - `parse(text, [predicate])`: Scans comment lines for annotations, aggregates
+ *   them into an object, and validates against the given Zod schema. Returns a
+ *   `SafeParseReturnType` or `undefined` if the optional predicate returns false.
+ *
+ * - `discover(text)`: Scans the text and returns a summary of all matches,
+ *   without validation, including value counts, unique values, first/last values,
+ *   and occurrence positions (line, column, start, end).
+ *
+ * - `ensure(obj, key, defaultValue)`: Helper that assigns a default value to a
+ *   missing key and narrows the type accordingly.
+ *
+ * @template S - Zod schema type for the validated object.
+ *
+ * @param identity - The annotation identity, e.g. "sql" for @sql.arg value.
+ * @param schema - A Zod schema used by `parse` to validate the aggregated object.
+ * @param init - Optional configuration:
+ *   @param init.esc - Escape helper for regex generation (default escapes meta-chars).
+ *   @param init.commentMarkers - Comment markers to scan (default ["--"]).
+ *   @param init.blockComments - Whether to scan /* ... *\/ block comments (default false).
+ *   @param init.prefix - Annotation prefix (default "@").
+ *   @param init.coalesce - Handling of duplicate args: "array" (default), "first", "last".
+ *   @param init.argName - Regex for argument names (default /[A-Za-z_][\\w-]*\/).
+ *   @param init.normalizeArg - Normalize argument names (default: identity function).
+ *   @param init.findValueEnd - Custom logic to find value end position.
+ *   @param init.trim - Trim extracted values (default true).
+ *   @param init.normalizeValue - Transform extracted values (default strips quotes).
+ *
+ * @returns An object containing:
+ *   - `schema`: The provided Zod schema.
+ *   - `parse(text, [predicate])`: Parse + validate annotations.
+ *   - `discover(text)`: Inspect annotations without validation.
+ *   - `ensure(obj, key, defaultValue)`: Helper for setting defaults safely.
+ *
+ * @example
+ * const schema = z.object({
+ *   target: z.string(),
+ *   mode: z.enum(["append", "overwrite"]).optional(),
+ * });
+ *
+ * const { parse } = annotationsParser("sql", schema);
+ *
+ * const result = parse(`
+ *   -- @sql.target table_a
+ *   -- @sql.mode "append"
+ * `);
+ *
+ * if (result?.success) {
+ *   console.log(result.data);
+ *   // { target: "table_a", mode: "append" }
+ * }
+ */
 export function annotationsParser<S extends z.ZodTypeAny>(
   identity: string,
   schema: S,
