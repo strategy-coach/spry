@@ -48,7 +48,8 @@ export async function emitSqlPageFiles() {
   await walkRoots(
     walkDefaults(),
     async (_, enc) => {
-      const { content, entry } = await annotatedContent(enc);
+      const { content, entry, route, isEntryAnnotated, isRouteAnnotated } =
+        await annotatedContent(enc);
       console.log(
         inlinedSQL(
           db.delete(spf).where(eq(spf.path, enc.relPath)).toSQL(),
@@ -60,6 +61,20 @@ export async function emitSqlPageFiles() {
             path: enc.relPath,
             contents: content,
             nature: entry?.success ? entry.data.nature : "page",
+            annotations: JSON.stringify(
+              {
+                isEntryAnnotated,
+                isRouteAnnotated,
+                entry: entry
+                  ? (entry.success ? entry.data : { error: entry.error })
+                  : null,
+                route: route
+                  ? (route.success ? route.data : { error: route.error })
+                  : null,
+              },
+              null,
+              "  ",
+            ),
           }).toSQL(),
         ),
       );
@@ -70,7 +85,7 @@ export async function emitSqlPageFiles() {
 export async function emitRoutesSQL() {
   // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
   const db = drizzle({ connection: { url: ":memory:" } });
-  const { spryNavigation } = sqliteModels();
+  const { spryNavigation: snTbl } = sqliteModels();
   await walkRoots(
     walkDefaults(),
     async (_, enc) => {
@@ -82,16 +97,21 @@ export async function emitRoutesSQL() {
             "in @route annotation",
             yellow(enc.relPath),
           );
-        } else {
-          console.log(
-            inlinedSQL(
-              // TODO: fix the type-safety issue here
-              // deno-lint-ignore no-explicit-any
-              db.insert(spryNavigation).values(route?.data as any)
-                .toSQL(),
-            ),
-          );
+          return;
         }
+        if (!route?.data) return; // TODO: how should this error be handled?
+        console.log(
+          inlinedSQL(
+            db.delete(snTbl).where(eq(snTbl.path, route.data.path)).toSQL(),
+          ),
+        );
+        console.log(
+          inlinedSQL(
+            // TODO: fix the type-safety issue here
+            // deno-lint-ignore no-explicit-any
+            db.insert(snTbl).values(route.data as any).toSQL(),
+          ),
+        );
       }
     },
   );

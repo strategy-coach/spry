@@ -20,11 +20,12 @@ export function sqliteModels() {
       .default(sql`CURRENT_TIMESTAMP`)
       .notNull(),
 
-    // path, contents, and lastModified are used by SQLPage
+    // 👆 path, contents, and lastModified are used by SQLPage
     // the remainder of the fields below are for Spry
 
     // the kind of content (page, api, action, sql-sp)
-    nature: text().notNull(),
+    nature: text().notNull().default("page"),
+    annotations: text(), // TODO: JSON
   });
 
   const spryNavigation = sqliteTable(

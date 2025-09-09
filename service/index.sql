@@ -1,3 +1,5 @@
+-- @route.title 'Application' @route.caption "App Home"
+-- @route.description 'Welcome to Spry Application' 
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 
 SELECT 'list' AS component;

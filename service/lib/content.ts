@@ -68,6 +68,8 @@ export async function annotatedContent(
       );
     }
     ensure(obj, "path", `/${encountered.relPath}`);
+    // TODO: figure out why we're getting self-referencing paths
+    if (obj.path == obj.parentPath) obj.parentPath = undefined;
     return true;
   });
   return {

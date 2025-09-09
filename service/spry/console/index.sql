@@ -1,3 +1,5 @@
+-- @route.title 'Spry BaaS Console' @route.caption "Spry Console"
+-- @route.description 'Spry Backend-as-a-Service (BaaS) Console' 
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/nav-breadcrumbs.sql') AS properties;
 
