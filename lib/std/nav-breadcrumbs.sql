@@ -1,3 +1,4 @@
+-- @spry.nature partial
 -- to override the path, use sqlpage.run_sql('spry/nav-breadcrumbs.sql', '{ "path": "/xyz" }')
 -- for debugging use sqlpage.run_sql('spry/nav-breadcrumbs.sql', '{ "nature": "table" }')
 

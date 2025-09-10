@@ -1,4 +1,4 @@
--- @spry.nature sql-sp
+-- @spry.nature sql @spry.sqlImpact ddl
 
 -- REFRESH STEP (run as a separate statement, not inside the view):
 -- Rebuild the snapshot so it reflects the current schema at the moment of run.

@@ -10,4 +10,4 @@ SELECT caption as title, COALESCE(url, path) as link, description
 
 select 
     'text' as component,
-    'This is a default landing page, replace `index.sql` to add your content.' as contents_md;
+    'This is a default primary end-to-end (`e2e-prime`) landing page, replace `index.sql` to add your content.' as contents_md;

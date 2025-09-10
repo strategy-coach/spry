@@ -1,3 +1,5 @@
+-- @route.title 'SQLPage Content' @route.caption "SQLPage Files Content"
+-- @route.description Manage and regenerate sqlpage_files content in database
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/nav-breadcrumbs.sql') AS properties;           
 

@@ -1,4 +1,4 @@
--- @spry.nature sql-sp
+-- @spry.nature sql @spry.sqlImpact dml
 
 -- TODO: explain how this file is used to generate "default" or auto-generated content for all tables
 --       it's especially useful to see how to generate API endpoints, etc. automatically

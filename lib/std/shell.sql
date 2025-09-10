@@ -1,3 +1,4 @@
+-- @spry.nature partial
 -- set role = (
 --     SELECT role FROM users
 --     INNER JOIN sessions ON users.id = sessions.user_id

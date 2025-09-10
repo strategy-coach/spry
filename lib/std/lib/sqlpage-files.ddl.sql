@@ -1,3 +1,5 @@
+-- @spry.nature sql @spry.sqlImpact ddl
+
 -- See https://github.com/sqlpage/SQLPage#hosting-sql-files-directly-inside-the-database
 -- TODO: generate this using Drizzle Kit
 
@@ -8,6 +10,8 @@ Purpose:
   Stores SQL-based page definitions and related metadata for both SQLPage
   and Spry. This is the canonical source of truth for all SQL-driven pages,
   partials, and components.
+
+  TODO: consider generating sqlpage_files using Drizzle ORM?
 
 Usage:
   • SQLPage uses:
@@ -131,6 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_sf_route_parent
 CREATE INDEX IF NOT EXISTS idx_sf_route_path
   ON sqlpage_files (json_extract(annotations, '$.route.path'));
 
+DROP VIEW IF EXISTS spry_route;
 CREATE VIEW IF NOT EXISTS spry_route AS
 SELECT
   json_extract(annotations, '$.route.path')                          AS path,
