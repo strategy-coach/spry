@@ -17,11 +17,26 @@ import {
  */
 export type Encountered = WalkEntry & {
     /** Absolute filesystem path of the current root being walked. */
-    root: string;
+    root: WalkRoot & { absRoot: string };
     /** Absolute path of the matched file. (Directories are not emitted.) */
     path: string;
     /** Path of the matched file relative to `root`. */
     relPath: string;
+};
+
+/** Per-root configuration. */
+export type WalkRoot = {
+    /** Root directory to walk. Can be absolute or relative (resolved against `baseDir`). */
+    root: string;
+    /**
+     * Base directory used to resolve a relative `root` and any relative include/exclude globs.
+     * Typically the directory containing this module (`import.meta.url`) or caller-provided.
+     */
+    baseDir: string;
+    /** Optional include globs. If omitted/empty, all files are considered included. */
+    include?: string[];
+    /** Optional exclude globs. Files matching any are skipped. */
+    exclude?: string[];
 };
 
 /**
@@ -29,16 +44,13 @@ export type Encountered = WalkEntry & {
  * that passes optional include/exclude globs.
  *
  * ## Roots
- * - Each entry in `init.root` can be absolute or relative.
- * - Relative roots are resolved against the directory containing this module
- *   (`import.meta.url`), not the current working directory.
- * - At least one root is required; otherwise error is returned.
+ * - Each entry in `init.roots` may be absolute or relative.
+ * - Relative roots are resolved against that entry's `baseDir`, not the CWD.
+ * - At least one root is required; otherwise an error is thrown.
  *
  * ## Include/Exclude Globs
- * - Globs in `include` and `exclude` are compiled to **absolute-path** regular
- *   expressions. If a glob is relative, it is joined to the current `root`
- *   before compilation.
- * - If `include` is omitted or empty, all files are considered included by default.
+ * - `include` / `exclude` are *per-root* and compiled to **absolute-path** regexes.
+ * - Relative globs are joined to the current root before compilation.
  * - A file is emitted iff it matches at least one include (or include list is
  *   empty) and matches **none** of the exclude globs.
  * - Globs support `extended` and `globstar` features (e.g. `**\/*.ts`).
@@ -48,17 +60,14 @@ export type Encountered = WalkEntry & {
  * - Symlinks are not followed (`followSymlinks: false`).
  *
  * ## De-duplication
- * - If multiple roots overlap (or the same root is given more than once), the
- *   same absolute file path is only processed once in the entire run.
+ * - If multiple roots overlap (or the same root appears more than once), the
+ *   same absolute file path is processed only once across the entire run.
  *
  * @typeParam Context - Arbitrary context object passed through to each `ingest` call.
  *
  * @param init.ctx - A user-provided context object forwarded to `ingest`.
- * @param init.root - One or more root directories to walk. Must contain at least one entry.
- * @param init.include - Optional glob patterns. If provided, a file must match **some**
- *   include pattern (after absolute resolution) to be considered.
- * @param init.exclude - Optional glob patterns. If provided, a file is skipped if it
- *   matches **any** exclude pattern (after absolute resolution).
+ * @param init.roots - One or more per-root specs.
+ * @param init.onInvalidRoot - Optional callback invoked when a root does not exist or is not a directory.
  *
  * @param ingest - Async or sync callback invoked for each passing file. Receives the
  *   user `ctx` and a readonly {@link Encountered} describing the match.
@@ -71,9 +80,14 @@ export type Encountered = WalkEntry & {
  * await walkRoots(
  *   {
  *     ctx: { collected: [] as string[] },
- *     root: ["./examples"],
- *     include: ["**\/*.ts"],
- *     exclude: ["**\/*.test.ts"],
+ *     roots: [
+ *       {
+ *         root: "./examples",
+ *         baseDir: new URL(".", import.meta.url).pathname,
+ *         include: ["**\/*.ts"],
+ *         exclude: ["**\/*.test.ts"],
+ *       },
+ *     ],
  *   },
  *   async (ctx, { path }) => {
  *     ctx.collected.push(path);
@@ -84,10 +98,7 @@ export type Encountered = WalkEntry & {
 export async function walkRoots<Context>(
     init: {
         ctx: Context;
-        root: string[];
-        baseDir: string;
-        include?: string[] | undefined;
-        exclude?: string[] | undefined;
+        roots: WalkRoot[];
         onInvalidRoot?: (root: string) => void | Promise<void>;
     },
     ingest: (
@@ -95,33 +106,37 @@ export async function walkRoots<Context>(
         encountered: Readonly<Encountered>,
     ) => void | Promise<void>,
 ) {
-    const roots = (init.root ?? []).map((
-        r,
-    ) => (isAbsolute(r) ? r : resolve(init.baseDir, r)));
     const seen = new Set<string>();
-    for (const root of roots) {
+    for (const spec of init.roots) {
+        // Resolve the root to an absolute path using the spec's baseDir.
+        const absRoot = isAbsolute(spec.root)
+            ? spec.root
+            : resolve(spec.baseDir, spec.root);
+
+        // Validate root directory.
+        let isDir = false;
         try {
-            const st = await Deno.stat(root);
-            if (!st.isDirectory) {
-                init.onInvalidRoot?.(root);
-                continue;
-            }
+            const st = await Deno.stat(absRoot);
+            isDir = st.isDirectory;
         } catch {
-            init.onInvalidRoot?.(root);
+            /* noop */
+        }
+        if (!isDir) {
+            await init.onInvalidRoot?.(absRoot);
             continue;
         }
 
-        // Pre-compile include/exclude patterns against ABSOLUTE paths.
-        const includeGlobs = init.include ?? [];
-        const excludeGlobs = init.exclude ?? [];
+        // Pre-compile include/exclude patterns against ABSOLUTE paths for this root.
+        const includeGlobs = spec.include ?? [];
+        const excludeGlobs = spec.exclude ?? [];
         const includeRes = includeGlobs.map((g) =>
-            globToRegExp(isAbsolute(g) ? g : join(root, g), {
+            globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
                 extended: true,
                 globstar: true,
             })
         );
         const excludeRes = excludeGlobs.map((g) =>
-            globToRegExp(isAbsolute(g) ? g : join(root, g), {
+            globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
                 extended: true,
                 globstar: true,
             })
@@ -129,7 +144,7 @@ export async function walkRoots<Context>(
         const includeAll = includeRes.length === 0;
 
         for await (
-            const entry of walk(root, {
+            const entry of walk(absRoot, {
                 includeDirs: false,
                 followSymlinks: false,
             })
@@ -145,13 +160,14 @@ export async function walkRoots<Context>(
             if (hitsExclude) continue;
 
             seen.add(abs);
-            const relPath = relative(root, abs);
+            const relPath = relative(absRoot, abs);
             await ingest(init.ctx, {
                 ...entry,
-                root,
+                root: { ...spec, absRoot },
                 path: abs,
                 relPath,
             });
         }
     }
+    return seen;
 }

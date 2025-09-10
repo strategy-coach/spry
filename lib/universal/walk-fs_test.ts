@@ -41,8 +41,10 @@ Deno.test("walkRoots: includes all files when include is empty", async () => {
             await walkRoots(
                 {
                     ctx: { seen },
-                    root: [root],
-                    baseDir: dirname(fromFileUrl(import.meta.url)),
+                    roots: [{
+                        root,
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }],
                 },
                 (ctx, enc) => {
                     ctx.seen.push(enc);
@@ -78,10 +80,11 @@ Deno.test("walkRoots: include filters absolute-matched files", async () => {
             await walkRoots(
                 {
                     ctx: { seen },
-                    root: [root],
-                    // Absolute include: should emit only b.txt
-                    include: [absOnly],
-                    baseDir: dirname(fromFileUrl(import.meta.url)),
+                    roots: [{
+                        root,
+                        include: [absOnly],
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }],
                 },
                 (ctx, { path }) => {
                     ctx.seen.push(path);
@@ -106,10 +109,12 @@ Deno.test("walkRoots: include (relative to root) + exclude", async () => {
             await walkRoots(
                 {
                     ctx: { seenRel },
-                    root: [root],
-                    include: ["**/*.ts"], // include only TS files
-                    exclude: ["**/skip/**"], // but drop anything in skip/
-                    baseDir: dirname(fromFileUrl(import.meta.url)),
+                    roots: [{
+                        root,
+                        include: ["**/*.ts"], // include only TS files
+                        exclude: ["**/skip/**"], // but drop anything in skip/
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }],
                 },
                 (ctx, { relPath }) => {
                     ctx.seenRel.push(relPath);
@@ -136,8 +141,13 @@ Deno.test("walkRoots: overlapping roots de-duplicates absolute paths", async () 
                 {
                     ctx: { seenAbs, seenArr },
                     // Same path twice to simulate perfect overlap
-                    root: [root, root],
-                    baseDir: dirname(fromFileUrl(import.meta.url)),
+                    roots: [{
+                        root,
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }, {
+                        root,
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }],
                 },
                 (ctx, { path }) => {
                     ctx.seenArr.push(path);
@@ -169,8 +179,10 @@ Deno.test("walkRoots: relative root resolution is based on module directory", as
             await walkRoots(
                 {
                     ctx: { collected },
-                    root: [relFromModule],
-                    baseDir: dirname(fromFileUrl(import.meta.url)),
+                    roots: [{
+                        root: relFromModule,
+                        baseDir: dirname(fromFileUrl(import.meta.url)),
+                    }],
                 },
                 (ctx, { path }) => {
                     ctx.collected.push(path);
