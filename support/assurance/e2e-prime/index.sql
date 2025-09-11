@@ -2,11 +2,19 @@
 -- @route.description 'Welcome to Spry Application' 
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 
+SELECT 'text' AS component, sqlpage.path() as contents;
+
 SELECT 'list' AS component;
 SELECT caption as title, COALESCE(url, path) as link, description
-  FROM spry_navigation
- WHERE parent_path = '/spry/index.sql'
- ORDER BY sibling_order;
+  FROM spry_route_path
+ WHERE path = substr(
+        sqlpage.path(),
+        1,
+        length(sqlpage.path()) - instr(
+            replace(sqlpage.path(), '/', char(1)) || char(1),
+            char(1)
+        )
+    );
 
 select 
     'text' as component,

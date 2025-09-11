@@ -42,7 +42,6 @@ export function CLI(
   function transformRoute(sra: SpryRouteAnnotation) {
     const result = {
       ...sra,
-      namespace: sra.namespace == "_" ? "spry" : sra.namespace,
       path: sqlpageRoutePath(sra.path),
     };
     return result;

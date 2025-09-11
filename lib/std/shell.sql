@@ -47,8 +47,8 @@ SELECT 'shell' AS component,
                           COALESCE(abbreviated_caption, caption) as title,
                           COALESCE(url, path) as link,
                           description
-                      FROM spry_navigation
-                      WHERE namespace = 'spry' AND parent_path = '/spry/docs/index.sql'
+                      FROM spry_route_path
+                      WHERE parent_path = '/spry/docs'
                       ORDER BY sibling_order
                   )
               )
@@ -69,8 +69,8 @@ SELECT 'shell' AS component,
                           COALESCE(abbreviated_caption, caption) as title,
                           COALESCE(url, path) as link,
                           description
-                      FROM spry_navigation
-                      WHERE namespace = 'spry' AND parent_path = '/spry/console/index.sql'
+                      FROM spry_route_path
+                      WHERE parent_path = '/spry/console'
                       ORDER BY sibling_order
                   )
               )

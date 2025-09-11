@@ -20,7 +20,7 @@ Usage:
       - last_modified → detects when pages change for caching or live reload
   • Spry uses:
       - nature        → classifies file type (e.g. 'page', 'partial', 'component')
-      - annotations   → JSON metadata for navigation, captions, namespaces, etc.
+      - annotations   → JSON metadata for navigation, captions, etc.
       - elaboration   → JSON custom data field for anything that's useful
 
 Columns:
@@ -46,8 +46,6 @@ Columns:
             "route": {
               "path": "/spry/console/info-schema/index.sql",
               "caption": "Spry Schema",
-              "namespace": "spry",
-              "parentPath": "/spry/console/index.sql",
               "title": "Spry BaaS Info Schema"
             }
           }
@@ -81,8 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_spry_route_path_crumbs
   ON sqlpage_files (json_extract(contents, '$.breadcrumbs'))
   WHERE path = 'spry/lib/routes.json';
 
--- 1) Routes grouped by root
---    columns: root TEXT, nodes JSON
+-- Full JSON route trees grouped by root
 DROP VIEW IF EXISTS spry_route_root;
 CREATE VIEW spry_route_root AS
 SELECT
@@ -92,8 +89,7 @@ FROM sqlpage_files f,
      json_each(f.contents, '$.roots') AS r
 WHERE f.path = 'spry/lib/routes.json';
 
--- 2) Single node by exact path (lookup via the "paths" object)
---    columns: path TEXT, node JSON
+-- single node by exact path (lookup via the "paths" object)
 DROP VIEW IF EXISTS spry_route_path_node;
 CREATE VIEW spry_route_path_node AS
 SELECT
@@ -103,8 +99,32 @@ FROM sqlpage_files f,
      json_each(f.contents, '$.paths') AS p
 WHERE f.path = 'spry/lib/routes.json';
 
--- 3) Breadcrumbs by path (lookup via the "breadcrumbs" object)
---    columns: path TEXT, breadcrumbs JSON
+DROP VIEW IF EXISTS spry_route_path;
+CREATE VIEW spry_route_path AS
+SELECT
+  p.key                             AS parent_path,          -- parent path
+  -- payload-derived convenience columns
+  json_extract(pl.value, '$.path')                 AS path,
+  json_extract(pl.value, '$.caption')              AS caption,
+  json_extract(pl.value, '$.title')                AS title,
+  json_extract(pl.value, '$.description')          AS description,
+  json_extract(pl.value, '$.abbreviatedCaption')   AS abbreviated_caption,
+  json_extract(pl.value, '$.url')                  AS url,
+  CAST(json_extract(pl.value, '$.siblingOrder') AS INTEGER) AS sibling_order,
+  -- utility columns
+  CAST(ch.key AS INTEGER)           AS child_index,          -- index within parent.children
+  ch.value                          AS child_node,           -- whole child node JSON
+  CAST(pl.key AS INTEGER)           AS child_payload_index,  -- index within child.payloads (NULL if none)
+  pl.value                          AS child_payload         -- payload JSON (NULL if none)
+FROM sqlpage_files AS f,
+     json_each(f.contents, '$.paths')     AS p,    -- parent nodes
+     json_each(p.value, '$.children')     AS ch    -- child nodes
+LEFT JOIN json_each(ch.value, '$.payloads') AS pl  -- payloads (if any)
+       ON 1
+WHERE f.path = 'spry/lib/routes.json'
+  AND COALESCE(json_extract(ch.value, '$.virtual'), 0) = 0;
+
+-- breadcrumbs by path (lookup via the "breadcrumbs" object)
 DROP VIEW IF EXISTS spry_route_path_crumbs;
 CREATE VIEW spry_route_path_crumbs AS
 SELECT
@@ -114,8 +134,7 @@ FROM sqlpage_files f,
      json_each(f.contents, '$.breadcrumbs') AS b
 WHERE f.path = 'spry/lib/routes.json';
 
--- 4) Flattened breadcrumbs payloads by path
---    columns: path TEXT, crumb_index INTEGER, payload_index INTEGER, payload JSON
+-- Flattened breadcrumbs payloads by path
 DROP VIEW IF EXISTS spry_route_path_crumbs_node;
 CREATE VIEW spry_route_path_crumbs_node AS
 SELECT

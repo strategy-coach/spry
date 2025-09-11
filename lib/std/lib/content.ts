@@ -70,9 +70,6 @@ export const spryRouteAnnSchema = z.object({
   caption: z.string().describe(
     "Human-friendly general-purpose name for display.",
   ),
-  namespace: z.string().describe(
-    "Logical grouping; allows multiple independent navigation trees.",
-  ),
   siblingOrder: z.number().optional().describe(
     "Optional integer to order children within the same parent.",
   ),
@@ -92,7 +89,7 @@ export const spryRouteAnnSchema = z.object({
     'Optional structured attributes (e.g., { "target": "_blank", "lang": { "fr": { "caption": "..." } } }).',
   ),
 }).strict().describe(
-  "Navigation route annotation matching the `spry_route` view: unique within (namespace, parentPath, path), supports hierarchy and ordered siblings.",
+  "Navigation route annotation, supports hierarchy and ordered siblings.",
 );
 
 export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
@@ -139,7 +136,6 @@ export async function annotatableContent<
   const routeAnn = spryRouteAnnParser.parse(content, (obj, ensure) => {
     if (Object.entries(obj).length === 0) return false;
     isRouteAnnotated = true;
-    ensure(obj, "namespace", "_");
     ensure(obj, "path", encountered.relPath);
     return true;
   });
