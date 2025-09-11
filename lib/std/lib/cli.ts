@@ -9,19 +9,31 @@ import Table from "npm:cli-table3@0.6.5";
 import { inlinedSQL } from "../../universal/sql-text.ts";
 import { Encountered, WalkRoot, walkRoots } from "../../universal/walk-fs.ts";
 import { pathTree } from "../../universal/path-tree.ts";
-import { annotatedContent, SpryRouteAnnotation } from "./content.ts";
+import {
+  annotatableContent,
+  spryResourceNature,
+  SpryRouteAnnotation,
+} from "./content.ts";
 import { relative } from "node:path";
 
 export function CLI(
   prefs: Omit<Parameters<typeof walkRoots>[0], "ctx"> & {
-    sqlpageFilesPath?: (path: string) => string;
-    init?: {
+    readonly sqlpageFilesPath?: (path: string) => string;
+    readonly sqlpageRoutePath?: (path: string) => string;
+    readonly head?: {
+      sources: AsyncIterable<WalkRoot> | Iterable<WalkRoot>;
+      emitContent: (src: Readonly<Encountered>) => string | Promise<string>;
+    };
+    readonly tail?: {
       sources: AsyncIterable<WalkRoot> | Iterable<WalkRoot>;
       emitContent: (src: Readonly<Encountered>) => string | Promise<string>;
     };
   },
 ) {
-  const { sqlpageFilesPath = (path) => path } = prefs;
+  const {
+    sqlpageFilesPath = (path) => path,
+    sqlpageRoutePath = (path) => `/${sqlpageFilesPath(path)}`,
+  } = prefs;
   const walkContext = <Context>(ctx?: Context) => ({
     ...prefs,
     ctx: ctx ? ctx : {},
@@ -31,22 +43,22 @@ export function CLI(
     const result = {
       ...sra,
       namespace: sra.namespace == "_" ? "spry" : sra.namespace,
-      path: `/${sqlpageFilesPath(sra.path)}`,
+      path: sqlpageRoutePath(sra.path),
     };
     return result;
   }
 
-  async function init(opts?: { paths?: boolean }) {
-    if (!prefs.init?.sources) return;
+  async function head(opts?: { paths?: boolean }) {
+    if (!prefs.head?.sources) return;
 
     // -----------------------------
     // Ingest init walkRoots (async/sync)
     // -----------------------------
     const it =
-      (prefs.init.sources as AsyncIterable<WalkRoot>)[Symbol.asyncIterator]
-        ? (prefs.init.sources as AsyncIterable<WalkRoot>)
+      (prefs.head.sources as AsyncIterable<WalkRoot>)[Symbol.asyncIterator]
+        ? (prefs.head.sources as AsyncIterable<WalkRoot>)
         : (async function* () {
-          for (const x of prefs.init!.sources as Iterable<WalkRoot>) yield x;
+          for (const x of prefs.head!.sources as Iterable<WalkRoot>) yield x;
         })();
     await walkRoots(
       { ctx: {}, roots: await Array.fromAsync(it) },
@@ -54,7 +66,31 @@ export function CLI(
         if (opts?.paths) {
           console.log(relative(enc.root.baseDir, enc.path));
         } else {
-          console.log(await prefs.init?.emitContent(enc));
+          console.log(await prefs.head?.emitContent(enc));
+        }
+      },
+    );
+  }
+
+  async function tail(opts?: { paths?: boolean }) {
+    if (!prefs.tail?.sources) return;
+
+    // -----------------------------
+    // Ingest init walkRoots (async/sync)
+    // -----------------------------
+    const it =
+      (prefs.tail.sources as AsyncIterable<WalkRoot>)[Symbol.asyncIterator]
+        ? (prefs.tail.sources as AsyncIterable<WalkRoot>)
+        : (async function* () {
+          for (const x of prefs.tail!.sources as Iterable<WalkRoot>) yield x;
+        })();
+    await walkRoots(
+      { ctx: {}, roots: await Array.fromAsync(it) },
+      async (_, enc) => {
+        if (opts?.paths) {
+          console.log(relative(enc.root.baseDir, enc.path));
+        } else {
+          console.log(await prefs.tail?.emitContent(enc));
         }
       },
     );
@@ -65,14 +101,14 @@ export function CLI(
     await walkRoots(
       walkContext({ table }),
       async (_, enc) => {
-        const { entry, isEntryAnnotated } = await annotatedContent(enc, {
+        const { entryAnn, isEntryAnnotated } = await annotatableContent(enc, {
           transformRoute,
         });
         table.push([
           isEntryAnnotated ? "📝" : dim("❔"),
-          dim(entry?.success ? entry.data.nature : "unknown"),
+          dim(entryAnn?.success ? entryAnn.data.nature : "unknown"),
           sqlpageFilesPath(enc.relPath),
-          entry?.error ? z.prettifyError(entry.error) : "",
+          entryAnn?.error ? z.prettifyError(entryAnn.error) : "",
         ]);
       },
     );
@@ -84,71 +120,97 @@ export function CLI(
     await walkRoots(
       walkContext({ routes }),
       async (_, enc) => {
-        const { isRouteAnnotated, route } = await annotatedContent(enc, {
+        const { isRouteAnnotated, routeAnn } = await annotatableContent(enc, {
           transformRoute,
         });
-        if (isRouteAnnotated && route?.data) {
-          routes.push(route.data);
+        if (isRouteAnnotated && routeAnn?.data) {
+          routes.push(routeAnn.data);
         }
       },
     );
 
-    return await pathTree<SpryRouteAnnotation, string>(routes, {
+    const forest = await pathTree<SpryRouteAnnotation, string>(routes, {
       nodePath: (n) => n.path,
       pathDelim: "/",
       synthesizeContainers: true,
       folderFirst: false,
       indexBasenames: ["index.sql"],
     });
-  }
 
-  async function routes(opts?: { table?: boolean; json?: boolean }) {
-    const rt = await routesTree();
-    const forest = rt.tree();
-    const rows = rt.tabular(forest);
+    const tree = forest.roots;
+    type PathTreeNode = (typeof tree)[number];
 
-    if (opts?.table) {
-      const table = new Table({
-        head: ["Name", "Breadcrumb Path", "Path", "Caption", "Container Path"],
-      });
-      for (const r of rows) {
-        table.push([
-          r.name,
-          r.breadcrumbPath ?? "",
-          r.path,
-          r.payload?.caption,
-          r.containerIndexPath ?? "",
-        ]);
+    function nodeCrumbs(item: SpryRouteAnnotation): PathTreeNode[] {
+      // Compute the *breadcrumb parent path* for a given path (grandparent's canonical)
+      // Returns undefined when there is no grandparent.
+      function breadcrumbParentPathOf(path: string) {
+        const parentPath = forest.parentMap.get(path);
+        if (!parentPath) return undefined; // no parent container → no grandparent
+
+        const grandparentPath = forest.parentMap.get(parentPath);
+        if (!grandparentPath) return undefined; // no grandparent
+
+        const grandparentNode = forest.treeByPath.get(grandparentPath);
+        if (!grandparentNode) return undefined; // defensive
+
+        return forest.canonicalOf(grandparentNode);
       }
-      console.log(table.toString());
-    } else if (opts?.json) {
-      const breadcrumbs: Record<string, ReturnType<typeof rt.ancestry>> = {};
-      for (const node of rows) {
-        if (node.payload) {
-          breadcrumbs[node.payload.path] = rt.ancestry(node.payload);
+
+      const start = forest.itemToNodeMap.get(item);
+      if (!start) return [];
+
+      // Walk up via breadcrumb (grandparent canonical), collecting nodes
+      const trail: PathTreeNode[] = [];
+      let current: PathTreeNode | undefined = start;
+
+      while (current) {
+        trail.push(current);
+
+        const nextPath = breadcrumbParentPathOf(current.path);
+        if (!nextPath) break;
+
+        const nextNode = forest.treeByPath.get(nextPath);
+        if (!nextNode || nextNode === current) break; // defensive against loops
+        current = nextNode;
+      }
+
+      return trail.reverse(); // root → … → target
+    }
+
+    const breadcrumbs: Record<string, ReturnType<typeof nodeCrumbs>> = {};
+    for (const node of forest.treeByPath.values()) {
+      if (node.payloads) {
+        for (const p of node.payloads) {
+          breadcrumbs[p.path] = nodeCrumbs(p);
         }
       }
+    }
+
+    return { forest, tree, nodeCrumbs, breadcrumbs };
+  }
+
+  async function routes(opts?: { json?: boolean }) {
+    const { forest, tree, breadcrumbs } = await routesTree();
+
+    if (opts?.json) {
       console.log(
-        JSON.stringify({ forest, tabular: rows, breadcrumbs }, null, "  "),
+        JSON.stringify({ roots: forest.roots, breadcrumbs }, null, "  "),
       );
     } else {
       console.log(
-        rt.toString(forest, { showPath: true, includeCounts: true }),
+        forest.toString(tree, { showPath: true, includeCounts: true }),
       );
     }
   }
 
   async function crumbs() {
-    const rt = await routesTree();
-    const forest = rt.tree();
+    const { breadcrumbs } = await routesTree();
 
-    const rows = rt.tabular(forest);
     const table = new Table({ head: ["Path", "Breadcrumbs"] });
-    for (const node of rows) {
-      const crumbs = rt.ancestry(node.payload!);
+    for (const [path, node] of Object.entries(breadcrumbs)) {
       table.push([
-        node.name,
-        crumbs.map((bc) => bc.path).join("\n"),
+        path,
+        node.map((bc) => bc.path).join("\n"),
       ]);
     }
     console.log(table.toString());
@@ -158,34 +220,34 @@ export function CLI(
     // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
     const db = drizzle({ connection: { url: ":memory:" } });
     const { sqlpageFiles: spf } = sqliteModels();
+    const { forest, breadcrumbs } = await routesTree();
     await walkRoots(
       walkContext(),
       async (_, enc) => {
         const canonicalPath = sqlpageFilesPath(enc.relPath);
-        const { content, entry, route, isEntryAnnotated, isRouteAnnotated } =
-          await annotatedContent(enc, {
-            transformRoute,
-          });
+        const ac = await annotatableContent(enc, { transformRoute });
         console.log(
-          inlinedSQL(
-            db.delete(spf).where(eq(spf.path, canonicalPath)).toSQL(),
-          ),
+          inlinedSQL(db.delete(spf).where(eq(spf.path, canonicalPath)).toSQL()),
         );
         console.log(
           inlinedSQL(
             db.insert(spf).values({
               path: canonicalPath,
-              contents: content,
-              nature: entry?.success ? entry.data.nature : "page",
+              contents: ac.content,
+              nature: ac.entryAnn?.success ? ac.entryAnn.data.nature : "page",
               annotations: JSON.stringify(
                 {
-                  isEntryAnnotated,
-                  isRouteAnnotated,
-                  entry: entry
-                    ? (entry.success ? entry.data : { error: entry.error })
+                  isEntryAnnotated: ac.isEntryAnnotated,
+                  isRouteAnnotated: ac.isRouteAnnotated,
+                  entry: ac.entryAnn
+                    ? (ac.entryAnn.success
+                      ? ac.entryAnn.data
+                      : { error: ac.entryAnn.error })
                     : null,
-                  route: route
-                    ? (route.success ? route.data : { error: route.error })
+                  route: ac.routeAnn
+                    ? (ac.routeAnn.success
+                      ? ac.routeAnn.data
+                      : { error: ac.routeAnn.error })
                     : null,
                 },
                 null,
@@ -195,6 +257,35 @@ export function CLI(
           ),
         );
       },
+    );
+
+    const routesJsonContentPath = "spry/lib/routes.json";
+    console.log(
+      inlinedSQL(
+        db.delete(spf).where(eq(spf.path, routesJsonContentPath)).toSQL(),
+      ),
+    );
+    console.log(
+      inlinedSQL(
+        db.insert(spf).values({
+          path: routesJsonContentPath,
+          contents: JSON.stringify(
+            { roots: forest.roots, paths: forest.treeByPath, breadcrumbs },
+            (_, value) => {
+              if (value instanceof Map) {
+                return Array.from(value.entries()).reduce((obj, [key, val]) => {
+                  // deno-lint-ignore no-explicit-any
+                  ((obj as any)[key]) = val;
+                  return obj;
+                }, {});
+              }
+              return value;
+            },
+            "  ",
+          ),
+          nature: spryResourceNature,
+        }).toSQL(),
+      ),
     );
   }
 
@@ -217,10 +308,16 @@ export function CLI(
         .description("List SQLPage .sql files excluding migrations.")
         .action(ls)
         .command(
-          "init",
+          "head",
           new Command()
-            .description("List the initialization files.")
-            .action(async () => await init({ paths: true })),
+            .description("List the header (initialization) files.")
+            .action(async () => await head({ paths: true })),
+        )
+        .command(
+          "tail",
+          new Command()
+            .description("List the tail (finalization) files.")
+            .action(async () => await tail({ paths: true })),
         )
         .command(
           "routes",
@@ -229,7 +326,6 @@ export function CLI(
               "List SQLPage .sql files that include route annotations.",
             )
             .option("-j, --json", "Emit as JSON instead of tree")
-            .option("-t, --table", "Display as table instead of tree.")
             .action(routes),
         )
         .command(
@@ -246,10 +342,16 @@ export function CLI(
       new Command()
         .description("Process files and emit SQL.")
         .command(
-          "init",
+          "head",
           new Command()
-            .description("Emit initialization SQL (DDL, DML).")
-            .action(async () => await init()),
+            .description("Emit initialization (header) SQL (DDL, DML).")
+            .action(async () => await head()),
+        )
+        .command(
+          "tail",
+          new Command()
+            .description("Emit finalization (tail) SQL (DDL, DML).")
+            .action(async () => await head()),
         )
         .command(
           "sqlpage-files",
@@ -262,7 +364,8 @@ export function CLI(
   return {
     command,
     walkContext,
-    init,
+    head,
+    tail,
     ls,
     routes,
     emitSqlPageFiles,

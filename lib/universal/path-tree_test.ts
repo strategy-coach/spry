@@ -55,12 +55,12 @@ Deno.test("buildPathTree — complex forest", async (t) => {
         indexBasenames: ["index", "index.sql"],
     });
 
-    const forest = builder.tree();
+    const tree = builder.roots;
 
     // Helper to find a node by path in the built forest
     function find(path: string) {
         const want = builder.normalize(path);
-        const stack = [...forest];
+        const stack = [...tree];
         while (stack.length) {
             const n = stack.pop()!;
             if (n.path === want) return n;
@@ -72,9 +72,9 @@ Deno.test("buildPathTree — complex forest", async (t) => {
     await t.step("roots and ordering (folders before files)", () => {
         // We expect two roots: /spry (container) and /index.sql (file)
         // Folder-first ordering ensures /spry comes before /index.sql.
-        assertEquals(forest.length, 2);
-        assertEquals(forest[0].path, "/spry");
-        assertEquals(forest[1].path, "/index.sql");
+        assertEquals(tree.length, 2);
+        assertEquals(tree[0].path, "/spry");
+        assertEquals(tree[1].path, "/index.sql");
     });
 
     await t.step("explicit containers vs synthesized containers", () => {
@@ -192,7 +192,7 @@ Deno.test("buildPathTree — complex forest", async (t) => {
     await t.step(
         "pretty-printed tree (selected lines present, order sanity)",
         () => {
-            const printed = builder.toString(forest, { showPath: true });
+            const printed = builder.toString(tree, { showPath: true });
 
             // Top-level roots: container then file
             const firstLine = printed.split("\n")[0];
@@ -235,134 +235,10 @@ Deno.test("buildPathTree — complex forest", async (t) => {
                 folderFirst: true,
                 indexBasenames: ["index.sql"],
             });
-            const forest2 = b2.tree();
+            const forest2 = b2.roots;
             // Without synthesized containers, both deep paths become roots
             const paths = forest2.map((n) => n.path).sort();
             assertEquals(paths, ["/a/b/c/file.sql", "/a/b/c/index.sql"].sort());
         },
     );
-});
-
-Deno.test("path-tree: tabular() breadcrumb and containerIndexPath", async (t) => {
-    const builder = await pathTree<Node, string>(complexNodes(), {
-        nodePath: (n) => n.path,
-        pathDelim: "/",
-        synthesizeContainers: true,
-        folderFirst: true,
-        indexBasenames: ["index", "index.sql"],
-    });
-
-    const forest = builder.tree();
-    assert(forest.length >= 1, "forest should not be empty");
-
-    const rows = builder.tabular(forest);
-
-    // Helper to get a row by exact path
-    const row = (p: string) => {
-        const normalized = builder.normalize(p);
-        const r = rows.find((x) =>
-            x.path === normalized &&
-            (!x.payload || (x.payload as Node).path === normalized)
-        );
-        assert(r, `expected tabular row for ${normalized}`);
-        return r!;
-    };
-
-    await t.step("content.sql breadcrumb and containerIndexPath", () => {
-        const r = row("/spry/console/sqlpage-files/content.sql");
-        // parent container canonical (for content.sql)
-        assertEquals(
-            r.containerIndexPath,
-            "/spry/console/sqlpage-files/index.sql",
-        );
-        // breadcrumb parent is the grandparent canonical
-        assertEquals(r.breadcrumbPath, "/spry/console/index.sql");
-    });
-
-    await t.step(
-        "sqlpage-files/index.sql breadcrumb and containerIndexPath",
-        () => {
-            const r = row("/spry/console/sqlpage-files/index.sql");
-            // parent canonical of sqlpage-files/ (its parent is /spry/console)
-            assertEquals(
-                r.containerIndexPath,
-                "/spry/console/sqlpage-files/index.sql",
-            );
-            // breadcrumb: grandparent canonical — here also /spry/console/index.sql
-            assertEquals(r.breadcrumbPath, "/spry/console/index.sql");
-        },
-    );
-
-    await t.step("console/index.sql breadcrumb and containerIndexPath", () => {
-        const r = row("/spry/console/index.sql");
-        // parent canonical is /spry/index.sql
-        assertEquals(r.containerIndexPath, "/spry/console/index.sql");
-        // breadcrumb: grandparent canonical is /spry/index.sql (since /spry is parent; grandparent is root → undefined? No:
-        // grandparent is /spry (container), canonical = /spry/index.sql)
-        assertEquals(r.breadcrumbPath, "/spry/index.sql");
-    });
-
-    await t.step("spry/index.sql breadcrumb and containerIndexPath", () => {
-        const r = row("/spry/index.sql");
-        // parent canonical is null (parent is root)
-        assertEquals(r.containerIndexPath, "/spry/index.sql");
-        // breadcrumb: no grandparent → undefined
-        assertEquals(r.breadcrumbPath, undefined);
-    });
-
-    await t.step("root /index.sql breadcrumb and containerIndexPath", () => {
-        const r = row("/index.sql");
-        assertEquals(r.containerIndexPath, null);
-        assertEquals(r.breadcrumbPath, undefined);
-    });
-});
-
-Deno.test("path-tree: ancestry() returns nodes from root → target (by payload item)", async (t) => {
-    const builder = await pathTree<Node, string>(complexNodes(), {
-        nodePath: (n) => n.path,
-        pathDelim: "/",
-        synthesizeContainers: true,
-        folderFirst: true,
-        indexBasenames: ["index", "index.sql"],
-    });
-
-    const forest = builder.tree();
-    const rows = builder.tabular(forest);
-
-    // Get payload items for two targets
-    const contentItem = rows.find((r) =>
-        r.path === "/spry/console/sqlpage-files/content.sql"
-    )!.payload!;
-    const filesIndexItem = rows.find((r) =>
-        r.path === "/spry/console/sqlpage-files/index.sql"
-    )!.payload!;
-
-    await t.step("ancestry for content.sql", () => {
-        const nodes = builder.ancestry(contentItem);
-        const paths = nodes.map((n) => n.path);
-        assertEquals(paths, [
-            "/spry/index.sql",
-            "/spry/console/index.sql",
-            "/spry/console/sqlpage-files/content.sql",
-        ]);
-    });
-
-    await t.step("ancestry for sqlpage-files/index.sql", () => {
-        const nodes = builder.ancestry(filesIndexItem);
-        const paths = nodes.map((n) => n.path);
-        assertEquals(paths, [
-            "/spry/index.sql",
-            "/spry/console/index.sql",
-            "/spry/console/sqlpage-files/index.sql",
-        ]);
-    });
-
-    await t.step("ancestry for unknown payload item returns []", () => {
-        const unknown: Node = {
-            path: "/not/part/of/tree.sql",
-            caption: "Nope",
-        };
-        const nodes = builder.ancestry(unknown);
-        assertEquals(nodes, []);
-    });
 });

@@ -1,22 +1,17 @@
--- @spry.nature sql @spry.sqlImpact ddl
+-- @spry.nature sql @spry.sqlImpact dml
 
--- spry_schema_info is a single-row-per-schema catalog that stores a prettified
--- JSON graph of the entire SQLite schema (tables, columns, indexes, foreign
--- keys, views, triggers, and derived relations). These views project that JSON
--- back into relational form for easy querying. Filter by schema_name in WHERE
--- clauses (e.g., WHERE schema_name='main'). Requires SQLite JSON1.
-
--- Drop/create the container table
-DROP TABLE IF EXISTS spry_schema_info;
-CREATE TABLE IF NOT EXISTS spry_schema_info (
-  schema_name        TEXT PRIMARY KEY,
-  schema_graph_json  TEXT NOT NULL CHECK (json_valid(schema_graph_json))
-);
+-- Spry schema information is stored in sqlpage_files as a single-row-per-schema
+-- catalog with path 'spry/lib/info-schema.json' (where 'main' is schhema).
+-- Stores a prettifiedJSON graph of the entire SQLite schema (tables, columns, 
+-- indexes, foreign keys, views, triggers, and derived relations). These views 
+-- project that JSON back into relational form for easy querying. Filter by 
+-- schema_name in WHERE clauses (e.g., WHERE s.path = 'spry/lib/info-schema.json'). 
+-- Requires SQLite JSON1.
 
 -- Populate with a comprehensive JSON graph of the current schema
-INSERT OR REPLACE INTO spry_schema_info (schema_name, schema_graph_json)
+INSERT OR REPLACE INTO sqlpage_files (path, contents)
 VALUES (
-  'main',
+  'spry/lib/info-schema.json',
   json_pretty(
     json_object(
       'schema_name', 'main',
@@ -196,21 +191,22 @@ VALUES (
 DROP VIEW IF EXISTS spry_schema_info_table;
 CREATE VIEW IF NOT EXISTS spry_schema_info_table AS
 SELECT
-  s.schema_name,
-  t.key                  AS table_name,
+  'main'                                    AS schema_name,
+  t.key                                     AS table_name,
   json_extract(t.value,'$.type')            AS type,
   json_extract(t.value,'$.ncol')            AS ncol,
   json_extract(t.value,'$.strict')          AS strict,
   json_extract(t.value,'$.without_rowid')   AS without_rowid,
   json_extract(t.value,'$.sql')             AS definition_sql
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables') AS t
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Table columns (one row per column per table)
 DROP VIEW IF EXISTS spry_schema_info_table_column;
 CREATE VIEW IF NOT EXISTS spry_schema_info_table_column AS
 SELECT
-  s.schema_name,
+  'main'                                        AS schema_name,
   t.key                                         AS table_name,
   json_extract(c.value,'$.cid')                 AS cid,
   json_extract(c.value,'$.name')                AS column_name,
@@ -219,56 +215,60 @@ SELECT
   json_extract(c.value,'$.dflt_value')          AS dflt_value,
   json_extract(c.value,'$.pk')                  AS part_of_pk,
   json_extract(c.value,'$.hidden')              AS hidden
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t,
-     json_each(t.value, '$.columns')           AS c;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables') AS t,
+     json_each(t.value, '$.columns')           AS c
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Views (one row per view)
 DROP VIEW IF EXISTS spry_schema_info_view;
 CREATE VIEW IF NOT EXISTS spry_schema_info_view AS
 SELECT
-  s.schema_name,
+  'main'                           AS schema_name,
   v.key                            AS view_name,
   json_extract(v.value,'$.type')   AS type,
   json_extract(v.value,'$.sql')    AS definition_sql
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.views') AS v;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.views') AS v
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- View columns (if your schema_graph_json includes a $.views[*].columns array)
 DROP VIEW IF EXISTS spry_schema_info_view_column;
 CREATE VIEW IF NOT EXISTS spry_schema_info_view_column AS
 SELECT
-  s.schema_name,
+  'main'                          AS schema_name,
   v.key                           AS view_name,
   json_extract(vc.value,'$.cid')  AS cid,
   json_extract(vc.value,'$.name') AS column_name,
   json_extract(vc.value,'$.type') AS column_type,
   json_extract(vc.value,'$.notnull') AS not_null,
   json_extract(vc.value,'$.dflt_value') AS dflt_value
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.views') AS v
-LEFT JOIN json_each(v.value, '$.columns') AS vc ON 1=1;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.views') AS v
+LEFT JOIN json_each(v.value, '$.columns') AS vc ON 1=1
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Indexes (one row per index per table)
 DROP VIEW IF EXISTS spry_schema_info_index;
 CREATE VIEW IF NOT EXISTS spry_schema_info_index AS
 SELECT
-  s.schema_name,
+  'main'                                       AS schema_name,
   t.key                                        AS table_name,
   json_extract(i.value,'$.name')               AS index_name,
   json_extract(i.value,'$.origin')             AS origin,      -- 'c','u','pk'
   json_extract(i.value,'$.unique')             AS is_unique,
   json_extract(i.value,'$.partial')            AS is_partial,
   json_extract(i.value,'$.where')              AS definition_sql
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t,
-     json_each(t.value, '$.indexes')           AS i;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables')         AS t,
+     json_each(t.value, '$.indexes')           AS i
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Index columns (one row per column per index)
 DROP VIEW IF EXISTS spry_schema_info_index_column;
 CREATE VIEW IF NOT EXISTS spry_schema_info_index_column AS
 SELECT
-  s.schema_name,
+  'main'                                        AS schema_name,
   t.key                                         AS table_name,
   json_extract(i.value,'$.name')                AS index_name,
   json_extract(ic.value,'$.seqno')              AS seqno,
@@ -277,16 +277,17 @@ SELECT
   json_extract(ic.value,'$.desc')               AS is_desc,
   json_extract(ic.value,'$.coll')               AS collation_name,
   json_extract(ic.value,'$.key')                AS is_key_column
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t,
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables')          AS t,
      json_each(t.value, '$.indexes')            AS i,
-     json_each(i.value, '$.columns')            AS ic;
+     json_each(i.value, '$.columns')            AS ic
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Foreign keys (one row per referencing column)
 DROP VIEW IF EXISTS spry_schema_info_foreign_key;
 CREATE VIEW IF NOT EXISTS spry_schema_info_foreign_key AS
 SELECT
-  s.schema_name,
+  'main'                                   AS schema_name,
   t.key                                    AS table_name,
   json_extract(fk.value,'$.id')            AS fk_id,
   json_extract(fk.value,'$.seq')           AS seq,
@@ -296,38 +297,41 @@ SELECT
   json_extract(fk.value,'$.on_update')     AS on_update,
   json_extract(fk.value,'$.on_delete')     AS on_delete,
   json_extract(fk.value,'$.match')         AS match
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t,
-     json_each(t.value, '$.foreign_keys')       AS fk;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables')     AS t,
+     json_each(t.value, '$.foreign_keys')  AS fk
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Table triggers (one row per trigger per table)
 DROP VIEW IF EXISTS spry_schema_info_table_trigger;
 CREATE VIEW IF NOT EXISTS spry_schema_info_table_trigger AS
 SELECT
-  s.schema_name,
+  'main'                                AS schema_name,
   t.key                                 AS table_name,
   json_extract(tr.value,'$.name')       AS trigger_name,
   json_extract(tr.value,'$.sql')        AS definition_sql
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.tables') AS t,
-     json_each(t.value, '$.triggers')           AS tr;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.tables')  AS t,
+     json_each(t.value, '$.triggers')   AS tr
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Top-level triggers (if captured under $.triggers object)
 DROP VIEW IF EXISTS spry_schema_info_trigger;
 CREATE VIEW IF NOT EXISTS spry_schema_info_trigger AS
 SELECT
-  s.schema_name,
+  'main'                                AS schema_name,
   trg.key                               AS trigger_name,
   json_extract(trg.value,'$.table')     AS table_name,
   json_extract(trg.value,'$.sql')       AS definition_sql
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.triggers') AS trg;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.triggers') AS trg
+WHERE s.path = 'spry/lib/info-schema.json';
 
 -- Relations derived in schema_graph_json (one row per relation)
 DROP VIEW IF EXISTS spry_schema_info_relation;
 CREATE VIEW IF NOT EXISTS spry_schema_info_relation AS
 SELECT
-  s.schema_name,
+  'main'                                  AS schema_name,
   json_extract(r.value,'$.name')          AS relation_name,
   json_extract(r.value,'$.from_table')    AS from_table,
   json_extract(r.value,'$.to_table')      AS to_table,
@@ -337,5 +341,6 @@ SELECT
   json_extract(r.value,'$.match')         AS match,
   json_extract(r.value,'$.from_columns')  AS from_columns_json,
   json_extract(r.value,'$.to_columns')    AS to_columns_json
-FROM spry_schema_info AS s,
-     json_each(s.schema_graph_json, '$.relations') AS r;
+FROM sqlpage_files AS s,
+     json_each(s.contents, '$.relations') AS r
+WHERE s.path = 'spry/lib/info-schema.json';

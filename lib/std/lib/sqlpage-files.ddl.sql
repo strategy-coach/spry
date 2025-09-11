@@ -21,6 +21,7 @@ Usage:
   • Spry uses:
       - nature        → classifies file type (e.g. 'page', 'partial', 'component')
       - annotations   → JSON metadata for navigation, captions, namespaces, etc.
+      - elaboration   → JSON custom data field for anything that's useful
 
 Columns:
   path            VARCHAR  PRIMARY KEY, NOT NULL
@@ -65,99 +66,65 @@ CREATE TABLE IF NOT EXISTS "sqlpage_files" (
   -- the remainder of the fields below are for Spry
 
   "nature" TEXT NOT NULL DEFAULT 'page',
-  "annotations" TEXT CHECK (json_valid("annotations") OR NULL)
+  "annotations" TEXT CHECK (json_valid("annotations") OR NULL),
+  "elaboration" TEXT CHECK (json_valid("elaboration") OR NULL)
 );
 
-/*------------------------------------------------------------------------------
-View: spry_route
-Purpose:
-  Normalize navigation metadata embedded in sqlpage_files.annotations (JSON)
-  into a relational shape that Spry can query directly for menus, breadcrumbs,
-  and trees.
-
-Source:
-  sqlpage_files (
-    path TEXT PRIMARY KEY,
-    contents TEXT,
-    last_modified TIMESTAMPTZ,
-    nature TEXT,
-    annotations TEXT  -- JSON
-  )
-
-Row eligibility:
-  - annotations IS NOT NULL
-  - annotations is valid JSON
-  - annotations has a "route" object (json_type(..., '$.route') = 'object')
-
-Column mapping:
-  - path                  := json_extract(annotations, '$.route.path')
-  - caption               := json_extract(annotations, '$.route.caption')
-  - namespace             := json_extract(annotations, '$.route.namespace')
-  - parent_path           := json_extract(annotations, '$.route.parentPath')
-  - sibling_order         := CAST(json_extract(annotations, '$.route.siblingOrder') AS INTEGER)
-  - url                   := COALESCE($.route.url, $.route.path)
-  - title                 := COALESCE($.route.title, $.route.caption)
-  - abbreviated_caption   := COALESCE($.route.abbreviatedCaption, $.route.caption)
-  - description           := json_extract(annotations, '$.route.description')
-  - elaboration           := json_extract(annotations, '$.route.elaboration')
-
-Notes & semantics:
-  - Keys use the camelCase names shown above to match the JSON schema
-    (e.g., parentPath, siblingOrder, abbreviatedCaption).
-  - The view supplies sensible fallbacks:
-      url → path, title → caption, abbreviated_caption → caption.
-    Other fields (e.g., caption) will be NULL if absent in JSON; a view
-    cannot enforce NOT NULL/UNIQUE constraints from your illustrative table.
-  - Intended uniqueness is (namespace, parent_path, path); enforce via app logic
-    or triggers if you materialize into a table.
-
-Common queries:
-  -- Children of a given parent (ordered)
-  SELECT *
-  FROM spry_route
-  WHERE namespace = 'spry'
-    AND parent_path = '/spry/console/index.sql'
-  ORDER BY sibling_order, caption;
-
-  -- Root nodes (no parent)
-  SELECT *
-  FROM spry_route
-  WHERE namespace = 'spry'
-    AND (parent_path IS NULL OR parent_path = '')
-  ORDER BY sibling_order, caption;
-------------------------------------------------------------------------------*/
-
 -- Expression indexes to speed up filtering without materializing:
-CREATE INDEX IF NOT EXISTS idx_sf_route_ns
-  ON sqlpage_files (json_extract(annotations, '$.route.namespace'));
-CREATE INDEX IF NOT EXISTS idx_sf_route_parent
-  ON sqlpage_files (json_extract(annotations, '$.route.parentPath'));
-CREATE INDEX IF NOT EXISTS idx_sf_route_path
-  ON sqlpage_files (json_extract(annotations, '$.route.path'));
+CREATE INDEX IF NOT EXISTS idx_spry_route_root
+  ON sqlpage_files (json_extract(contents, '$.roots'))
+  WHERE path = 'spry/lib/routes.json';
+CREATE INDEX IF NOT EXISTS idx_spry_route_path_node
+  ON sqlpage_files (json_extract(contents, '$.paths'))
+  WHERE path = 'spry/lib/routes.json';
+CREATE INDEX IF NOT EXISTS idx_spry_route_path_crumbs
+  ON sqlpage_files (json_extract(contents, '$.breadcrumbs'))
+  WHERE path = 'spry/lib/routes.json';
 
-DROP VIEW IF EXISTS spry_route;
-CREATE VIEW IF NOT EXISTS spry_route AS
+-- 1) Routes grouped by root
+--    columns: root TEXT, nodes JSON
+DROP VIEW IF EXISTS spry_route_root;
+CREATE VIEW spry_route_root AS
 SELECT
-  json_extract(annotations, '$.route.path')                          AS path,
-  json_extract(annotations, '$.route.caption')                       AS caption,
-  json_extract(annotations, '$.route.namespace')                     AS namespace,
-  json_extract(annotations, '$.route.parentPath')                    AS parent_path,
-  CAST(json_extract(annotations, '$.route.siblingOrder') AS INTEGER) AS sibling_order,
-  COALESCE(
-    json_extract(annotations, '$.route.url'),
-    json_extract(annotations, '$.route.path')
-  )                                                                  AS url,
-  COALESCE(
-    json_extract(annotations, '$.route.title'),
-    json_extract(annotations, '$.route.caption')
-  )                                                                  AS title,
-  COALESCE(
-    json_extract(annotations, '$.route.abbreviatedCaption'),
-    json_extract(annotations, '$.route.caption')
-  )                                                                  AS abbreviated_caption,
-  json_extract(annotations, '$.route.description')                   AS description,
-  json_extract(annotations, '$.route.elaboration')                   AS elaboration
-FROM sqlpage_files
-WHERE annotations IS NOT NULL
-  AND json_valid(annotations)
-  AND json_type(annotations, '$.route') = 'object';
+  json_extract(r.value, '$.path') AS root,
+  r.value                         AS nodes
+FROM sqlpage_files f,
+     json_each(f.contents, '$.roots') AS r
+WHERE f.path = 'spry/lib/routes.json';
+
+-- 2) Single node by exact path (lookup via the "paths" object)
+--    columns: path TEXT, node JSON
+DROP VIEW IF EXISTS spry_route_path_node;
+CREATE VIEW spry_route_path_node AS
+SELECT
+  p.key   AS path,
+  p.value AS node
+FROM sqlpage_files f,
+     json_each(f.contents, '$.paths') AS p
+WHERE f.path = 'spry/lib/routes.json';
+
+-- 3) Breadcrumbs by path (lookup via the "breadcrumbs" object)
+--    columns: path TEXT, breadcrumbs JSON
+DROP VIEW IF EXISTS spry_route_path_crumbs;
+CREATE VIEW spry_route_path_crumbs AS
+SELECT
+  b.key   AS path,
+  b.value AS breadcrumbs
+FROM sqlpage_files f,
+     json_each(f.contents, '$.breadcrumbs') AS b
+WHERE f.path = 'spry/lib/routes.json';
+
+-- 4) Flattened breadcrumbs payloads by path
+--    columns: path TEXT, crumb_index INTEGER, payload_index INTEGER, payload JSON
+DROP VIEW IF EXISTS spry_route_path_crumbs_node;
+CREATE VIEW spry_route_path_crumbs_node AS
+SELECT
+  b.key                              AS path,           -- "/some/path"
+  CAST(c.key AS INTEGER)             AS crumb_index,    -- index within breadcrumbs array
+  CAST(p.key AS INTEGER)             AS payload_index,  -- index within breadcrumb.payloads
+  p.value                            AS payload         -- the payload object JSON
+FROM sqlpage_files AS f,
+     json_each(f.contents, '$.breadcrumbs') AS b       -- each path -> breadcrumbs array
+     , json_each(b.value)                   AS c       -- each breadcrumb in the array
+     , json_each(c.value, '$.payloads')     AS p       -- each payload in breadcrumb.payloads
+WHERE f.path = 'spry/lib/routes.json';

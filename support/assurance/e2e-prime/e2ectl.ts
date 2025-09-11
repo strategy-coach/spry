@@ -15,15 +15,25 @@ export const cli = CLI({
     baseDir,
   }],
   sqlpageFilesPath: (path) => path.replace(/^std\//, "spry/"),
-  init: {
+  head: {
     sources: [{
       root: "../../../lib/std/lib",
-      include: ["schema-info.ddl.sql", "sqlpage-files.ddl.sql"],
+      include: ["sqlpage-files.ddl.sql"],
       baseDir,
     }],
     // deno-fmt-ignore
     emitContent: async (src) =>
-      `--- init: ${src.relPath} ---\n${await Deno.readTextFile(src.path)}\n--- init end: ${src.relPath} ---\n`,
+      `--- head: ${src.relPath} ---\n${await Deno.readTextFile(src.path)}\n--- head end: ${src.relPath} ---\n`,
+  },
+  tail: {
+    sources: [{
+      root: "../../../lib/std/lib",
+      include: ["schema-info.dml.sql"],
+      baseDir,
+    }],
+    // deno-fmt-ignore
+    emitContent: async (src) =>
+      `--- tail: ${src.relPath} ---\n${await Deno.readTextFile(src.path)}\n--- tail end: ${src.relPath} ---\n`,
   },
 });
 

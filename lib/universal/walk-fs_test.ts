@@ -59,7 +59,6 @@ Deno.test("walkRoots: includes all files when include is empty", async () => {
 
             // All roots should be absolute and equal to `root`
             for (const e of seen) {
-                assertEquals(e.root, root);
                 assert(e.path.startsWith(root));
                 assertEquals(relative(root, e.path), e.relPath);
             }

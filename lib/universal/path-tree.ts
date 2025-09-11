@@ -2,7 +2,7 @@
 type Any = any;
 
 export async function pathTree<Node, Path extends string = string>(
-    nodes: AsyncIterable<Node> | Iterable<Node>,
+    payloadsSupplier: AsyncIterable<Node> | Iterable<Node>,
     options: {
         /** Extract the path string from a node */
         nodePath: (n: Node) => Path;
@@ -33,7 +33,7 @@ export async function pathTree<Node, Path extends string = string>(
         /** Full normalized path (e.g., "/a/b") */
         path: PP;
         /** Last segment (no delimiter) */
-        name: string;
+        basename: string;
         /** Child nodes */
         children: PathTreeNode<PP, NN>[];
         /** Original nodes at this exact path (files or folders that have a record) */
@@ -132,7 +132,7 @@ export async function pathTree<Node, Path extends string = string>(
             if (af !== bf) return af ? -1 : 1;
         }
         // name, then path
-        const n = a.name.localeCompare(b.name);
+        const n = a.basename.localeCompare(b.basename);
         return n || a.path.localeCompare(b.path);
     }
 
@@ -161,7 +161,7 @@ export async function pathTree<Node, Path extends string = string>(
     function mkNode(payload: P, virtual?: true): PathTreeNode<P, N> {
         return {
             path: payload,
-            name: basename(payload),
+            basename: basename(payload),
             children: [],
             ...(virtual ? { virtual: true as const } : null),
         };
@@ -186,16 +186,17 @@ export async function pathTree<Node, Path extends string = string>(
     // -----------------------------
     // Ingest nodes (async/sync)
     // -----------------------------
-    const it = (nodes as AsyncIterable<N>)[Symbol.asyncIterator]
-        ? (nodes as AsyncIterable<N>)
-        : (async function* () {
-            for (const x of nodes as Iterable<N>) yield x;
-        })();
+    const payloads =
+        (payloadsSupplier as AsyncIterable<N>)[Symbol.asyncIterator]
+            ? (payloadsSupplier as AsyncIterable<N>)
+            : (async function* () {
+                for (const x of payloadsSupplier as Iterable<N>) yield x;
+            })();
 
-    for await (const item of it) {
-        const p = normalize(options.nodePath(item) as unknown as string);
+    for await (const payload of payloads) {
+        const p = normalize(options.nodePath(payload) as unknown as string);
         const b = bucketFor(p);
-        b.items.push(item);
+        b.items.push(payload);
     }
 
     // -----------------------------
@@ -277,132 +278,11 @@ export async function pathTree<Node, Path extends string = string>(
         return (idx ? idx.path : node.path) as P;
     }
 
-    // Compute the *breadcrumb parent path* for a given path (grandparent's canonical)
-    // Returns undefined when there is no grandparent.
-    function breadcrumbParentPathOf(path: P): P | undefined {
-        const parentPath = parentMap.get(path);
-        if (!parentPath) return undefined; // no parent container → no grandparent
-
-        const grandparentPath = parentMap.get(parentPath as P);
-        if (!grandparentPath) return undefined; // no grandparent
-
-        const grandparentNode = treeByPath.get(grandparentPath as P);
-        if (!grandparentNode) return undefined; // defensive
-
-        return canonicalOf(grandparentNode);
-    }
-
-    /**
-     * ancestry(item): return breadcrumb ancestry from root → target,
-     * following the same rule as tabular.parentPath (grandparent's canonical).
-     */
-    function ancestry(item: N): PathTreeNode<P, N>[] {
-        const start = itemToNodeMap.get(item);
-        if (!start) return [];
-
-        // Walk up via breadcrumb (grandparent canonical), collecting nodes
-        const trail: PathTreeNode<P, N>[] = [];
-        let current: PathTreeNode<P, N> | undefined = start;
-
-        while (current) {
-            trail.push(current);
-
-            const nextPath = breadcrumbParentPathOf(current.path as P);
-            if (!nextPath) break;
-
-            const nextNode = treeByPath.get(nextPath);
-            if (!nextNode || nextNode === current) break; // defensive against loops
-            current = nextNode;
-        }
-
-        return trail.reverse(); // root → … → target
-    }
-
-    // -----------------------------
-    // Flatten tree into tabular form (breadcrumb-aware, Node unconstrained)
-    // -----------------------------
-    function tabular(forest: PathTreeNode<P, N>[] = roots as Any) {
-        type Row = {
-            name: string;
-            path: P;
-            breadcrumbPath: P | undefined;
-            containerIndexPath: P | null;
-            virtual?: true;
-            payload?: N;
-        };
-
-        const rows: Row[] = [];
-
-        // For any container node, prefer its index child if present; otherwise use the container path.
-        function canonicalOf(node: PathTreeNode<P, N>): P {
-            const idx = node.children.find((c) => isIndexFile(c.path));
-            return (idx ? idx.path : node.path) as P;
-        }
-
-        // walk with both parent and grandparent so we can compute breadcrumb parent easily
-        function walk(
-            node: PathTreeNode<P, N>,
-            parent: PathTreeNode<P, N> | null,
-            grandparent: PathTreeNode<P, N> | null,
-        ) {
-            // containerIndexPath: parent's canonical index path (or parent container path). null for roots.
-            const containerIndexPath: P | null = parent
-                ? (canonicalOf(parent) as P)
-                : null;
-
-            // parentPath (breadcrumb): grandparent's canonical index path (or grandparent container path). undefined if no grandparent.
-            const parentPath: P | undefined = grandparent
-                ? (canonicalOf(grandparent) as P)
-                : undefined;
-
-            if (node.payloads && node.payloads.length > 0) {
-                // one row per payload item; payload kept under `item` (not flattened)
-                for (const item of node.payloads) {
-                    rows.push({
-                        name: node.name,
-                        path: node.path,
-                        breadcrumbPath: parentPath,
-                        containerIndexPath: containerIndexPath,
-                        ...(node.virtual ? { virtual: true as const } : {}),
-                        payload: item,
-                    });
-                }
-            } else {
-                // container (virtual or explicit) with no payload
-                rows.push({
-                    name: node.name,
-                    path: node.path,
-                    breadcrumbPath: parentPath,
-                    containerIndexPath: containerIndexPath,
-                    ...(node.virtual ? { virtual: true as const } : {}),
-                });
-            }
-
-            for (const child of node.children) {
-                walk(child, node, parent);
-            }
-        }
-
-        for (const root of forest) {
-            walk(root, null, null);
-        }
-
-        // Deterministic order: folders first, then by path
-        rows.sort((a, b) => {
-            const af = isContainerPath(a.path);
-            const bf = isContainerPath(b.path);
-            if (af !== bf) return af ? -1 : 1;
-            return a.path.localeCompare(b.path);
-        });
-
-        return rows;
-    }
-
     // -----------------------------
     // Pretty printer (tree-like)
     // -----------------------------
     function toString(
-        forest: PathTreeNode<P, N>[] = roots as Any,
+        forest = roots,
         opts: { showPath?: boolean; includeCounts?: boolean } = {},
     ): string {
         const showPath = opts.showPath ?? true;
@@ -418,7 +298,9 @@ export async function pathTree<Node, Path extends string = string>(
             const count = includeCounts && node.payloads?.length
                 ? ` (${node.payloads.length})`
                 : "";
-            const label = showPath ? `${node.name} [${node.path}]` : node.name;
+            const label = showPath
+                ? `${node.basename} [${node.path}]`
+                : node.basename;
             lines.push(`${prefix}${branch}${label}${count}`);
             const nextPrefix = prefix + (isLast ? "    " : "│   ");
             node.children.forEach((child, i, arr) =>
@@ -434,14 +316,16 @@ export async function pathTree<Node, Path extends string = string>(
     // Final API
     // -----------------------------
     return {
-        tree: () => (roots as unknown) as PathTreeNode<P, N>[],
+        roots,
         normalize,
         dirname,
         basename,
         isContainerPath,
         isIndexFile,
-        ancestry,
-        tabular,
+        treeByPath,
+        parentMap,
+        itemToNodeMap,
+        canonicalOf,
         toString,
     };
 }

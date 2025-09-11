@@ -5,8 +5,10 @@ import { annotationsParser } from "../../universal/annotations.ts";
 const spryEntryAnnCommon = {
   absPath: z.string(),
   relPath: z.string(),
+  documentation: z.json().optional(),
 };
 
+export const spryResourceNature = "resource" as const;
 export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
   z.object({
     nature: z.literal("action").describe(
@@ -33,6 +35,15 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
     ...spryEntryAnnCommon,
   }),
   z.object({
+    nature: z.literal(spryResourceNature).describe(
+      "A data resource",
+    ),
+    sqlImpact: z.enum(["unknown", "json"]).describe(
+      "Specifies the type of resource.",
+    ),
+    ...spryEntryAnnCommon,
+  }),
+  z.object({
     nature: z.literal("sql").describe(
       "A SQL stored procedure, requiring `sqlImpact` to specify whether it's DQL, DML, or DDL.",
     ),
@@ -46,6 +57,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
    Possible values are:
    - 'action' for SQLPage code that executes and redirects back to a page
    - 'api' for SQLPage API endpoints
+   - 'resource' for JSON or other types of data
    - 'page' for standard SQLPage SSG pages (default)
    - 'partial' for SQLPage SSG partials, usually imported into other pages
    - 'sql' for SQL stored procedures, requiring 'sqlImpact'.`,
@@ -92,7 +104,7 @@ export const spryRouteAnnParser = annotationsParser(
   spryRouteAnnSchema,
 );
 
-export async function annotatedContent<
+export async function annotatableContent<
   Encountered extends Readonly<{
     path: string;
     relPath: string;
@@ -112,27 +124,27 @@ export async function annotatedContent<
   const content = await Deno.readTextFile(encountered.path);
 
   let isEntryAnnotated = false;
-  const entry = spryEntryAnnParser.parse(content, (obj, ensure) => {
+  const entryAnn = spryEntryAnnParser.parse(content, (obj, ensure) => {
     isEntryAnnotated = Object.hasOwn(obj, "nature");
     ensure(obj, "nature", "page");
     ensure(obj, "absPath", encountered.path);
     ensure(obj, "relPath", encountered.relPath);
     return true;
   });
-  if (options?.transformEntry && entry?.success) {
-    entry.data = await options.transformEntry(entry.data);
+  if (options?.transformEntry && entryAnn?.success) {
+    entryAnn.data = await options.transformEntry(entryAnn.data);
   }
 
   let isRouteAnnotated = false;
-  const route = spryRouteAnnParser.parse(content, (obj, ensure) => {
+  const routeAnn = spryRouteAnnParser.parse(content, (obj, ensure) => {
     if (Object.entries(obj).length === 0) return false;
     isRouteAnnotated = true;
     ensure(obj, "namespace", "_");
     ensure(obj, "path", encountered.relPath);
     return true;
   });
-  if (options?.transformRoute && isRouteAnnotated && route?.success) {
-    route.data = await options.transformRoute(route.data);
+  if (options?.transformRoute && isRouteAnnotated && routeAnn?.success) {
+    routeAnn.data = await options.transformRoute(routeAnn.data);
   }
 
   return {
@@ -140,8 +152,8 @@ export async function annotatedContent<
     encountered,
     isInRoot,
     isEntryAnnotated,
-    entry,
+    entryAnn,
     isRouteAnnotated,
-    route,
+    routeAnn,
   };
 }

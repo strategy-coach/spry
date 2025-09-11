@@ -6,13 +6,9 @@ import { cli } from "./e2ectl.ts";
 
 const { sqlpageFiles } = sqliteModels();
 
+await cli.head();
+
 console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
 await cli.emitSqlPageFiles();
 
-console.log(`\n-- execute typical "stored procedures" --`);
-console.log(
-  await Deno.readTextFile("./core/console/lib/populate-table-content.sql"),
-);
-console.log(
-  await Deno.readTextFile("./core/console/lib/populate-spry-table-info.sql"),
-);
+await cli.tail();
