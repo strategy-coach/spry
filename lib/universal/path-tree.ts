@@ -279,18 +279,262 @@ export async function pathTree<Node, Path extends string = string>(
     }
 
     // -----------------------------
-    // Pretty printer (tree-like)
+    // Final API
     // -----------------------------
-    function toString(
-        forest = roots,
+    return {
+        roots,
+        normalize,
+        dirname,
+        basename,
+        isContainerPath,
+        isIndexFile,
+        treeByPath,
+        parentMap,
+        itemToNodeMap,
+        canonicalOf,
+    };
+}
+
+// If JSON schema was provided by ZOD then there are $defs in the wrong
+// place for custom payload JSON schema. This hoists every non-root
+// $defs up to schema.$defs (root wins on key collisions) and deletes
+// the nested $defs. Also removes any non-root $schema keys.
+export function fixupZodSchemaMerges(candidate: Any) {
+    return ((s: Any) => {
+        const r = (o: Any, root: boolean) => {
+            if (o && typeof o === "object") {
+                if (!root && o.$schema) delete o.$schema;
+                if (!root && o.$defs) {
+                    s.$defs = { ...(s.$defs || {}), ...o.$defs };
+                    delete o.$defs;
+                }
+                (Array.isArray(o) ? o : Object.values(o)).forEach((v) =>
+                    r(v, false)
+                );
+            }
+        };
+        r(s, true);
+        return s;
+    })(candidate);
+}
+
+export function pathTreeNavigation<Node, Path extends string = string>(
+    forest: Awaited<ReturnType<typeof pathTree<Node, Path>>>,
+) {
+    /**
+     * Compute a breadcrumb trail for a given route payload by walking
+     * container-to-container from the item’s owning node up to the root.
+     *
+     * How it works:
+     * - Starts at the node that owns `item` and coerces it to its container path
+     *   if it’s a file (so crumbs are always folder/container nodes).
+     * - Climbs parents using `forest.parentMap`, collecting nodes until there is
+     *   no parent. Order is root → … → container that owns `item`.
+     * - Each crumb includes three link variants to support different routing styles:
+     *   - `hrefs.canonical`: the container path as-is.
+     *   - `hrefs.index`: the first index child path if present
+     *     (matches `forest.isIndexFile`, e.g. index, index.sql, index.md, index.html),
+     *     otherwise omitted.
+     *   - `hrefs.trailingSlash`: the container path with a trailing slash added
+     *     (never duplicates “//”, root stays “/”).
+     *
+     * Why container nodes:
+     * - Container nodes own `children`, files do not. Returning containers ensures
+     *   `node.children` is populated for each breadcrumb level.
+     *
+     * Usage to render breadcrumbs:
+     * - Prefer `hrefs.index` when present (link to the index page).
+     * - Otherwise choose between `hrefs.canonical` or `hrefs.trailingSlash`
+     *   depending on your router’s expectations.
+     *
+     * Edge cases:
+     * - If `item` is not found in `forest.itemToNodeMap`, returns an empty array.
+     * - Root-level breadcrumb uses “/” as both `canonical` and `trailingSlash`.
+     *
+     * Complexity: O(tree depth) for a single item.
+     *
+     * @param item The route payload whose container ancestry is used to build breadcrumbs.
+     * @returns An array of crumbs from root to the item’s owning container. Each element:
+     *   {
+     *     node: PathTreeNode;               // container-level node (has children)
+     *     hrefs: {
+     *       canonical: string;              // container path as-is
+     *       index?: string;                 // index child path if available
+     *       trailingSlash: string;          // container path with trailing slash
+     *     };
+     *   }
+     *
+     * @example
+     * // Build breadcrumb links (label = folder name, href prefers index)
+     * const crumbs = ancestors(routeItem);
+     * const links = crumbs.map(({ node, hrefs }) => ({
+     *   label: node.basename,
+     *   href: hrefs.index ?? hrefs.canonical, // or hrefs.trailingSlash for slash-terminated routing
+     * }));
+     * // Render links in UI...
+     */
+    function ancestors(item: Node) {
+        const asContainer = (p: string) =>
+            (forest.isContainerPath(p) ? p : forest.dirname(p)) as Path;
+        const withSlash = (p: string) =>
+            (p === "/" || p.endsWith("/")) ? p : `${p}/`;
+
+        const start = forest.itemToNodeMap.get(item);
+        if (!start) return [];
+
+        const crumbs: Array<{
+            node: (typeof forest)["roots"][number];
+            hrefs: { canonical: string; index?: string; trailingSlash: string };
+        }> = [];
+
+        let curPath: Path | undefined = asContainer(start.path);
+
+        while (curPath) {
+            const curNode = forest.treeByPath.get(curPath) as
+                | (typeof forest)["roots"][number]
+                | undefined;
+            if (!curNode) break;
+
+            // pick any configured index child if present
+            const idxChild = curNode.children.find((c) =>
+                forest.isIndexFile(c.path)
+            );
+
+            crumbs.push({
+                node: curNode,
+                hrefs: {
+                    canonical: curNode.path, // as-is container path
+                    index: idxChild?.path, // index file path (if available)
+                    trailingSlash: withSlash(curNode.path), // container path with trailing slash
+                },
+            });
+
+            const parentContainerPath = (forest.parentMap.get(curPath) as
+                | string
+                | null
+                | undefined) as Path;
+            if (!parentContainerPath) break;
+            curPath = parentContainerPath;
+        }
+
+        return crumbs.reverse();
+    }
+
+    /**
+     * Emit a JSON Schema (Draft 2020-12) describing the structure returned by `ancestors(...)`.
+     *
+     * By default the schema represents an array of crumbs:
+     *   [ { node, hrefs }, ... ]
+     *
+     * If `options.outerIsMap === true`, the outer container is an object whose values
+     * are arrays of crumbs, e.g.:
+     *   {
+     *     "/docs/page": [ { node, hrefs }, ... ],
+     *     "/about":     [ { node, hrefs }, ... ]
+     *   }
+     *
+     * Options:
+     *  - includePayloads?: boolean       Include `payloads` in the node schema (default false)
+     *  - payloadItemSchema?: unknown     JSON Schema for each payload item when included (default {})
+     *  - title?: string                  Optional schema title
+     *  - outerIsMap?: boolean            If true, outer schema is an object mapping to arrays of crumbs
+     */
+    function ancestorsJsonSchema(options?: {
+        includePayloads?: boolean;
+        payloadItemSchema?: unknown;
+        title?: string;
+        outerIsMap?: boolean;
+    }): Record<string, unknown> {
+        const includePayloads = options?.includePayloads ?? false;
+        const payloadItemSchema = options?.payloadItemSchema ?? {};
+        const title = options?.title ??
+            (options?.outerIsMap
+                    ? "PathTree Breadcrumbs Map"
+                    : "PathTree Breadcrumbs") +
+                ` (TODO: review this JSON Schema, it's actually broken and not working)`;
+
+        // Recursive TreeNode schema (container-level node)
+        const treeNodeSchema: Any = {
+            $id: "#/$defs/TreeNode",
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                path: { type: "string" },
+                basename: { type: "string" },
+                virtual: { const: true },
+                children: {
+                    type: "array",
+                    items: { $ref: "#/$defs/TreeNode" },
+                },
+            },
+            required: ["path", "basename", "children"],
+        };
+
+        if (includePayloads) {
+            treeNodeSchema.properties.payloads = {
+                type: "array",
+                items: payloadItemSchema,
+            };
+        }
+
+        const crumbSchema = {
+            $id: "#/$defs/Crumb",
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                node: { $ref: "#/$defs/TreeNode" },
+                hrefs: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        canonical: { type: "string" },
+                        index: { type: "string" },
+                        trailingSlash: { type: "string" },
+                    },
+                    required: ["canonical", "trailingSlash"],
+                },
+            },
+            required: ["node", "hrefs"],
+        };
+
+        // Choose outer container: array of crumbs vs. map<string, array of crumbs>
+        const root = options?.outerIsMap
+            ? {
+                $schema: "https://json-schema.org/draft/2020-12/schema",
+                title,
+                type: "object",
+                additionalProperties: {
+                    type: "array",
+                    items: { $ref: "#/$defs/Crumb" },
+                },
+                $defs: { TreeNode: treeNodeSchema, Crumb: crumbSchema },
+            }
+            : {
+                $schema: "https://json-schema.org/draft/2020-12/schema",
+                title,
+                type: "array",
+                items: { $ref: "#/$defs/Crumb" },
+                $defs: { TreeNode: treeNodeSchema, Crumb: crumbSchema },
+            };
+
+        return fixupZodSchemaMerges(root);
+    }
+
+    return { ancestors, ancestorsJsonSchema };
+}
+
+export function pathTreeSerializers<Node, Path extends string = string>(
+    forest: Awaited<ReturnType<typeof pathTree<Node, Path>>>,
+) {
+    function asciiTreeText(
         opts: { showPath?: boolean; includeCounts?: boolean } = {},
-    ): string {
+    ) {
         const showPath = opts.showPath ?? true;
         const includeCounts = opts.includeCounts ?? false;
 
         const lines: string[] = [];
         const render = (
-            node: PathTreeNode<P, N>,
+            node: (typeof forest.roots)[number],
             prefix: string,
             isLast: boolean,
         ) => {
@@ -308,24 +552,137 @@ export async function pathTree<Node, Path extends string = string>(
             );
         };
 
-        forest.forEach((r, i) => render(r, "", i === forest.length - 1));
+        forest.roots.forEach((r, i) =>
+            render(r, "", i === forest.roots.length - 1)
+        );
         return lines.join("\n");
     }
 
-    // -----------------------------
-    // Final API
-    // -----------------------------
-    return {
-        roots,
-        normalize,
-        dirname,
-        basename,
-        isContainerPath,
-        isIndexFile,
-        treeByPath,
-        parentMap,
-        itemToNodeMap,
-        canonicalOf,
-        toString,
-    };
+    /**
+     * Serialize the full forest or a subtree to JSON text.
+     *
+     * options:
+     *  - path?: Path                   -> if provided, returns that subtree (or null if not found)
+     *  - space?: number | string       -> pretty-print spacing
+     *  - includePayloads?: boolean     -> include payload arrays (default true)
+     *  - payloadMapper?: (p: Node) => unknown
+     *       Per-item transform; applied to each payload if provided.
+     *  - payloadsSerializer?: (arr: Node[]) => unknown
+     *       Whole-array transform; takes precedence over payloadMapper if both are set.
+     */
+    function jsonText(options?: {
+        path?: Path;
+        space?: number | string;
+        includePayloads?: boolean;
+        payloadMapper?: (p: Node) => unknown;
+        payloadsSerializer?: (arr: Node[]) => unknown;
+    }) {
+        const includePayloads = options?.includePayloads ?? true;
+
+        const serializePayloads = (arr?: Node[]) => {
+            if (!includePayloads || !arr) return undefined;
+            if (options?.payloadsSerializer) {
+                return options.payloadsSerializer(arr);
+            }
+            if (options?.payloadMapper) {
+                return arr.map(options.payloadMapper);
+            }
+            return arr; // default: raw payloads (JSON does the rest)
+        };
+
+        const toJson = (n: {
+            path: Path;
+            basename: string;
+            virtual?: true;
+            children: Any[];
+            payloads?: Node[];
+        }): Any => ({
+            path: n.path,
+            basename: n.basename,
+            ...(n.virtual ? { virtual: true as const } : null),
+            ...(serializePayloads(n.payloads) !== undefined
+                ? { payloads: serializePayloads(n.payloads) }
+                : null),
+            children: (n.children as typeof n[]).map(toJson),
+        });
+
+        if (options?.path) {
+            const key = forest.normalize(
+                options.path as unknown as string,
+            ) as Path;
+            const node = forest.treeByPath.get(key);
+            return JSON.stringify(
+                node ? toJson(node as Any) : null,
+                null,
+                options?.space,
+            );
+        }
+
+        const rootsJson = (forest.roots as Any[]).map((r) => toJson(r));
+        return JSON.stringify(rootsJson, null, options?.space);
+    }
+
+    /**
+     * Emit a JSON Schema (Draft 2020-12) describing the structure produced by jsonText().
+     *
+     * options:
+     *  - path?: Path                    -> schema for a single subtree (object|null) instead of array
+     *  - includePayloads?: boolean      -> whether "payloads" appears (default true)
+     *  - payloadItemSchema?: unknown    -> JSON Schema for each payload item (default: {})
+     *  - title?: string                 -> optional schema title
+     */
+    function jsonSchemaText(options?: {
+        path?: Path;
+        includePayloads?: boolean;
+        payloadItemSchema?: unknown;
+        title?: string;
+    }): string {
+        const includePayloads = options?.includePayloads ?? true;
+        const payloadItemSchema = options?.payloadItemSchema ?? {};
+
+        const treeNodeSchema: Any = {
+            $id: "#/$defs/TreeNode",
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                path: { type: "string" },
+                basename: { type: "string" },
+                virtual: { const: true },
+                children: {
+                    type: "array",
+                    items: { $ref: "#/$defs/TreeNode" },
+                },
+            },
+            required: ["path", "basename", "children"],
+        };
+
+        if (includePayloads) {
+            treeNodeSchema.properties.payloads = {
+                type: "array",
+                items: payloadItemSchema, // caller can describe payloads precisely
+            };
+        }
+
+        const rootSchema = options?.path
+            ? {
+                $schema: "https://json-schema.org/draft/2020-12/schema",
+                title: options?.title ?? "PathTree Subtree",
+                type: ["object", "null"],
+                oneOf: [{ $ref: "#/$defs/TreeNode" }, { type: "null" }],
+                $defs: { TreeNode: treeNodeSchema },
+            }
+            : {
+                $schema: "https://json-schema.org/draft/2020-12/schema",
+                title: options?.title ?? "PathTree Forest",
+                type: "array",
+                items: { $ref: "#/$defs/TreeNode" },
+                $defs: { TreeNode: treeNodeSchema },
+            };
+
+        const canonicalSchema = fixupZodSchemaMerges(rootSchema);
+
+        return JSON.stringify(canonicalSchema, null, 2);
+    }
+
+    return { asciiTreeText, jsonText, jsonSchemaText };
 }

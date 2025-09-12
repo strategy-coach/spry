@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS "sqlpage_files" (
   "elaboration" TEXT CHECK (json_valid("elaboration") OR NULL)
 );
 
--- should match `contents.ts` SpryRouteAnnotation shape
+-- should match `contents.ts` SpryRouteAnnotation shape;
+-- if the same path should be able to arrive from multiple routes then
+-- create a common partial liked `partial-content.sql` and then two or
+-- more separate *.sql files with different routes that `include` 
+-- `partial-content.sql`. 
 DROP VIEW IF EXISTS "spry_route";
 CREATE VIEW "spry_route" AS
 SELECT
@@ -105,24 +109,68 @@ CREATE INDEX IF NOT EXISTS idx_spry_route_path
 -- Flattened breadcrumbs, joined to per-route metadata
 DROP VIEW IF EXISTS spry_route_crumb;
 CREATE VIEW spry_route_crumb AS
+WITH files AS (
+  SELECT
+    f.path         AS src_path,
+    f.last_modified AS src_last_modified,
+    f.contents
+  FROM sqlpage_files AS f
+  WHERE f.path GLOB 'spry/lib/route/breadcrumbs.d/*.json'
+    AND json_valid(f.contents)
+),
+raw AS (
+  SELECT
+    src_path,
+    src_last_modified,
+    b.key                    AS active_path,     -- top-level map key
+    CAST(c.key AS INTEGER)   AS crumb_index,     -- index within breadcrumb array
+    c.value                  AS crumb            -- the { node, hrefs } object
+  FROM files,
+       json_each(contents) AS b,                 -- iterate map: active_path -> array
+       json_each(b.value)  AS c                  -- iterate array elements
+),
+link AS (
+  SELECT
+    src_path,
+    src_last_modified,
+    active_path,
+    crumb_index,
+    CASE
+      WHEN json_type(crumb, '$.hrefs.index') = 'text'
+        THEN crumb ->> '$.hrefs.index'
+      WHEN json_type(crumb, '$.node.payloads[0].path') = 'text'
+        THEN crumb ->> '$.node.payloads[0].path'
+      WHEN json_type(crumb, '$.hrefs.canonical') = 'text'
+           AND (substr(crumb ->> '$.hrefs.canonical', -1) = '/' OR instr(crumb ->> '$.hrefs.canonical', '.') = 0)
+        THEN (crumb ->> '$.hrefs.canonical') || 'index.sql'
+      ELSE crumb ->> '$.hrefs.canonical'
+    END AS join_path
+  FROM raw
+),
+-- If multiple files provide the same crumb, prefer the most recently modified
+ranked AS (
+  SELECT
+    active_path,
+    crumb_index,
+    join_path,
+    src_path,
+    src_last_modified,
+    ROW_NUMBER() OVER (
+      PARTITION BY active_path, crumb_index, join_path
+      ORDER BY src_last_modified DESC, src_path DESC
+    ) AS rn
+  FROM link
+)
 SELECT
-  -- the path of the active/linked page inside each breadcrumb payload
-  p.value ->> '$.path'        AS active_path,
-  -- index within the breadcrumbs array for a given page
-  CAST(c.key AS INTEGER)      AS crumb_index,
-  -- bring every column from spry_route for that active path
+  r.active_path,
+  r.crumb_index,
+  r.src_path       AS breadcrumbs_source_path,
+  r.src_last_modified AS breadcrumbs_source_last_modified,
   s.*
-FROM sqlpage_files AS f,
-     json_each(f.contents, '$.breadcrumbs') AS b,   -- each page -> breadcrumbs array
-     json_each(b.value)                     AS c,   -- each breadcrumb in the array
-     json_each(c.value, '$.payloads')       AS p    -- each payload in breadcrumb.payloads
+FROM ranked AS r
 JOIN spry_route AS s
-  ON s."path" = (p.value ->> '$.path')
-WHERE f.path = 'spry/lib/routes.auto.json';
-
-CREATE INDEX IF NOT EXISTS idx_spry_route_crumbs
-  ON sqlpage_files (json_extract(contents, '$.breadcrumbs'))
-  WHERE path = 'spry/lib/routes.auto.json';
+  ON s."path" = r.join_path
+WHERE r.rn = 1;
 
 -- Here’s a single view, **`spry_route_child`**, that lists every child route for every parent in your `contents` JSON. It includes:
 
@@ -134,50 +182,68 @@ CREATE INDEX IF NOT EXISTS idx_spry_route_crumbs
 -- This view scans the canonical routes JSON row at `sqlpage_files.path = 'spry/lib/routes.auto.json'`. Adjust that path if your file is elsewhere.
 
 DROP VIEW IF EXISTS spry_route_child;
+
 CREATE VIEW spry_route_child AS
 WITH
--- 0) Pick the routes JSON safely (adjust the path if needed)
-routes_doc AS (
-  SELECT f.contents
+-- All valid forest files: each file is a top-level array of roots
+files AS (
+  SELECT
+    f.path          AS src_path,
+    f.last_modified AS src_last_modified,
+    f.contents
   FROM sqlpage_files AS f
-  WHERE f.path = 'spry/lib/routes.auto.json'
+  WHERE f.path GLOB 'spry/lib/route/forests.d/*.json'
     AND json_valid(f.contents)
-    AND json_type(f.contents, '$.roots') = 'array'
 ),
--- 1) Roots from the validated document
+
+-- Each array element is a root node
 roots AS (
-  SELECT r.value AS node
-  FROM routes_doc d,
-       json_each(d.contents, '$.roots') AS r
+  SELECT
+    src_path,
+    src_last_modified,
+    r.value AS node
+  FROM files,
+       json_each(contents) AS r
 ),
--- 2) Flatten the whole tree
-all_nodes AS (
-  SELECT node FROM roots
+
+-- Flatten trees via children
+all_nodes(src_path, src_last_modified, node) AS (
+  SELECT src_path, src_last_modified, node
+  FROM roots
   UNION ALL
-  SELECT c.value
-  FROM all_nodes a,
-       json_each(a.node, '$.children') AS c
+  SELECT an.src_path, an.src_last_modified, c.value
+  FROM all_nodes AS an,
+       json_each(an.node, '$.children') AS c
 ),
--- 3) Parent → direct child pairs
+
+-- Parent → direct child pairs
 parent_child AS (
-  SELECT a.node AS parent, c.value AS child
-  FROM all_nodes a,
-       json_each(a.node, '$.children') AS c
+  SELECT
+    an.src_path,
+    an.src_last_modified,
+    an.node AS parent,
+    c.value AS child
+  FROM all_nodes AS an,
+       json_each(an.node, '$.children') AS c
 ),
--- 4) Expand each child to its payloads (only children that actually have payloads)
+
+-- Only children that actually have payloads
 child_payloads AS (
   SELECT
+    pc.src_path,
+    pc.src_last_modified,
     pc.parent,
     pc.child,
     p.value AS payload
   FROM parent_child AS pc,
        json_each(pc.child, '$.payloads') AS p
 )
+
 SELECT
   -- parent path
   pc.parent ->> '$.path' AS parent_path,
 
-  -- parent_path_ts: trailing-slash form
+  -- trailing-slash form
   CASE
     WHEN (pc.parent ->> '$.path') LIKE '%/' THEN pc.parent ->> '$.path'
     WHEN lower(pc.parent ->> '$.path') LIKE '%/index.sql'
@@ -191,24 +257,33 @@ SELECT
     ELSE (pc.parent ->> '$.path') || '/'
   END AS parent_path_ts,
 
-  -- parent_path_index: index.sql form
+  -- index.sql form
   CASE
     WHEN (pc.parent ->> '$.path') LIKE '%/'    THEN (pc.parent ->> '$.path') || 'index.sql'
     WHEN (pc.parent ->> '$.path') LIKE '%.sql' THEN (pc.parent ->> '$.path')
     ELSE (pc.parent ->> '$.path') || '/index.sql'
   END AS parent_path_index,
 
-  -- child route details
+  -- provenance
+  pc.src_path          AS forest_source_path,
+  pc.src_last_modified AS forest_source_last_modified,
+
+  -- child route details (payload path)
   sr.*
-FROM child_payloads cp
-JOIN parent_child pc
-  ON pc.parent = cp.parent AND pc.child = cp.child
+FROM child_payloads AS cp
+JOIN parent_child  AS pc
+  ON pc.src_path = cp.src_path
+ AND pc.parent   = cp.parent
+ AND pc.child    = cp.child
 LEFT JOIN spry_route AS sr
   ON sr."path" = (cp.payload ->> '$.path')
 ORDER BY parent_path, sr."path";
 
--- Fast access to the routes document (partial index)
-CREATE INDEX IF NOT EXISTS idx_routes_roots
-  ON sqlpage_files (json_extract(contents, '$.roots'))
-  WHERE path = 'spry/lib/routes.auto.json' AND json_valid(contents);
+CREATE INDEX IF NOT EXISTS idx_route_forests_dir
+  ON sqlpage_files (path)
+  WHERE path GLOB 'spry/lib/route/forests.d/*.json';
+
+CREATE INDEX IF NOT EXISTS idx_route_forests_json
+  ON sqlpage_files (json_extract(contents))
+  WHERE path GLOB 'spry/lib/route/forests.d/*.json';
 

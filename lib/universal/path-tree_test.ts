@@ -5,7 +5,7 @@ import {
     assertMatch,
     assertStringIncludes,
 } from "jsr:@std/assert@1";
-import { pathTree } from "./path-tree.ts";
+import { pathTree, pathTreeSerializers } from "./path-tree.ts";
 
 type Node = { path: string; caption: string };
 
@@ -192,7 +192,8 @@ Deno.test("buildPathTree — complex forest", async (t) => {
     await t.step(
         "pretty-printed tree (selected lines present, order sanity)",
         () => {
-            const printed = builder.toString(tree, { showPath: true });
+            const serializers = pathTreeSerializers(builder);
+            const printed = serializers.asciiTreeText({ showPath: true });
 
             // Top-level roots: container then file
             const firstLine = printed.split("\n")[0];

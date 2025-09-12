@@ -24,6 +24,13 @@ deno install
 
 WIP
 
+- [ ] Create `lib/route/mod.auto.sql` which is a partial that is included in
+      SQLPage for constants
+- [ ] Build a FUSE layer for browsing sqlpage_files and any RSSD
+- [ ] Find out why `children` are missing
+- [ ] Generate Zod schemas for routes.auto.json
+- [ ] Generate JSON Schema for all generated JSON (annotations from Zod, routes,
+      etc.)
 - [ ] Explain working with SQLPage "live reload" (symlink `std` to CWD/`spry`
       and start sqlpage); use watchexec
 - [ ] Add `lint` CLI command to check if `page` types have typical includes

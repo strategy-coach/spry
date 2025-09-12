@@ -9,11 +9,16 @@ import { eq } from "npm:drizzle-orm@0.44.5";
 import Table from "npm:cli-table3@0.6.5";
 import { inlinedSQL } from "../../universal/sql-text.ts";
 import { Encountered, WalkRoot, walkRoots } from "../../universal/walk-fs.ts";
-import { pathTree } from "../../universal/path-tree.ts";
+import {
+  pathTree,
+  pathTreeNavigation,
+  pathTreeSerializers,
+} from "../../universal/path-tree.ts";
 import {
   annotatableContent,
   spryResourceNature,
   SpryRouteAnnotation,
+  spryRouteAnnSchema,
 } from "./content.ts";
 import { relative } from "node:path";
 
@@ -21,7 +26,10 @@ export function CLI(
   prefs: Omit<Parameters<typeof walkRoots>[0], "ctx"> & {
     readonly sqlpageFilesPath?: (path: string) => string;
     readonly sqlpageRoutePath?: (path: string) => string;
-    readonly routesAutoJsonPath?: string;
+    readonly routesAutoJsonPath?: (
+      basename: string,
+      dirname?: string,
+    ) => string;
     readonly head?: {
       sources: AsyncIterable<WalkRoot> | Iterable<WalkRoot>;
       emitContent: (src: Readonly<Encountered>) => string | Promise<string>;
@@ -36,7 +44,10 @@ export function CLI(
   const {
     sqlpageFilesPath = (path) => path,
     sqlpageRoutePath = (path) => `/${sqlpageFilesPath(path)}`,
-    routesAutoJsonPath = "spry/lib/routes.auto.json",
+    routesAutoJsonPath = (basename: string, dirname?: string) =>
+      `${dirname ?? "spry/lib/route"}/${
+        basename.indexOf(".") >= 0 ? basename : `${basename}.auto.json`
+      }`,
   } = prefs;
   const walkContext = <Context>(ctx?: Context) => ({
     ...prefs,
@@ -136,110 +147,70 @@ export function CLI(
     });
 
     const tree = forest.roots;
-    type PathTreeNode = (typeof tree)[number];
+    const nav = pathTreeNavigation(forest);
+    const serializers = {
+      ...pathTreeSerializers(forest),
+      crumbsJsonSchemaText: () =>
+        JSON.stringify(
+          nav.ancestorsJsonSchema({
+            outerIsMap: true,
+            payloadItemSchema: z.toJSONSchema(spryRouteAnnSchema),
+          }),
+          null,
+          2,
+        ),
+    };
 
-    function nodeCrumbs(item: SpryRouteAnnotation): PathTreeNode[] {
-      // Compute the *breadcrumb parent path* for a given path (grandparent's canonical)
-      // Returns undefined when there is no grandparent.
-      function breadcrumbParentPathOf(path: string) {
-        const parentPath = forest.parentMap.get(path);
-        if (!parentPath) return undefined; // no parent container → no grandparent
-
-        const grandparentPath = forest.parentMap.get(parentPath);
-        if (!grandparentPath) return undefined; // no grandparent
-
-        const grandparentNode = forest.treeByPath.get(grandparentPath);
-        if (!grandparentNode) return undefined; // defensive
-
-        return forest.canonicalOf(grandparentNode);
-      }
-
-      const start = forest.itemToNodeMap.get(item);
-      if (!start) return [];
-
-      // Walk up via breadcrumb (grandparent canonical), collecting nodes
-      const trail: PathTreeNode[] = [];
-      let current: PathTreeNode | undefined = start;
-
-      while (current) {
-        trail.push(current);
-
-        const nextPath = breadcrumbParentPathOf(current.path);
-        if (!nextPath) break;
-
-        const nextNode = forest.treeByPath.get(nextPath);
-        if (!nextNode || nextNode === current) break; // defensive against loops
-        current = nextNode;
-      }
-
-      return trail.reverse(); // root → … → target
-    }
-
-    const breadcrumbs: Record<string, ReturnType<typeof nodeCrumbs>> = {};
+    const breadcrumbs: Record<string, ReturnType<typeof nav.ancestors>> = {};
     for (const node of forest.treeByPath.values()) {
       if (node.payloads) {
         for (const p of node.payloads) {
-          breadcrumbs[p.path] = nodeCrumbs(p);
+          breadcrumbs[p.path] = nav.ancestors(p);
         }
       }
     }
 
-    return { forest, tree, nodeCrumbs, breadcrumbs };
+    return { forest, tree, breadcrumbs, serializers };
   }
 
   async function routes(opts?: { json?: boolean }) {
-    const { forest, tree, breadcrumbs } = await routesTree();
+    const { serializers } = await routesTree();
 
     if (opts?.json) {
-      console.log(
-        JSON.stringify({ roots: forest.roots, breadcrumbs }, null, "  "),
-      );
+      console.log(serializers.jsonText({ space: 2 }));
     } else {
       console.log(
-        forest.toString(tree, { showPath: true, includeCounts: true }),
+        serializers.asciiTreeText({ showPath: true, includeCounts: true }),
       );
     }
   }
 
-  async function crumbs() {
+  async function crumbs(opts: { json?: boolean }) {
     const { breadcrumbs } = await routesTree();
+
+    if (opts.json) {
+      console.dir(breadcrumbs);
+      return;
+    }
 
     const table = new Table({ head: ["Path", "Breadcrumbs"] });
     for (const [path, node] of Object.entries(breadcrumbs)) {
       table.push([
         path,
-        node.map((bc) => bc.path).join("\n"),
+        node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash).join("\n"),
       ]);
     }
     console.log(table.toString());
   }
 
-  function emitSqlPageFile(
-    insert: typeof sqlpageFilesTable.$inferInsert,
-    db: ReturnType<typeof drizzle>,
-  ) {
-    console.log(
-      inlinedSQL(
-        db.delete(sqlpageFilesTable).where(
-          eq(sqlpageFilesTable.path, insert.path),
-        ).toSQL(),
-      ),
-    );
-    console.log(
-      inlinedSQL(db.insert(sqlpageFilesTable).values(insert).toSQL()),
-    );
-  }
-
-  async function emitSqlPageFiles() {
-    // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
-    const db = drizzle({ connection: { url: ":memory:" } });
-    const { forest, breadcrumbs } = await routesTree();
+  async function* prepareSqlPageFiles() {
+    const walked: typeof sqlpageFilesTable.$inferInsert[] = [];
     await walkRoots(
       walkContext(),
       async (_, enc) => {
         const canonicalPath = sqlpageFilesPath(enc.relPath);
         const ac = await annotatableContent(enc, { transformRoute });
-        emitSqlPageFile({
+        walked.push({
           path: canonicalPath,
           contents: ac.content,
           nature: ac.entryAnn?.success ? ac.entryAnn.data.nature : "page",
@@ -261,28 +232,61 @@ export function CLI(
             null,
             "  ",
           ),
-        }, db);
+        });
       },
     );
 
-    emitSqlPageFile({
-      path: routesAutoJsonPath,
-      contents: JSON.stringify(
-        { roots: forest.roots, paths: forest.treeByPath, breadcrumbs },
-        (_, value) => {
-          if (value instanceof Map) {
-            return Array.from(value.entries()).reduce((obj, [key, val]) => {
-              // deno-lint-ignore no-explicit-any
-              ((obj as any)[key]) = val;
-              return obj;
-            }, {});
-          }
-          return value;
-        },
-        "  ",
-      ),
+    for (const w of walked) {
+      yield w;
+    }
+
+    const { serializers, breadcrumbs } = await routesTree();
+
+    yield {
+      path: routesAutoJsonPath("spry", "spry/lib/route/forests.d"),
+      contents: serializers.jsonText({ space: 2 }),
       nature: spryResourceNature,
-    }, db);
+    };
+
+    yield {
+      path: routesAutoJsonPath("forests.schema.json", "spry/lib/governance"),
+      contents: serializers.jsonSchemaText({
+        payloadItemSchema: z.toJSONSchema(spryRouteAnnSchema),
+      }),
+      nature: spryResourceNature,
+    };
+
+    yield {
+      path: routesAutoJsonPath("spry", "spry/lib/route/breadcrumbs.d"),
+      contents: JSON.stringify(breadcrumbs, null, 2),
+      nature: spryResourceNature,
+    };
+
+    yield {
+      path: routesAutoJsonPath(
+        "breadcrumbs.schema.json",
+        "spry/lib/governance",
+      ),
+      contents: serializers.crumbsJsonSchemaText(),
+      nature: spryResourceNature,
+    };
+  }
+
+  async function emitSqlPageFiles() {
+    // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
+    const db = drizzle({ connection: { url: ":memory:" } });
+    for await (const spf of prepareSqlPageFiles()) {
+      console.log(
+        inlinedSQL(
+          db.delete(sqlpageFilesTable).where(
+            eq(sqlpageFilesTable.path, spf.path),
+          ).toSQL(),
+        ),
+      );
+      console.log(
+        inlinedSQL(db.insert(sqlpageFilesTable).values(spf).toSQL()),
+      );
+    }
   }
 
   const command = new Command()
@@ -330,6 +334,7 @@ export function CLI(
             .description(
               "List SQLPage .sql files that include route annotations and their breadcrumbs.",
             )
+            .option("-j, --json", "dump the entire breadcrumbs object as JSON")
             .action(crumbs),
         ),
     )
