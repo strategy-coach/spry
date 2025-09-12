@@ -1,4 +1,4 @@
-import { dirname } from "jsr:@std/path@1";
+import { basename, dirname, extname } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@^4.1.5";
 import { annotationsParser } from "../../universal/annotations.ts";
 
@@ -66,6 +66,21 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
 export const spryRouteAnnSchema = z.object({
   path: z.string().describe(
     "Logical route path; the primary key within a namespace.",
+  ),
+  pathBasename: z.string().optional().describe(
+    "The path's basename without any directory path (usually computed by default from path)",
+  ),
+  pathBasenameNoExtn: z.string().optional().describe(
+    "The path's basename without any directory path or extension (usually computed by default from path)",
+  ),
+  pathDirname: z.string().optional().describe(
+    "The path's dirname without any name (usually computed by default from path)",
+  ),
+  pathExtnTerminal: z.string().optional().describe(
+    "The path's terminal (last) extension (like .sql, usually computed by default from path)",
+  ),
+  pathExtns: z.string().optional().describe(
+    "The path's full set of extensions if there multiple (like .sql.ts, usually computed by default from path)",
   ),
   caption: z.string().describe(
     "Human-friendly general-purpose name for display.",
@@ -136,7 +151,19 @@ export async function annotatableContent<
   const routeAnn = spryRouteAnnParser.parse(content, (obj, ensure) => {
     if (Object.entries(obj).length === 0) return false;
     isRouteAnnotated = true;
+    const pathBasename = basename(encountered.relPath);
     ensure(obj, "path", encountered.relPath);
+    ensure(obj, "pathBasename", pathBasename);
+    ensure(obj, "pathBasenameNoExtn", pathBasename.split(".")[0]);
+    ensure(obj, "pathDirname", dirname(encountered.relPath));
+    ensure(obj, "pathExtnTerminal", extname(pathBasename));
+    ensure(
+      obj,
+      "pathExtns",
+      (pathBasename.includes(".")
+        ? pathBasename.split(".").slice(1).map((e) => "." + e)
+        : []).join(""),
+    );
     return true;
   });
   if (options?.transformRoute && isRouteAnnotated && routeAnn?.success) {

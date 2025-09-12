@@ -1,17 +1,17 @@
 -- @spry.nature sql @spry.sqlImpact dml
 
 -- Spry schema information is stored in sqlpage_files as a single-row-per-schema
--- catalog with path 'spry/lib/info-schema.json' (where 'main' is schhema).
+-- catalog with path 'spry/lib/info-schema.auto.json' (where 'main' is schhema).
 -- Stores a prettifiedJSON graph of the entire SQLite schema (tables, columns, 
 -- indexes, foreign keys, views, triggers, and derived relations). These views 
 -- project that JSON back into relational form for easy querying. Filter by 
--- schema_name in WHERE clauses (e.g., WHERE s.path = 'spry/lib/info-schema.json'). 
+-- schema_name in WHERE clauses (e.g., WHERE s.path = 'spry/lib/info-schema.auto.json'). 
 -- Requires SQLite JSON1.
 
 -- Populate with a comprehensive JSON graph of the current schema
 INSERT OR REPLACE INTO sqlpage_files (path, contents)
 VALUES (
-  'spry/lib/info-schema.json',
+  'spry/lib/info-schema.auto.json',
   json_pretty(
     json_object(
       'schema_name', 'main',
@@ -200,7 +200,7 @@ SELECT
   json_extract(t.value,'$.sql')             AS definition_sql
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables') AS t
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Table columns (one row per column per table)
 DROP VIEW IF EXISTS spry_schema_info_table_column;
@@ -218,7 +218,7 @@ SELECT
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables') AS t,
      json_each(t.value, '$.columns')           AS c
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Views (one row per view)
 DROP VIEW IF EXISTS spry_schema_info_view;
@@ -230,7 +230,7 @@ SELECT
   json_extract(v.value,'$.sql')    AS definition_sql
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.views') AS v
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- View columns (if your schema_graph_json includes a $.views[*].columns array)
 DROP VIEW IF EXISTS spry_schema_info_view_column;
@@ -246,7 +246,7 @@ SELECT
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.views') AS v
 LEFT JOIN json_each(v.value, '$.columns') AS vc ON 1=1
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Indexes (one row per index per table)
 DROP VIEW IF EXISTS spry_schema_info_index;
@@ -262,7 +262,7 @@ SELECT
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables')         AS t,
      json_each(t.value, '$.indexes')           AS i
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Index columns (one row per column per index)
 DROP VIEW IF EXISTS spry_schema_info_index_column;
@@ -281,7 +281,7 @@ FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables')          AS t,
      json_each(t.value, '$.indexes')            AS i,
      json_each(i.value, '$.columns')            AS ic
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Foreign keys (one row per referencing column)
 DROP VIEW IF EXISTS spry_schema_info_foreign_key;
@@ -300,7 +300,7 @@ SELECT
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables')     AS t,
      json_each(t.value, '$.foreign_keys')  AS fk
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Table triggers (one row per trigger per table)
 DROP VIEW IF EXISTS spry_schema_info_table_trigger;
@@ -313,7 +313,7 @@ SELECT
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.tables')  AS t,
      json_each(t.value, '$.triggers')   AS tr
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Top-level triggers (if captured under $.triggers object)
 DROP VIEW IF EXISTS spry_schema_info_trigger;
@@ -325,7 +325,7 @@ SELECT
   json_extract(trg.value,'$.sql')       AS definition_sql
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.triggers') AS trg
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';
 
 -- Relations derived in schema_graph_json (one row per relation)
 DROP VIEW IF EXISTS spry_schema_info_relation;
@@ -343,4 +343,4 @@ SELECT
   json_extract(r.value,'$.to_columns')    AS to_columns_json
 FROM sqlpage_files AS s,
      json_each(s.contents, '$.relations') AS r
-WHERE s.path = 'spry/lib/info-schema.json';
+WHERE s.path = 'spry/lib/info-schema.auto.json';

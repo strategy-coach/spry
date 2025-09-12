@@ -1,3 +1,4 @@
+import { dirname } from "jsr:@std/path@1";
 import { dim } from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@^4.1.5";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
@@ -20,6 +21,7 @@ export function CLI(
   prefs: Omit<Parameters<typeof walkRoots>[0], "ctx"> & {
     readonly sqlpageFilesPath?: (path: string) => string;
     readonly sqlpageRoutePath?: (path: string) => string;
+    readonly routesAutoJsonPath?: string;
     readonly head?: {
       sources: AsyncIterable<WalkRoot> | Iterable<WalkRoot>;
       emitContent: (src: Readonly<Encountered>) => string | Promise<string>;
@@ -30,9 +32,11 @@ export function CLI(
     };
   },
 ) {
+  const { sqlpageFiles: sqlpageFilesTable } = sqliteModels();
   const {
     sqlpageFilesPath = (path) => path,
     sqlpageRoutePath = (path) => `/${sqlpageFilesPath(path)}`,
+    routesAutoJsonPath = "spry/lib/routes.auto.json",
   } = prefs;
   const walkContext = <Context>(ctx?: Context) => ({
     ...prefs,
@@ -43,6 +47,7 @@ export function CLI(
     const result = {
       ...sra,
       path: sqlpageRoutePath(sra.path),
+      pathDirname: dirname(sqlpageRoutePath(sra.path)),
     };
     return result;
   }
@@ -50,9 +55,6 @@ export function CLI(
   async function head(opts?: { paths?: boolean }) {
     if (!prefs.head?.sources) return;
 
-    // -----------------------------
-    // Ingest init walkRoots (async/sync)
-    // -----------------------------
     const it =
       (prefs.head.sources as AsyncIterable<WalkRoot>)[Symbol.asyncIterator]
         ? (prefs.head.sources as AsyncIterable<WalkRoot>)
@@ -74,9 +76,6 @@ export function CLI(
   async function tail(opts?: { paths?: boolean }) {
     if (!prefs.tail?.sources) return;
 
-    // -----------------------------
-    // Ingest init walkRoots (async/sync)
-    // -----------------------------
     const it =
       (prefs.tail.sources as AsyncIterable<WalkRoot>)[Symbol.asyncIterator]
         ? (prefs.tail.sources as AsyncIterable<WalkRoot>)
@@ -215,77 +214,75 @@ export function CLI(
     console.log(table.toString());
   }
 
+  function emitSqlPageFile(
+    insert: typeof sqlpageFilesTable.$inferInsert,
+    db: ReturnType<typeof drizzle>,
+  ) {
+    console.log(
+      inlinedSQL(
+        db.delete(sqlpageFilesTable).where(
+          eq(sqlpageFilesTable.path, insert.path),
+        ).toSQL(),
+      ),
+    );
+    console.log(
+      inlinedSQL(db.insert(sqlpageFilesTable).values(insert).toSQL()),
+    );
+  }
+
   async function emitSqlPageFiles() {
     // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
     const db = drizzle({ connection: { url: ":memory:" } });
-    const { sqlpageFiles: spf } = sqliteModels();
     const { forest, breadcrumbs } = await routesTree();
     await walkRoots(
       walkContext(),
       async (_, enc) => {
         const canonicalPath = sqlpageFilesPath(enc.relPath);
         const ac = await annotatableContent(enc, { transformRoute });
-        console.log(
-          inlinedSQL(db.delete(spf).where(eq(spf.path, canonicalPath)).toSQL()),
-        );
-        console.log(
-          inlinedSQL(
-            db.insert(spf).values({
-              path: canonicalPath,
-              contents: ac.content,
-              nature: ac.entryAnn?.success ? ac.entryAnn.data.nature : "page",
-              annotations: JSON.stringify(
-                {
-                  isEntryAnnotated: ac.isEntryAnnotated,
-                  isRouteAnnotated: ac.isRouteAnnotated,
-                  entry: ac.entryAnn
-                    ? (ac.entryAnn.success
-                      ? ac.entryAnn.data
-                      : { error: ac.entryAnn.error })
-                    : null,
-                  route: ac.routeAnn
-                    ? (ac.routeAnn.success
-                      ? ac.routeAnn.data
-                      : { error: ac.routeAnn.error })
-                    : null,
-                },
-                null,
-                "  ",
-              ),
-            }).toSQL(),
+        emitSqlPageFile({
+          path: canonicalPath,
+          contents: ac.content,
+          nature: ac.entryAnn?.success ? ac.entryAnn.data.nature : "page",
+          annotations: JSON.stringify(
+            {
+              isEntryAnnotated: ac.isEntryAnnotated,
+              isRouteAnnotated: ac.isRouteAnnotated,
+              entry: ac.entryAnn
+                ? (ac.entryAnn.success
+                  ? ac.entryAnn.data
+                  : { error: ac.entryAnn.error })
+                : null,
+              route: ac.routeAnn
+                ? (ac.routeAnn.success
+                  ? ac.routeAnn.data
+                  : { error: ac.routeAnn.error })
+                : null,
+            },
+            null,
+            "  ",
           ),
-        );
+        }, db);
       },
     );
 
-    const routesJsonContentPath = "spry/lib/routes.json";
-    console.log(
-      inlinedSQL(
-        db.delete(spf).where(eq(spf.path, routesJsonContentPath)).toSQL(),
+    emitSqlPageFile({
+      path: routesAutoJsonPath,
+      contents: JSON.stringify(
+        { roots: forest.roots, paths: forest.treeByPath, breadcrumbs },
+        (_, value) => {
+          if (value instanceof Map) {
+            return Array.from(value.entries()).reduce((obj, [key, val]) => {
+              // deno-lint-ignore no-explicit-any
+              ((obj as any)[key]) = val;
+              return obj;
+            }, {});
+          }
+          return value;
+        },
+        "  ",
       ),
-    );
-    console.log(
-      inlinedSQL(
-        db.insert(spf).values({
-          path: routesJsonContentPath,
-          contents: JSON.stringify(
-            { roots: forest.roots, paths: forest.treeByPath, breadcrumbs },
-            (_, value) => {
-              if (value instanceof Map) {
-                return Array.from(value.entries()).reduce((obj, [key, val]) => {
-                  // deno-lint-ignore no-explicit-any
-                  ((obj as any)[key]) = val;
-                  return obj;
-                }, {});
-              }
-              return value;
-            },
-            "  ",
-          ),
-          nature: spryResourceNature,
-        }).toSQL(),
-      ),
-    );
+      nature: spryResourceNature,
+    }, db);
   }
 
   const command = new Command()
@@ -350,7 +347,7 @@ export function CLI(
           "tail",
           new Command()
             .description("Emit finalization (tail) SQL (DDL, DML).")
-            .action(async () => await head()),
+            .action(async () => await tail()),
         )
         .command(
           "sqlpage-files",
