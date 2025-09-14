@@ -1,2 +1,2 @@
-export * from "./walk-core.ts";
-export * from "./walk-fs.ts";
+export * from "./core.ts";
+export * from "./fs.ts";

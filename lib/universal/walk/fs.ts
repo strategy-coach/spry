@@ -13,7 +13,7 @@ import {
     walk as genericWalk,
     type WalkerAdapter,
     type WalkerOptions,
-} from "./walk-core.ts";
+} from "./core.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;

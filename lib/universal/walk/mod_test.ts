@@ -1,7 +1,7 @@
 // walk_test.ts
 import { assert, assertArrayIncludes, assertEquals } from "jsr:@std/assert@1";
 import { dirname, join } from "jsr:@std/path@1";
-import { createFSAdapter, type FSEncountered, walkFS } from "./walk-fs.ts";
+import { createFSAdapter, type FSEncountered, walkFS } from "./mod.ts";
 
 /** Utility: create file, ensuring parent dirs exist. */
 async function writeFile(path: string, content: string) {
