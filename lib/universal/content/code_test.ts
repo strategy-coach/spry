@@ -31,7 +31,7 @@ import {
 
 import { createFileContent } from "./fs.ts";
 import { isText } from "./core.ts";
-import { z } from "npm:zod@3";
+import { z } from "jsr:@zod/zod@^4";
 
 /* helpers */
 async function writeTempFile(suffix: string, text: string): Promise<string> {

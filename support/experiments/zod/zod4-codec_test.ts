@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert@^1.0.0/equals";
-import { z } from "npm:zod@4.1.1";
+import { z } from "jsr:@zod/zod@4";
 
 const extractorCodec = z.codec(
     z.object({
