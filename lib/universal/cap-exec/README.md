@@ -21,7 +21,7 @@ It follows the Linux philosophy:
 
 In `CECP`, files themselves are the master programs. They can be written in any
 language (SQL, TypeScript, Python, Bash, etc.) and become "capturable
-executables" ()scripts or templates that _capture_ generate *content *when
+executables" (scripts or templates that _capture_ generate *content *when
 _executed_).
 
 This makes `CECP` a polyglot content generation system. It is equally suitable
@@ -74,11 +74,11 @@ CapExec filenames declare their behavior directly:
 report.[seed validate].sql.[fmt].ts
 ```
 
-- seed: pre-stage that emits initial content (e.g., SQL fragment).
-- validate: pre-stage that checks constraints.
-- .sql: nature, the file produces SQL.
-- .ts: domain, the sink executable is a TypeScript program.
-- fmt: post-stage that formats the SQL before writing the final
+- `seed`: pre-stage that emits initial content (e.g., variables in a JSON file, SQL fragment, etc.).
+- `validate`: pre-stage that checks constraints.
+- `.sql`: nature, the file produces SQL.
+- `.ts`: domain, the sink executable is a TypeScript program.
+- `fmt`: post-stage that formats the SQL before writing the final
   `report.auto.sql`.
 
 Final output:
@@ -528,7 +528,7 @@ cectl build -r sql --context-file --context-outdir ./.capexec
 This keeps the data plane (content) clean and streamable, and the control plane
 (context) explicit and verifiable.
 
-If you want, I can also add:
+TODO, add:
 
 - a tiny cookbook (“seed/validate/fmt” stage token patterns),
 - Windows-friendly launchers (e.g., prefer `deno run`/`python` over POSIX
