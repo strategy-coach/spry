@@ -1,4 +1,9 @@
-import { assert, assertArrayIncludes, assertEquals } from "jsr:@std/assert@1";
+import {
+  assert,
+  assertArrayIncludes,
+  assertEquals,
+  assertThrows,
+} from "jsr:@std/assert@1";
 import { z } from "jsr:@zod/zod@4";
 
 import { getLanguageByIdOrAlias, openCodeFile } from "./code.ts";
@@ -257,8 +262,161 @@ export {};
   }
 });
 
+Deno.test("grouping + validation: svgAnnotations factory", async (t) => {
+  // Compact, self-contained factory used by all subtests
+  function svgAnnotations() {
+    const schema = z.object({
+      width: z.coerce.number().positive(),
+      height: z.coerce.number().positive(),
+      viewBox: z.string().regex(
+        /^\d+\s+\d+\s+\d+\s+\d+$/,
+        "must be 'minX minY width height'",
+      ),
+      ariaLabel: z.string().optional(),
+      fill: z.string().optional(),
+    });
+    type SvgMeta = z.infer<typeof schema>;
+
+    function group(
+      catalog: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
+    ) {
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const it of catalog.items) {
+        if (it.kind === "tag" && it.key?.startsWith("svg.")) {
+          const field = it.key.slice(4); // strip "svg."
+          (out.svg ??= {})[field] = it.value ?? it.raw;
+        }
+      }
+      return out;
+    }
+
+    function validate(
+      catalog: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
+    ): SvgMeta {
+      const g = group(catalog).svg;
+      if (!g) throw new Error("No svg annotations found");
+      const cleaned = Object.fromEntries(
+        Object.entries(g).map((
+          [k, v],
+        ) => [k, typeof v === "string" ? v.replace(/^"(.*)"$/, "$1") : v]),
+      );
+      return schema.parse(cleaned);
+    }
+
+    return { schema, group, validate };
+  }
+
+  const ts = getLanguageByIdOrAlias("typescript")!;
+
+  await t.step(
+    "happy path: grouped + validated with types coerced",
+    async () => {
+      const source = `
+// @svg.width  128
+// @svg.height 256
+// @svg.viewBox 0 0 128 256
+// @svg.ariaLabel "Hero logo"
+// @svg.fill #222
+`.trim();
+
+      const catalog = await extractAnnotationsFromText(source, ts, {
+        tags: { multi: true, valueMode: "json" },
+      });
+      const { group, validate } = svgAnnotations();
+
+      const grouped = group(catalog);
+      assert(grouped.svg);
+      assertEquals(grouped.svg.width, 128); // already typed via valueMode: "json"
+      assertEquals(grouped.svg.height, 256);
+      assertEquals(grouped.svg.viewBox, "0 0 128 256");
+
+      const typed = validate(catalog);
+      assertEquals(typed.width, 128);
+      assertEquals(typed.height, 256);
+      assertEquals(typed.viewBox, "0 0 128 256");
+      assertEquals(typed.ariaLabel, "Hero logo");
+      assertEquals(typed.fill, "#222");
+    },
+  );
+
+  await t.step("multiple tags on the same line", async () => {
+    const source = `// @svg.width 64 @svg.height 32 @svg.viewBox 0 0 64 32`;
+    const catalog = await extractAnnotationsFromText(source, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const { validate } = svgAnnotations();
+    const typed = validate(catalog);
+    assertEquals(typed.width, 64);
+    assertEquals(typed.height, 32);
+    assertEquals(typed.viewBox, "0 0 64 32");
+  });
+
+  await t.step(
+    "boolean tags without value are true (ignored if not in schema)",
+    async () => {
+      const source =
+        `// @svg.width 10 @svg.height 20 @svg.viewBox 0 0 10 20 @svg.focusable`;
+      const catalog = await extractAnnotationsFromText(source, ts, {
+        tags: { multi: true, valueMode: "json" },
+      });
+      const { group, validate } = svgAnnotations();
+      const grouped = group(catalog);
+      // focusable is boolean true but not in schema; Zod will strip/ignore it
+      assertEquals(grouped.svg.focusable, true);
+      const typed = validate(catalog);
+      assertEquals(typed.width, 10);
+      assertEquals(typed.height, 20);
+      assertEquals(typed.viewBox, "0 0 10 20");
+      // @ts-expect-error - not part of the schema
+      typed.focusable;
+    },
+  );
+
+  await t.step("invalid viewBox fails validation", async () => {
+    const source = `// @svg.width 100 @svg.height 200 @svg.viewBox bad-format`;
+    const catalog = await extractAnnotationsFromText(source, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const { validate } = svgAnnotations();
+    assertThrows(() => validate(catalog));
+  });
+
+  await t.step("missing group throws a friendly error", async () => {
+    const source = `// @notSvg.foo 1`;
+    const catalog = await extractAnnotationsFromText(source, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const { validate } = svgAnnotations();
+    assertThrows(() => validate(catalog));
+  });
+
+  await t.step("coercions: numbers/strings preserved as expected", async () => {
+    const source =
+      `// @svg.width "300" @svg.height 150 @svg.viewBox 0 0 300 150`;
+    const catalog = await extractAnnotationsFromText(source, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const { validate } = svgAnnotations();
+    const typed = validate(catalog);
+    assertEquals(typed.width, 300); // coerce from quoted string
+    assertEquals(typed.height, 150); // already a number
+    assertEquals(typed.viewBox, "0 0 300 150");
+  });
+
+  await t.step("quoted values containing @ shouldn't split tags", async () => {
+    const source =
+      `// @svg.width 10 @svg.height 20 @svg.viewBox 0 0 10 20 @svg.ariaLabel "dev@company.com"`;
+    const catalog = await extractAnnotationsFromText(source, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const { validate } = svgAnnotations();
+    const typed = validate(catalog);
+    assertEquals(typed.ariaLabel, "dev@company.com");
+  });
+});
+
 /* -------------------------------------------------------------------------------------------------
- * Legacy behaviors contrasted (string-only mode)
+ * String-only values mode
  * -------------------------------------------------------------------------------------------------*/
 
 Deno.test("tags: string-only mode keeps raw strings", async () => {
