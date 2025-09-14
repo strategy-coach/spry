@@ -74,7 +74,8 @@ CapExec filenames declare their behavior directly:
 report.[seed validate].sql.[fmt].ts
 ```
 
-- `seed`: pre-stage that emits initial content (e.g., variables in a JSON file, SQL fragment, etc.).
+- `seed`: pre-stage that emits initial content (e.g., variables in a JSON file,
+  SQL fragment, etc.).
 - `validate`: pre-stage that checks constraints.
 - `.sql`: nature, the file produces SQL.
 - `.ts`: domain, the sink executable is a TypeScript program.
@@ -278,9 +279,9 @@ Two patterns are common:
 import { z } from "zod";
 
 const Context = z.object({
-    appEnv: z.enum(["dev", "staging", "prod"]),
-    schema: z.string().min(1),
-    featureX: z.boolean().optional(),
+  appEnv: z.enum(["dev", "staging", "prod"]),
+  schema: z.string().min(1),
+  featureX: z.boolean().optional(),
 });
 
 const raw = Deno.env.get("CAPEXEC_CONTEXT_JSON") ?? "{}";
@@ -381,16 +382,16 @@ File: `views.sql+.ts` Intent: Emit multiple views as NDJSON.
 ```ts
 // views.sql+.ts
 console.log(
-    JSON.stringify({
-        path: "views/customer_view.sql",
-        content: "CREATE VIEW customer_view AS SELECT ...;",
-    }),
+  JSON.stringify({
+    path: "views/customer_view.sql",
+    content: "CREATE VIEW customer_view AS SELECT ...;",
+  }),
 );
 console.log(
-    JSON.stringify({
-        path: "views/order_view.sql",
-        content: "CREATE VIEW order_view AS SELECT ...;",
-    }),
+  JSON.stringify({
+    path: "views/order_view.sql",
+    content: "CREATE VIEW order_view AS SELECT ...;",
+  }),
 );
 ```
 
@@ -407,12 +408,12 @@ File: `schema.json.ts` Intent: Generate a JSON file for downstream tools.
 
 ```ts
 console.log(JSON.stringify(
-    {
-        version: "1.0.0",
-        tables: ["users", "orders", "items"],
-    },
-    null,
-    2,
+  {
+    version: "1.0.0",
+    tables: ["users", "orders", "items"],
+  },
+  null,
+  2,
 ));
 ```
 
@@ -431,10 +432,10 @@ import { z } from "jsr:@zodjs/zod@^4.0.0";
 
 // 1) Define your context contract once
 export const BuildContextSchema = z.object({
-    appEnv: z.enum(["dev", "staging", "prod"]).default("dev"),
-    schema: z.string().min(1).default("public"),
-    featureX: z.boolean().optional(),
-    flags: z.record(z.boolean()).default({}),
+  appEnv: z.enum(["dev", "staging", "prod"]).default("dev"),
+  schema: z.string().min(1).default("public"),
+  featureX: z.boolean().optional(),
+  flags: z.record(z.boolean()).default({}),
 });
 
 // 2) Convenient TypeScript type
@@ -442,8 +443,8 @@ export type BuildContext = z.infer<typeof BuildContextSchema>;
 
 // 3) Parse from CAPEXEC_CONTEXT_JSON (inline JSON env)
 export function parseContextFromEnvJSON(): BuildContext {
-    const raw = Deno.env.get("CAPEXEC_CONTEXT_JSON") ?? "{}";
-    return BuildContextSchema.parse(JSON.parse(raw));
+  const raw = Deno.env.get("CAPEXEC_CONTEXT_JSON") ?? "{}";
+  return BuildContextSchema.parse(JSON.parse(raw));
 }
 ```
 
@@ -463,18 +464,18 @@ console.log(`Using schema ${ctx.schema} in ${ctx.appEnv}`);
 import { z } from "jsr:@zodjs/zod@^4.0.0";
 
 export const BuildContextSchema = z.object({
-    appEnv: z.enum(["dev", "staging", "prod"]).default("dev"),
-    schema: z.string().min(1).default("public"),
-    featureX: z.boolean().optional(),
-    flags: z.record(z.boolean()).default({}),
+  appEnv: z.enum(["dev", "staging", "prod"]).default("dev"),
+  schema: z.string().min(1).default("public"),
+  featureX: z.boolean().optional(),
+  flags: z.record(z.boolean()).default({}),
 });
 
 export type BuildContext = z.infer<typeof BuildContextSchema>;
 
 export async function parseContextFromEnvFile(): Promise<BuildContext> {
-    const fp = Deno.env.get("CAPEXEC_CONTEXT_FILE");
-    const parsed = fp ? JSON.parse(await Deno.readTextFile(fp)) : {};
-    return BuildContextSchema.parse(parsed);
+  const fp = Deno.env.get("CAPEXEC_CONTEXT_FILE");
+  const parsed = fp ? JSON.parse(await Deno.readTextFile(fp)) : {};
+  return BuildContextSchema.parse(parsed);
 }
 ```
 

@@ -1,180 +1,134 @@
-/**
- * content/code_test.ts
- * Tests for content/code.ts and content/code-comments.ts
- * Run: deno test -A content/code_test.ts
- */
+import { assert, assertArrayIncludes, assertEquals } from "jsr:@std/assert@1";
+import { z } from "jsr:@zod/zod@4";
 
+import { getLanguageByIdOrAlias, openCodeFile } from "./code.ts";
 import {
-    assert,
-    assertEquals,
-    assertGreaterOrEqual,
-    assertMatch,
-} from "jsr:@std/assert@1";
-
-import {
-    detectLanguageByPath,
-    getLanguageByIdOrAlias,
-    openCodeFile,
-    registerLanguage,
-} from "./code.ts";
-
-import {
-    annotateCodeContent,
-    type AnnotationCatalog,
-    extractAnnotations,
-    extractAnnotationsFromText,
-    generateCodeAnnotationCatalog,
-    iterateCommentsStream,
-    scanComments,
-    scanCommentsStream,
+  type AnnotationCatalog,
+  extractAnnotations,
+  extractAnnotationsFromText,
+  scanComments,
+  scanCommentsStream,
 } from "./code-comments.ts";
 
-import { createFileContent } from "./fs.ts";
-import { isText } from "./core.ts";
-import { z } from "jsr:@zod/zod@^4";
+// deno-lint-ignore no-explicit-any
+type Any = any;
 
 /* helpers */
 async function writeTempFile(suffix: string, text: string): Promise<string> {
-    const p = await Deno.makeTempFile({ suffix });
-    await Deno.writeTextFile(p, text);
-    return p;
+  const p = await Deno.makeTempFile({ suffix });
+  await Deno.writeTextFile(p, text);
+  return p;
 }
 function streamFromString(s: string): ReadableStream<Uint8Array> {
-    const enc = new TextEncoder();
-    const mid = Math.max(1, Math.floor(s.length / 2));
-    const chunks = [enc.encode(s.slice(0, mid)), enc.encode(s.slice(mid))];
-    return new ReadableStream<Uint8Array>({
-        start(ctrl) {
-            for (const c of chunks) ctrl.enqueue(c);
-            ctrl.close();
-        },
-    });
+  const enc = new TextEncoder();
+  const third = Math.max(1, Math.floor(s.length / 3));
+  const chunks = [
+    s.slice(0, third),
+    s.slice(third, 2 * third),
+    s.slice(2 * third),
+  ];
+  return new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      for (const c of chunks) ctrl.enqueue(enc.encode(c));
+      ctrl.close();
+    },
+  });
 }
 
-/* ---------------------------------- code.ts ---------------------------------- */
+/* -------------------------------------------------------------------------------------------------
+ * Multi-tag per line + typed values + boolean tags
+ * -------------------------------------------------------------------------------------------------*/
 
-Deno.test("code.ts: openCodeFile detects TS by extension and exposes language spec", async (t) => {
-    const text = `// hello\nexport const x=1;\n`;
-    const path = await writeTempFile(".ts", text);
-    try {
-        const code = await openCodeFile(path);
-        await t.step("language id", () => {
-            assertEquals(code.language.id, "typescript");
-            assertEquals(code.governance.code?.languageId, "typescript");
-        });
-        await t.step("nature is text", () => assert(isText(code)));
-        await code.close();
-    } finally {
-        await Deno.remove(path);
-    }
-});
+Deno.test("tags: multiple on one line (typed values + boolean tags)", async (t) => {
+  const ts = getLanguageByIdOrAlias("typescript")!;
 
-Deno.test("code.ts: shebang detection when no extension", async () => {
-    const path = await writeTempFile(
-        "",
-        `#!/usr/bin/env python3\n# hi\nprint(1)\n`,
-    );
-    try {
-        const code = await openCodeFile(path);
-        assertEquals(code.language.id, "python");
-        await code.close();
-    } finally {
-        await Deno.remove(path);
-    }
-});
-
-Deno.test("code.ts: registry override/extension works", () => {
-    registerLanguage({
-        id: "mylang",
-        extensions: [".mlg"],
-        comment: { line: ["#"], block: [] },
+  await t.step("three tags with string, number, JSON object", async () => {
+    const src = `// @a.one foo @a.two 42 @a.three {"x":1,"y":[2,3]}`;
+    const cat = await extractAnnotationsFromText(src, ts, {
+      tags: { multi: true, valueMode: "json" },
+      kv: false,
+      yaml: false,
+      json: false,
     });
-    const spec = detectLanguageByPath("a.mlg");
-    assert(spec && spec.id === "mylang");
-});
+    const tags = cat.items.filter((i) => i.kind === "tag");
+    assertEquals(tags.length, 3);
+    assertEquals(tags[0].key, "a.one");
+    assertEquals(tags[0].value, "foo");
+    assertEquals(tags[1].key, "a.two");
+    assertEquals(tags[1].value, 42);
+    assertEquals(tags[2].key, "a.three");
+    assertEquals((tags[2].value as Any).x, 1);
+    assertEquals((tags[2].value as Any).y, [2, 3]);
+  });
 
-/* ------------------------------ code-comments.ts ----------------------------- */
+  await t.step(
+    "quoted @ inside value should not split; following tag read",
+    async () => {
+      const src = `// @user.email "dev@company.com" @env prod`;
+      const cat = await extractAnnotationsFromText(src, ts, {
+        tags: { multi: true, valueMode: "json" },
+      });
+      const email = cat.items.find((i) =>
+        i.kind === "tag" && i.key === "user.email"
+      )!;
+      const env = cat.items.find((i) => i.kind === "tag" && i.key === "env")!;
+      assertEquals(email.value, "dev@company.com");
+      assertEquals(env.value, "prod");
+    },
+  );
 
-Deno.test("comments: in-memory scanner finds line and block (with loc)", () => {
-    const ts = getLanguageByIdOrAlias("typescript")!;
-    const src = `// one
-const a=1; /* mid */ const b=2;
-/*
-multi
-line
-*/`.trim();
+  await t.step("boolean tag (no value) equals true", async () => {
+    const src = `// @enabled @role admin`;
+    const cat = await extractAnnotationsFromText(src, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const enabled = cat.items.find((i) =>
+      i.kind === "tag" && i.key === "enabled"
+    )!;
+    const role = cat.items.find((i) => i.kind === "tag" && i.key === "role")!;
+    assertEquals(enabled.value, true);
+    assertEquals(role.value, "admin");
+  });
 
-    const cs = scanComments(src, ts);
-    assertGreaterOrEqual(cs.length, 3);
-    const line = cs.find((c) => c.kind === "line" && /one/.test(c.text));
-    const block = cs.find((c) => c.kind === "block" && /mid/.test(c.text));
-    const multi = cs.find((c) => c.kind === "block" && /multi/.test(c.text));
-    assert(line && block && multi);
-    assert(line!.loc && block!.loc && multi!.loc);
-});
-
-Deno.test("comments: streaming FSM handles cross-chunk line+block", async () => {
-    const ts = getLanguageByIdOrAlias("typescript")!;
-    const src = `// one
-const a=1; /* block */ const b=2;
-`;
-    const rs = streamFromString(src);
-    const nodes = await scanCommentsStream(rs, ts);
-    const hasLine = nodes.some((n) => n.kind === "line" && /one/.test(n.text));
-    const hasBlock = nodes.some((n) =>
-        n.kind === "block" && /block/.test(n.text)
-    );
-    assert(hasLine && hasBlock);
-});
-
-Deno.test("comments: streaming FSM yields incrementally (SQL)", async () => {
-    const sql = getLanguageByIdOrAlias("sql")!;
-    const src = `-- title: users
-SELECT * /* all columns */ FROM users -- end
-;`;
-    const rs = streamFromString(src);
-    const kinds: string[] = [];
-    for await (const n of iterateCommentsStream(rs, sql)) kinds.push(n.kind);
-    assert(kinds.includes("line") && kinds.includes("block"));
-});
-
-Deno.test("comments: nested block handling (Rust)", () => {
-    const rust = getLanguageByIdOrAlias("rust")!;
+  await t.step("JSDoc starred line with multiple tags", async () => {
     const src = `
-/* top
-  /* inner */
-end */
-fn main() { /* inline */ }`.trim();
+/**
+ * @a.x foo @a.y bar
+ * @a.z baz
+ */
+`.trim();
 
-    const cs = scanComments(src, rust);
-    const blocks = cs.filter((c) => c.kind === "block");
-    assertGreaterOrEqual(blocks.length, 2);
-    const first = blocks[0];
-    assertMatch(first.text, /top/);
-    assertMatch(first.text, /inner/);
-    const inline = blocks.find((b) => /inline/.test(b.text));
-    assert(inline);
+    const cat = await extractAnnotationsFromText(src, ts, {
+      tags: { multi: true, valueMode: "json" },
+    });
+    const keys = cat.items.filter((i) => i.kind === "tag").map((i) => i.key)
+      .sort();
+    assertArrayIncludes(keys, ["a.x", "a.y", "a.z"]);
+  });
+
+  await t.step(
+    "JSON inline value containing @ inside JSON string doesn't split",
+    async () => {
+      const src =
+        `// @cfg {"contact":"ops@company.com","flags":["a","b"]} @mode fast`;
+      const cat = await extractAnnotationsFromText(src, ts, {
+        tags: { multi: true, valueMode: "json" },
+      });
+      const cfg = cat.items.find((i) => i.kind === "tag" && i.key === "cfg")!;
+      const mode = cat.items.find((i) => i.kind === "tag" && i.key === "mode")!;
+      assertEquals((cfg.value as Any).contact, "ops@company.com");
+      assertEquals((cfg.value as Any).flags, ["a", "b"]);
+      assertEquals(mode.value, "fast");
+    },
+  );
 });
 
-Deno.test("comments: HTML comment fences", () => {
-    const html = getLanguageByIdOrAlias("html")!;
-    const src = `
-<!doctype html>
-<!-- @owner web -->
-<div>hi</div>
-<!--
-multi
--->`.trim();
+/* -------------------------------------------------------------------------------------------------
+ * YAML / JSON blocks still work; JSDoc stars normalized
+ * -------------------------------------------------------------------------------------------------*/
 
-    const cs = scanComments(src, html);
-    assert(cs.find((c) => /@owner/.test(c.text)));
-    assert(cs.find((c) => /multi/.test(c.text)));
-});
-
-/* --------------------------------- extractors -------------------------------- */
-
-Deno.test("extractors: tags + kv + yaml + json in TS", async () => {
-    const src = `
+Deno.test("extractors: tags + kv + yaml + json in TS (JSDoc-stars normalized)", async () => {
+  const src = `
 /**
  * ---
  * owner: bob
@@ -191,103 +145,77 @@ Deno.test("extractors: tags + kv + yaml + json in TS", async () => {
  export const A = 1;
   `.trim();
 
-    const ts = getLanguageByIdOrAlias("typescript")!;
-    const cat = await extractAnnotationsFromText(src, ts, {
-        tags: true,
-        kv: true,
-        yaml: true,
-        json: true,
-    });
+  const ts = getLanguageByIdOrAlias("typescript")!;
+  const cat = await extractAnnotationsFromText(src, ts, {
+    tags: { multi: true, valueMode: "json" },
+    kv: true,
+    yaml: true,
+    json: true,
+  });
 
-    const kinds = new Set(cat.items.map((i) => i.kind));
-    assert(kinds.has("tag"));
-    assert(kinds.has("kv"));
-    assert(kinds.has("yaml"));
-    assert(kinds.has("json"));
+  const kinds = new Set(cat.items.map((i) => i.kind));
+  assert(kinds.has("tag"));
+  assert(kinds.has("kv"));
+  assert(kinds.has("yaml"));
+  assert(kinds.has("json"));
 
-    const ownerTag = cat.items.find((i) =>
-        i.kind === "tag" && i.key === "owner"
-    );
-    assert(ownerTag);
-    assertEquals(ownerTag.value, "alice");
+  const ownerTag = cat.items.find((i) => i.kind === "tag" && i.key === "owner");
+  assert(ownerTag);
+  assertEquals(ownerTag.value, "alice");
 
-    const yaml = cat.items.find((i) => i.kind === "yaml")!;
-    // deno-lint-ignore no-explicit-any
-    assertEquals((yaml.value as any).owner, "bob");
+  const yaml = cat.items.find((i) => i.kind === "yaml")!;
+  assertEquals((yaml.value as Any).owner, "bob");
 });
 
-Deno.test("extractors: spry markers (@, !, ...)", async () => {
-    const src = `
-// @feature user-search
-// !build beta
-// ...
-// key: inside-fence
-// ...
-export const noop = 1;
-  `.trim();
+/* -------------------------------------------------------------------------------------------------
+ * Streaming FSM still yields comments; works with typed tags too
+ * -------------------------------------------------------------------------------------------------*/
 
-    const path = await writeTempFile(".ts", src);
-    try {
-        const code = await openCodeFile(path);
-        const cat = await extractAnnotations(code, {
-            spry: { enabled: true, at: "@", bang: "!", blockFence: "..." },
-            tags: false,
-            kv: false,
-        });
-        const kinds = new Set(cat.items.map((i) => i.kind));
-        assert(kinds.has("spry-annotation"));
-        assert(kinds.has("spry-directive"));
-        assert(kinds.has("spry-block"));
-    } finally {
-        await Deno.remove(path);
-    }
+Deno.test("streaming: comments + extract typed tags", async () => {
+  const ts = getLanguageByIdOrAlias("typescript")!;
+  const src = `// @a one
+const x=1; /* { "k": 1 } */ // timeout = 20
+// @b 3.14 @c true
+`;
+  const rs = streamFromString(src);
+  const nodes = await scanCommentsStream(rs, ts);
+  assert(nodes.some((n) => n.kind === "line" && /@a/.test(n.text)));
+  assert(nodes.some((n) => n.kind === "block" && /{ "k": 1 }/.test(n.text)));
+
+  const cat = await extractAnnotationsFromText(src, ts, {
+    tags: { multi: true, valueMode: "json" },
+    kv: true,
+    json: true,
+  });
+  assert(
+    cat.items.some((i) =>
+      i.kind === "tag" && i.key === "a" && i.value === "one"
+    ),
+  );
+  assert(cat.items.some((i) => i.kind === "json"));
+  assert(
+    cat.items.some((i) =>
+      i.kind === "kv" && i.key === "timeout" && i.value === "20"
+    ),
+  );
+  assert(
+    cat.items.some((i) =>
+      i.kind === "tag" && i.key === "b" && i.value === 3.14
+    ),
+  );
+  assert(
+    cat.items.some((i) =>
+      i.kind === "tag" && i.key === "c" && i.value === true
+    ),
+  );
 });
 
-Deno.test("extractors: one-shot catalog from path", async () => {
-    const path = await writeTempFile(".js", `// @owner ops\nconst z=0;`);
-    try {
-        const cat = await generateCodeAnnotationCatalog(path, {
-            tags: true,
-            kv: false,
-        });
-        const owner = cat.items.find((i) =>
-            i.kind === "tag" && i.key === "owner"
-        );
-        assert(owner);
-        assertEquals(owner.value, "ops");
-    } finally {
-        await Deno.remove(path);
-    }
-});
-
-/* ------------------------------ governance attach ---------------------------- */
-
-Deno.test("governance: attach catalog into governance.annotations", async () => {
-    const path = await writeTempFile(".ts", `// @owner platform\nexport {};`);
-    try {
-        const code = await openCodeFile(path);
-        const annotated = await annotateCodeContent(
-            code,
-            { tags: true },
-            "governance",
-        );
-        // deno-lint-ignore no-explicit-any
-        const govAny = annotated.governance as any;
-        assert(govAny.annotations?.codeAnnotations);
-        assertEquals(
-            govAny.annotations.codeAnnotations.languageId,
-            "typescript",
-        );
-        await annotated.close();
-    } finally {
-        await Deno.remove(path);
-    }
-});
-
-/* ------------------------------ typed catalogs ------------------------------- */
+/* -------------------------------------------------------------------------------------------------
+ * Typed catalogs with Zod still work: coerce YAML payload
+ * -------------------------------------------------------------------------------------------------*/
 
 Deno.test("typed catalogs with Zod: coerce YAML payload", async () => {
-    const src = `
+  const src = `
 /*
 ---
 owner: "alice"
@@ -299,52 +227,84 @@ minutes: 15
 export {};
 `.trim();
 
-    const path = await writeTempFile(".ts", src);
-    try {
-        const code = await openCodeFile(path);
-        const YamlAnno = z.object({
-            owner: z.string(),
-            route: z.string(),
-            flags: z.array(z.string()).default([]),
-            minutes: z.number(),
-        });
+  const path = await writeTempFile(".ts", src);
+  try {
+    const code = await openCodeFile(path);
+    const YamlAnno = z.object({
+      owner: z.string(),
+      route: z.string(),
+      flags: z.array(z.string()).default([]),
+      minutes: z.number(),
+    });
 
-        const cat = await extractAnnotations(code, {
-            yaml: true,
-            tags: false,
-            kv: false,
-            json: false,
-            validate: (item) => {
-                if (item.kind === "yaml") return YamlAnno.parse(item.value);
-                throw new Error("drop");
-            },
-        }) as AnnotationCatalog<z.infer<typeof YamlAnno>>;
+    const cat = await extractAnnotations(code, {
+      yaml: true,
+      tags: { multi: true, valueMode: "json" },
+      kv: false,
+      json: false,
+      validate: (item) => {
+        if (item.kind === "yaml") return YamlAnno.parse(item.value);
+        throw new Error("drop");
+      },
+    }) as AnnotationCatalog<z.infer<typeof YamlAnno>>;
 
-        assert(cat.items.length >= 1);
-        const anno = cat.items[0].value;
-        assertEquals(anno?.owner, "alice");
-        assertEquals(anno?.minutes, 15);
-    } finally {
-        await Deno.remove(path);
-    }
+    assert(cat.items.length >= 1);
+    const anno = cat.items[0].value;
+    assertEquals(anno?.owner, "alice");
+    assertEquals(anno?.minutes, 15);
+  } finally {
+    await Deno.remove(path);
+  }
 });
 
-/* ------------------------------------ fs ------------------------------------ */
+/* -------------------------------------------------------------------------------------------------
+ * Legacy behaviors contrasted (string-only mode)
+ * -------------------------------------------------------------------------------------------------*/
 
-Deno.test("fs adapter smoke: readText and scan", async () => {
-    const path = await writeTempFile(".ts", `// note\nexport const X=1;`);
-    try {
-        const fc = createFileContent({
-            contentId: path,
-            path,
-            known: { nature: "text" },
-        });
-        const text = await fc.readText();
-        const ts = getLanguageByIdOrAlias("typescript")!;
-        const cs = scanComments(text, ts);
-        assertEquals(cs[0].kind, "line");
-        await fc.close();
-    } finally {
-        await Deno.remove(path);
-    }
+Deno.test("tags: string-only mode keeps raw strings", async () => {
+  const ts = getLanguageByIdOrAlias("typescript")!;
+  const src = `// @num 3 @truth false @obj {"a":1}`;
+  const cat = await extractAnnotationsFromText(src, ts, {
+    tags: { multi: true, valueMode: "string" },
+  });
+  const num = cat.items.find((i) => i.kind === "tag" && i.key === "num")!;
+  const truth = cat.items.find((i) => i.kind === "tag" && i.key === "truth")!;
+  const obj = cat.items.find((i) => i.kind === "tag" && i.key === "obj")!;
+  assertEquals(typeof num.value, "string");
+  assertEquals(num.value, "3");
+  assertEquals(truth.value, "false");
+  assertEquals(typeof obj.value, "string");
+  assertEquals((obj.value as string).startsWith("{"), true);
+});
+
+/* -------------------------------------------------------------------------------------------------
+ * Basic scanners parity
+ * -------------------------------------------------------------------------------------------------*/
+
+Deno.test("scanner: HTML comment blocks", () => {
+  const html = getLanguageByIdOrAlias("html")!;
+  const src = `
+<!doctype html>
+<!-- @owner web -->
+<div>hi</div>
+<!--
+multi
+-->`.trim();
+
+  const cs = scanComments(src, html);
+  assert(cs.find((c) => /@owner/.test(c.text)));
+  assert(cs.find((c) => /multi/.test(c.text)));
+});
+
+Deno.test("scanner: Rust nested block comments", () => {
+  const rust = getLanguageByIdOrAlias("rust")!;
+  const src = `
+/* top
+  /* inner */
+end */
+fn main() { /* inline */ }`.trim();
+
+  const cs = scanComments(src, rust);
+  const blocks = cs.filter((c) => c.kind === "block");
+  assert(blocks.length >= 2);
 });

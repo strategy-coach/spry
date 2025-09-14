@@ -1,10 +1,10 @@
 import { walk, WalkEntry } from "jsr:@std/fs@1/walk";
 import {
-    globToRegExp,
-    isAbsolute,
-    join,
-    relative,
-    resolve,
+  globToRegExp,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
 } from "jsr:@std/path@1";
 
 /**
@@ -16,27 +16,27 @@ import {
  * - `relPath` is `path` expressed relative to `root`.
  */
 export type Encountered = WalkEntry & {
-    /** Absolute filesystem path of the current root being walked. */
-    root: WalkRoot & { absRoot: string };
-    /** Absolute path of the matched file. (Directories are not emitted.) */
-    path: string;
-    /** Path of the matched file relative to `root`. */
-    relPath: string;
+  /** Absolute filesystem path of the current root being walked. */
+  root: WalkRoot & { absRoot: string };
+  /** Absolute path of the matched file. (Directories are not emitted.) */
+  path: string;
+  /** Path of the matched file relative to `root`. */
+  relPath: string;
 };
 
 /** Per-root configuration. */
 export type WalkRoot = {
-    /** Root directory to walk. Can be absolute or relative (resolved against `baseDir`). */
-    root: string;
-    /**
-     * Base directory used to resolve a relative `root` and any relative include/exclude globs.
-     * Typically the directory containing this module (`import.meta.url`) or caller-provided.
-     */
-    baseDir: string;
-    /** Optional include globs. If omitted/empty, all files are considered included. */
-    include?: string[];
-    /** Optional exclude globs. Files matching any are skipped. */
-    exclude?: string[];
+  /** Root directory to walk. Can be absolute or relative (resolved against `baseDir`). */
+  root: string;
+  /**
+   * Base directory used to resolve a relative `root` and any relative include/exclude globs.
+   * Typically the directory containing this module (`import.meta.url`) or caller-provided.
+   */
+  baseDir: string;
+  /** Optional include globs. If omitted/empty, all files are considered included. */
+  include?: string[];
+  /** Optional exclude globs. Files matching any are skipped. */
+  exclude?: string[];
 };
 
 /**
@@ -96,78 +96,78 @@ export type WalkRoot = {
  * ```
  */
 export async function walkRoots<Context>(
-    init: {
-        ctx: Context;
-        roots: WalkRoot[];
-        onInvalidRoot?: (root: string) => void | Promise<void>;
-    },
-    ingest: (
-        ctx: Context,
-        encountered: Readonly<Encountered>,
-    ) => void | Promise<void>,
+  init: {
+    ctx: Context;
+    roots: WalkRoot[];
+    onInvalidRoot?: (root: string) => void | Promise<void>;
+  },
+  ingest: (
+    ctx: Context,
+    encountered: Readonly<Encountered>,
+  ) => void | Promise<void>,
 ) {
-    const seen = new Set<string>();
-    for (const spec of init.roots) {
-        // Resolve the root to an absolute path using the spec's baseDir.
-        const absRoot = isAbsolute(spec.root)
-            ? spec.root
-            : resolve(spec.baseDir, spec.root);
+  const seen = new Set<string>();
+  for (const spec of init.roots) {
+    // Resolve the root to an absolute path using the spec's baseDir.
+    const absRoot = isAbsolute(spec.root)
+      ? spec.root
+      : resolve(spec.baseDir, spec.root);
 
-        // Validate root directory.
-        let isDir = false;
-        try {
-            const st = await Deno.stat(absRoot);
-            isDir = st.isDirectory;
-        } catch {
-            /* noop */
-        }
-        if (!isDir) {
-            await init.onInvalidRoot?.(absRoot);
-            continue;
-        }
-
-        // Pre-compile include/exclude patterns against ABSOLUTE paths for this root.
-        const includeGlobs = spec.include ?? [];
-        const excludeGlobs = spec.exclude ?? [];
-        const includeRes = includeGlobs.map((g) =>
-            globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
-                extended: true,
-                globstar: true,
-            })
-        );
-        const excludeRes = excludeGlobs.map((g) =>
-            globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
-                extended: true,
-                globstar: true,
-            })
-        );
-        const includeAll = includeRes.length === 0;
-
-        for await (
-            const entry of walk(absRoot, {
-                includeDirs: false,
-                followSymlinks: false,
-            })
-        ) {
-            const abs = entry.path;
-            if (seen.has(abs)) continue; // skip dupes if roots overlap
-
-            const passesInclude = includeAll ||
-                includeRes.some((re) => re.test(abs));
-            if (!passesInclude) continue;
-
-            const hitsExclude = excludeRes.some((re) => re.test(abs));
-            if (hitsExclude) continue;
-
-            seen.add(abs);
-            const relPath = relative(absRoot, abs);
-            await ingest(init.ctx, {
-                ...entry,
-                root: { ...spec, absRoot },
-                path: abs,
-                relPath,
-            });
-        }
+    // Validate root directory.
+    let isDir = false;
+    try {
+      const st = await Deno.stat(absRoot);
+      isDir = st.isDirectory;
+    } catch {
+      /* noop */
     }
-    return seen;
+    if (!isDir) {
+      await init.onInvalidRoot?.(absRoot);
+      continue;
+    }
+
+    // Pre-compile include/exclude patterns against ABSOLUTE paths for this root.
+    const includeGlobs = spec.include ?? [];
+    const excludeGlobs = spec.exclude ?? [];
+    const includeRes = includeGlobs.map((g) =>
+      globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
+        extended: true,
+        globstar: true,
+      })
+    );
+    const excludeRes = excludeGlobs.map((g) =>
+      globToRegExp(isAbsolute(g) ? g : join(absRoot, g), {
+        extended: true,
+        globstar: true,
+      })
+    );
+    const includeAll = includeRes.length === 0;
+
+    for await (
+      const entry of walk(absRoot, {
+        includeDirs: false,
+        followSymlinks: false,
+      })
+    ) {
+      const abs = entry.path;
+      if (seen.has(abs)) continue; // skip dupes if roots overlap
+
+      const passesInclude = includeAll ||
+        includeRes.some((re) => re.test(abs));
+      if (!passesInclude) continue;
+
+      const hitsExclude = excludeRes.some((re) => re.test(abs));
+      if (hitsExclude) continue;
+
+      seen.add(abs);
+      const relPath = relative(absRoot, abs);
+      await ingest(init.ctx, {
+        ...entry,
+        root: { ...spec, absRoot },
+        path: abs,
+        relPath,
+      });
+    }
+  }
+  return seen;
 }
