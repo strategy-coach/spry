@@ -1,5 +1,5 @@
 /**
- * content/mod_test.ts
+ * mod_test.ts
  * Basic integration tests for FileContent on Deno.
  */
 

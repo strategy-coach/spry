@@ -1,5 +1,5 @@
 /**
- * content/mod.ts
+ * mod.ts
  * Barrel exports for the content core and filesystem adapter.
  */
 

@@ -1,5 +1,5 @@
 /**
- * content/governance.ts
+ * governance.ts
  * Fluent, type-safe builders for GovernanceBase and FS policies.
  *
  * Zod example (for typed annotations):

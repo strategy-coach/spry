@@ -1,5 +1,5 @@
 /**
- * content/fs.ts
+ * fs.ts
  * Filesystem adapter: FileContent extends Content, implemented for Deno.
  */
 

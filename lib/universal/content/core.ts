@@ -1,5 +1,5 @@
 /**
- * content/core.ts
+ * core.ts
  * Standalone, stream-first content abstraction with fully generic, type-safe governance.
  * No dependency on the walker/traversal layer.
  */

@@ -1,5 +1,5 @@
 /**
- * content/typical.ts
+ * typical.ts
  * Friendly DX wrappers that keep the power of the generic core,
  * while giving "just works" helpers for common cases.
  */

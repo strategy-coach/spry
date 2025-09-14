@@ -1,5 +1,5 @@
 /**
- * content/hash.ts
+ * hash.ts
  * Minimal hashing helpers for bytes and Web ReadableStreams using Web Crypto.
  *
  * NOTE: Web Crypto digests are not streaming; we buffer in-memory for simplicity.
