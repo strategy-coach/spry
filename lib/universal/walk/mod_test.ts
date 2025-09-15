@@ -2,6 +2,7 @@
 import { assert, assertArrayIncludes, assertEquals } from "jsr:@std/assert@1";
 import { dirname, join } from "jsr:@std/path@1";
 import { createFSAdapter, type FSEncountered, walkFS } from "./mod.ts";
+import { pathTree, pathTreeSerializers } from "../path-tree.ts";
 
 /** Utility: create file, ensuring parent dirs exist. */
 async function writeFile(path: string, content: string) {
@@ -189,6 +190,42 @@ Deno.test("walkFS: absolute globs behave the same as relative-to-root", async ()
     }));
     assert(items.length > 0);
     assert(items.every((e) => e.item.path.endsWith(".ts")));
+  } finally {
+    await cleanup(base);
+  }
+});
+
+Deno.test("encounteredTree: builds a hierarchical tree from walkFS stream", async () => {
+  const { base } = await setupTempFS();
+  try {
+    // walk only *.ts files to keep the test focused
+    const stream = walkFS({
+      specs: () => [{
+        root: ".",
+        baseDir: base,
+      }],
+    });
+
+    const serializers = pathTreeSerializers(
+      await pathTree(stream, { nodePath: (e) => e.payload.relPath }),
+    );
+
+    assertEquals(
+      serializers.asciiTreeText(),
+      `
+├── scripts [/scripts]
+│   └── build.sh [/scripts/build.sh]
+├── src [/src]
+│   ├── sub [/src/sub]
+│   │   ├── ignore.md [/src/sub/ignore.md]
+│   │   └── inner.ts [/src/sub/inner.ts]
+│   ├── a.ts [/src/a.ts]
+│   ├── b.test.ts [/src/b.test.ts]
+│   ├── b.ts [/src/b.ts]
+│   └── c.js [/src/c.js]
+└── .hidden [/.hidden]
+    └── hidden.ts [/.hidden/hidden.ts]`.trim(),
+    );
   } finally {
     await cleanup(base);
   }
