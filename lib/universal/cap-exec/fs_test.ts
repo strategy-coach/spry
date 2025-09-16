@@ -12,6 +12,7 @@ type Any = any;
 async function touchFile(path: string) {
   await Deno.mkdir(dirname(path), { recursive: true });
   await Deno.writeTextFile(path, ""); // empty file; not executable; used only for discovery
+  await Deno.chmod(path, 0o111);
 }
 
 async function readText(path: string): Promise<string> {

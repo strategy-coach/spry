@@ -752,13 +752,25 @@ export async function* prepareCapExecsFs<
       const specs = typeof init.specs === "function"
         ? await init.specs()
         : await init.specs;
-      const bundle = {
-        adapter: fsAdapter,
-        specs,
-        selectName,
-      } as const;
 
-      for await (const found of walkCapExecs(bundle)) {
+      for await (
+        const found of walkCapExecs({
+          adapter: fsAdapter,
+          specs,
+          selectName,
+          filter: (enc) => {
+            try {
+              // check file permisions to see if it's executable
+              return (Deno.statSync(enc.item.path).mode ?? 0) & 0o111
+                ? true
+                : false;
+            } catch {
+              // TODO: report this error up the chain
+              return false;
+            }
+          },
+        })
+      ) {
         // Keep item shape minimal: { path }
         yield {
           ...found,
