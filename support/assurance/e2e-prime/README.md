@@ -2,6 +2,9 @@
 # package '@libsql/client' used by Drizzle ORM requires installation first
 deno install
 
+# setup symlink to Spry stdlib
+ln -s ../../../lib/std spry
+
 # e2ectl.ts lets you perform different controller functions
 ./e2ectl.ts help
 
@@ -35,15 +38,21 @@ spry init                      # TODO: generate `e2ectl.ts` in CWD, setup symlin
 
 WIP
 
-- [ ] Convert `auto.json` or any other file generators to their `*.json.ts` counterparts to remove dependencies.
-      for example, `spry/lib/forest.d/spry.auto.json` would come from `spry/lib/forest.d/spry.json.ts` in
-      "capturable executable" style (emitting STDOUT, for example) but excluded from `package.sql.ts` when built.
-      for example, `spry/templates/abc.handlebars.ts` would generate `spry/templates/abc.handlebars` during
-      build `e2ectl.ts build` and then get picked up by package.json. Same for `*.sql.ts`, etc. 
-- [ ] Support mix of SQLite and PostgreSQL in the same `app` (annotations, file extensions, file names, etc.)
-- [ ] Use `on_connect.sql` to initialize the `app` (add annotations for truly dynamic)
-- [ ] Add experiment to generate and insert a new page in `sqlpage_files` and then redirect to it
-- [ ] Consider how to integrate RUNME.md (as replacement for package.sql.ts?) 
+- [ ] Convert `auto.json` or any other file generators to their `*.json.ts`
+      counterparts to remove dependencies. for example,
+      `spry/lib/forest.d/spry.auto.json` would come from
+      `spry/lib/forest.d/spry.json.ts` in "capturable executable" style
+      (emitting STDOUT, for example) but excluded from `package.sql.ts` when
+      built. for example, `spry/templates/abc.handlebars.ts` would generate
+      `spry/templates/abc.handlebars` during build `e2ectl.ts build` and then
+      get picked up by package.json. Same for `*.sql.ts`, etc.
+- [ ] Support mix of SQLite and PostgreSQL in the same `app` (annotations, file
+      extensions, file names, etc.)
+- [ ] Use `on_connect.sql` to initialize the `app` (add annotations for truly
+      dynamic)
+- [ ] Add experiment to generate and insert a new page in `sqlpage_files` and
+      then redirect to it
+- [ ] Consider how to integrate RUNME.md (as replacement for package.sql.ts?)
 - [ ] Create `lib/route/mod.auto.sql` which is a partial that is included in
       SQLPage for constants
 - [ ] Build a FUSE layer for browsing sqlpage_files and any RSSD
