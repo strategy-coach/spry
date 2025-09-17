@@ -24,6 +24,8 @@ export type FSWalkSpec = Readonly<{
   root: string;
   /** Base directory to resolve relative `root` and globs. */
   baseDir: string;
+  /** Optional identity in case this grouping of files deserves a name */
+  identity?: string;
   /** Optional include globs (absolute or relative to root). If empty, include all. */
   include?: readonly string[];
   /** Optional exclude globs (absolute or relative to root). */
@@ -35,7 +37,7 @@ export type FSWalkSpecNorm = Readonly<{
   /** Absolute, canonical root directory. */
   absRoot: string;
   /** Original spec for reference. */
-  spec: FSWalkSpec;
+  origin: FSWalkSpec;
   /** Pre-compiled absolute-path regexes for include/exclude. */
   includeRes: readonly RegExp[];
   excludeRes: readonly RegExp[];
@@ -91,7 +93,7 @@ export function createFSAdapter<P = FSPayload>(
 
       return {
         absRoot,
-        spec,
+        origin: spec,
         includeRes,
         excludeRes,
         includeAll: includeRes.length === 0,
