@@ -5,8 +5,12 @@ import {
     dirname,
     extname,
     fromFileUrl,
+    isAbsolute,
+    join,
+    normalize,
     relative,
 } from "jsr:@std/path@1";
+import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
 import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
@@ -20,6 +24,8 @@ import {
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
 import { detectLanguageByPath } from "../universal/content/code.ts";
+import { MarkdownStore } from "../universal/markdown.ts";
+import { defineRegistry, defineRule, LintResults } from "../universal/lint.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -28,6 +34,112 @@ type YieldOf<T extends (...args: Any) => Any> = Awaited<ReturnType<T>> extends
     AsyncGenerator<infer Y, Any, Any> ? Y
     : Awaited<ReturnType<T>> extends AsyncIterableIterator<infer Y> ? Y
     : never;
+
+/**
+ * Basic filesystem store. Writes text/bytes to caller-provided RELATIVE paths under destRoot.
+ * No atomic temp/rename; just ensure dirs and write.
+ */
+export class Store<I extends string> {
+    readonly destRoot: string;
+
+    constructor(destRoot: string) {
+        this.destRoot = normalize(destRoot);
+    }
+
+    /**
+     * Write text content to a relative path (typed by I).
+     * Returns the absolute path written.
+     */
+    async writeText(relPath: I, text: string): Promise<string> {
+        const bytes = new TextEncoder().encode(text);
+        return await this.writeBytes(relPath, bytes);
+    }
+
+    /**
+     * Write binary content to a relative path (typed by I).
+     * Returns the absolute path written.
+     */
+    async writeBytes(relPath: I, bytes: Uint8Array): Promise<string> {
+        const abs = this.resolveRel(relPath);
+        await ensureDir(dirname(abs));
+        await Deno.writeFile(abs, bytes);
+        return abs;
+    }
+
+    // ---------- overridables kept inside the class ----------
+
+    protected resolveRel(relPath: string): string {
+        if (isAbsolute(relPath)) {
+            throw new Error(
+                `Expected a relative path, got absolute: ${relPath}`,
+            );
+        }
+        const normRel = normalize(relPath);
+        if (normRel.startsWith("../")) {
+            throw new Error(`Path escapes store root: ${relPath}`);
+        }
+        return normalize(join(this.destRoot, normRel));
+    }
+}
+
+/**
+ * JSON convenience wrapper. Optionally validates with Zod before writing.
+ */
+export class JsonStore<
+    I extends string,
+    Z extends z.ZodTypeAny | undefined = undefined,
+> {
+    constructor(
+        readonly store: Store<I>,
+        readonly schema?: Z,
+        readonly init?: { readonly pretty?: boolean },
+    ) {
+    }
+
+    async write(
+        relPath: I,
+        value: Z extends z.ZodTypeAny ? z.infer<NonNullable<Z>> : unknown,
+    ): Promise<string> {
+        const validated = this.validate(value);
+        const json = this.init?.pretty
+            ? JSON.stringify(validated, null, 2)
+            : JSON.stringify(validated);
+        return await this.store.writeText(relPath, json);
+    }
+
+    protected validate(value: unknown): unknown {
+        if (!this.schema) return value;
+        return (this.schema as z.ZodTypeAny).parse(value);
+    }
+}
+
+export interface WalkSpecsSupplier {
+    readonly walkSpecs: () => Iterable<FSWalkSpec>;
+}
+
+export class SqlPageFiles implements WalkSpecsSupplier {
+    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+    constructor(readonly importMetaMainHome: string) {
+    }
+
+    walkSpecs() {
+        return [{
+            identity: "local-sql",
+            root: "./src",
+            include: ["**/*.sql"],
+            baseDir: this.importMetaMainHome,
+        }, {
+            identity: "stdlib-sql",
+            root: fromFileUrl(import.meta.resolve("./")),
+            include: ["**/*.sql"],
+            baseDir: this.importMetaMainHome,
+        }];
+    }
+
+    async *sources() {
+        yield* walkFS({ specs: this.walkSpecs() });
+    }
+}
 
 const spryEntryAnnCommon = {
     absPath: z.string(),
@@ -137,31 +249,11 @@ export const spryRouteAnnSchema = z.object({
 export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
 export type SpryRouteAnnotation = z.infer<typeof spryRouteAnnSchema>;
 
-export const orchCapExecCtxSchema = z.object({
-    project: z.string().default("e2e-prime"),
-});
-export type OrchestrationContext = z.infer<typeof orchCapExecCtxSchema>;
-
-export class Orchestrator<Context extends OrchestrationContext> {
-    readonly logger = (
-        e: {
-            level: "debug" | "info" | "warn" | "error";
-            msg: string;
-            meta?: Record<string, unknown>;
-        },
-    ) => {
-        const tag = e.level.toUpperCase().padEnd(5);
-        const line = `${colors.bold(colors.gray(`[${tag}]`))} ${e.msg} ${
-            e.meta ? colors.gray(JSON.stringify(e.meta)) : ""
-        }`;
-        console.log(line);
-    };
-
+export class Annotations implements WalkSpecsSupplier {
+    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
     constructor(
-        readonly importMetaMainHome: string, // usually `fromFileUrl(import.meta.resolve("./"))`
+        readonly importMetaMainHome: string,
         readonly init?: {
-            readonly specs?: FSWalkSpec[];
-            readonly mergeCtx?: Partial<Context>; // overrides merged into schema defaults
             readonly transformEntryAnn?: (
                 enc: SpryEntryAnnotation,
             ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
@@ -172,10 +264,10 @@ export class Orchestrator<Context extends OrchestrationContext> {
     ) {
     }
 
-    annotationWalkSpecs() {
+    walkSpecs() {
         return [{
             identity: "local-sql",
-            root: ".",
+            root: "./src",
             include: ["**/*.sql"],
             baseDir: this.importMetaMainHome,
         }, {
@@ -186,44 +278,8 @@ export class Orchestrator<Context extends OrchestrationContext> {
         }];
     }
 
-    capExecsWalkSpecs() {
-        return [{
-            identity: "local-capexec",
-            root: ".",
-            baseDir: this.importMetaMainHome,
-        }, {
-            identity: "stdlib-capexec",
-            root: fromFileUrl(import.meta.resolve("./")),
-            baseDir: this.importMetaMainHome,
-        }];
-    }
-
-    capExecsCtx() {
-        const ctxDefaults = orchCapExecCtxSchema.parse({}) as Context; // defaults
-        return orchCapExecCtxSchema.parse({
-            ...ctxDefaults,
-            ...(this.init?.mergeCtx ?? {}),
-        }) as Context;
-    }
-
-    walkRoots() {
-        return Array.from(
-            new Set(
-                [...this.annotationWalkSpecs(), ...this.capExecsWalkSpecs()]
-                    .map((s) => s.root),
-            ),
-        );
-    }
-
-    env(mode: PrepareMode) {
-        return {
-            CAPEXEC_MODE: mode,
-            CAPEXEC_CONTEXT_JSON: JSON.stringify(this.capExecsCtx()),
-        };
-    }
-
-    async *annotationSources() {
-        yield* walkFS({ specs: this.annotationWalkSpecs() });
+    async *sources() {
+        yield* walkFS({ specs: this.walkSpecs() });
     }
 
     async safeAnnGroup<S extends z.ZodTypeAny, Payload>(
@@ -265,7 +321,7 @@ export class Orchestrator<Context extends OrchestrationContext> {
     }
 
     async entryAnnFromCatalog(
-        we: YieldOf<typeof this.annotationSources>,
+        we: YieldOf<typeof this.sources>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
     ) {
         return await this.safeAnnGroup(
@@ -282,7 +338,7 @@ export class Orchestrator<Context extends OrchestrationContext> {
     }
 
     async routeAnnFromCatalog(
-        we: YieldOf<typeof this.annotationSources>,
+        we: YieldOf<typeof this.sources>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
     ) {
         const pathBasename = basename(we.payload.relPath);
@@ -305,8 +361,8 @@ export class Orchestrator<Context extends OrchestrationContext> {
         );
     }
 
-    async *annotations() {
-        for await (const we of this.annotationSources()) {
+    async *catalog() {
+        for await (const we of this.sources()) {
             const anns = await extractAnnotationsFromText(
                 await Deno.readTextFile(we.item.path),
                 detectLanguageByPath(we.item.path)!, // give sane default
@@ -319,17 +375,75 @@ export class Orchestrator<Context extends OrchestrationContext> {
             );
 
             yield {
+                walkEntry: we,
                 annotations: anns,
                 entryAnn: await this.entryAnnFromCatalog(we, anns),
                 routeAnn: await this.routeAnnFromCatalog(we, anns),
             };
         }
     }
+}
 
-    async generateCapExecs(mode: PrepareMode = "build") {
+export const capExecCtxSchema = z.object({
+    project: z.string(),
+});
+export type CapExecContent = z.infer<typeof capExecCtxSchema>;
+
+export class CapExecs<Context extends CapExecContent>
+    implements WalkSpecsSupplier {
+    readonly logger = (
+        e: {
+            level: "debug" | "info" | "warn" | "error";
+            msg: string;
+            meta?: Record<string, unknown>;
+        },
+    ) => {
+        const tag = e.level.toUpperCase().padEnd(5);
+        const line = `${colors.bold(colors.gray(`[${tag}]`))} ${e.msg} ${
+            e.meta ? colors.gray(JSON.stringify(e.meta)) : ""
+        }`;
+        console.log(line);
+    };
+
+    constructor(
+        readonly importMetaMainHome: string, // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+        readonly init?: {
+            readonly mergeCtx?: Partial<Context>; // overrides merged into schema defaults
+        },
+    ) {
+    }
+
+    walkSpecs() {
+        return [{
+            identity: "local-capexec",
+            root: "./src",
+            baseDir: this.importMetaMainHome,
+        }, {
+            identity: "stdlib-capexec",
+            root: fromFileUrl(import.meta.resolve("./")),
+            baseDir: this.importMetaMainHome,
+        }];
+    }
+
+    capExecsCtx() {
+        const ctxDefaults = capExecCtxSchema.parse({}) as Context; // defaults
+        return capExecCtxSchema.parse({
+            ...ctxDefaults,
+            ...(this.init?.mergeCtx ?? {}),
+        }) as Context;
+    }
+
+    env(mode: PrepareMode) {
+        return {
+            CAPEXEC_MODE: mode,
+            CAPEXEC_CONTEXT_JSON: JSON.stringify(this.capExecsCtx()),
+        };
+    }
+
+    async execute(mode: PrepareMode = "build") {
         for await (
             const ev of prepareCapExecsFs<Context>({
-                specs: this.capExecsWalkSpecs(),
+                specs: this.walkSpecs(),
                 mode,
                 run: mode !== "dry-run",
                 context: this.capExecsCtx(),
@@ -369,25 +483,185 @@ export class Orchestrator<Context extends OrchestrationContext> {
             }
         }
     }
+}
+
+export class Orchestrator implements WalkSpecsSupplier {
+    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+    constructor(
+        readonly importMetaMainHome: string,
+    ) {
+    }
+
+    lintRegistry() {
+        return defineRegistry(
+            {
+                "invalid-annotation": defineRule({
+                    code: ["entry", "route"] as const,
+                    data: { annotation: {} },
+                    defaultSeverity: "error",
+                }),
+            } as const,
+        );
+    }
+
+    lintResults() {
+        return new LintResults({
+            registry: this.lintRegistry(),
+            contentMetaFor: (
+                id,
+            ) => (id.endsWith(".sql") ? { lang: "sql" } : {}),
+            runMeta: { tool: "spry" },
+        });
+    }
+
+    orchStore<Path extends string>() {
+        return new Store<Path>(normalize(join(this.importMetaMainHome)));
+    }
+
+    srcStore<Path extends string>() {
+        return new Store<Path>(normalize(join(this.importMetaMainHome, "src")));
+    }
+
+    annotationsStore<Path extends string>() {
+        return new JsonStore(
+            new Store<Path>(
+                normalize(join(this.importMetaMainHome, "src", "annotations")),
+            ),
+            undefined,
+            { pretty: true },
+        );
+    }
+
+    sqlpageFiles() {
+        return new SqlPageFiles(this.importMetaMainHome);
+    }
+
+    annotations() {
+        return new Annotations(this.importMetaMainHome);
+    }
+
+    capExecs() {
+        return new CapExecs(this.importMetaMainHome);
+    }
+
+    walkSpecs() {
+        return [
+            ...this.sqlpageFiles().walkSpecs(),
+            ...this.annotations().walkSpecs(),
+            ...this.capExecs().walkSpecs(),
+        ];
+    }
+
+    watchRoots() {
+        return Array.from(new Set(this.walkSpecs().map((s) => s.root)));
+    }
+
+    stores() {
+        const mdStore = new MarkdownStore<"orchestrated.md">();
+        const orchMD = mdStore.markdown("orchestrated.md");
+
+        const orchStore = this.orchStore();
+        const srcStore = this.srcStore();
+        const annStore = this.annotationsStore();
+        return {
+            orchMD,
+            annStore,
+            mdStore,
+            orchStore,
+            srcStore,
+        };
+    }
+
+    async clean(stores: ReturnType<typeof this.stores>) {
+        const rmDirRecursive = async (path: string) => {
+            try {
+                await Deno.remove(path, { recursive: true });
+            } catch (error) {
+                if (error instanceof Deno.errors.NotFound) { /**ignore */ }
+            }
+        };
+
+        await rmDirRecursive(join(stores.srcStore.destRoot, "orchestrated.md"));
+        await rmDirRecursive(stores.annStore.store.destRoot);
+    }
+
+    async orchestrate(init?: { clean?: boolean }) {
+        const stores = this.stores();
+        if (init?.clean) await this.clean(stores);
+
+        const lintr = this.lintResults();
+        const { orchMD, srcStore, annStore } = stores;
+        orchMD.h1("Orchestration Results");
+
+        // first get all the annotations and save their state for downstream use
+        const annotated = new Set<{ root?: string; relPath: string }>();
+        for await (const a of this.annotations().catalog()) {
+            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
+                await annStore.write(
+                    join("entry", a.entryAnn.parsed.relPath + ".auto.json"),
+                    a.entryAnn,
+                );
+                annotated.add({
+                    root: a.walkEntry.spec.origin.identity,
+                    relPath: a.entryAnn.parsed.relPath,
+                });
+            } else if (a.entryAnn.found > 0) {
+                lintr.add({
+                    rule: "invalid-annotation",
+                    code: "entry",
+                    content: a.walkEntry.payload.relPath,
+                    message: "Invalid entry annotation",
+                    data: { annotation: a.entryAnn },
+                    severity: "error",
+                });
+            }
+
+            if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
+                await annStore.write(
+                    join("route", a.routeAnn.parsed.path + ".auto.json"),
+                    a.routeAnn,
+                );
+                annotated.add({
+                    root: a.walkEntry.spec.origin.identity,
+                    relPath: a.routeAnn.parsed.path,
+                });
+            } else if (a.routeAnn.found > 0) {
+                lintr.add({
+                    rule: "invalid-annotation",
+                    code: "route",
+                    content: a.walkEntry.payload.relPath,
+                    message: "Invalid route annotation",
+                    data: { annotation: a.routeAnn },
+                    severity: "error",
+                });
+            }
+        }
+
+        orchMD.section(
+            "Annotated",
+            (md) => {
+                annotated.forEach((a) =>
+                    md.li(`${a.root ? `[${a.root}] ` : ""}${a.relPath}`)
+                );
+            },
+        );
+
+        for (const lr of lintr.allFindings()) {
+            orchMD.section("Lint Results", (md) => {
+                md.p(`[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message}`);
+            });
+        }
+        srcStore.writeText("orchestrated.md", orchMD.write());
+    }
 
     async cli() {
-        const roots = this.walkRoots();
+        const roots = this.watchRoots();
         return await new Command()
             .name("package.sql.ts")
             .version("0.1.0")
             .description(
                 "Generate the SQL which will be supplied to SQLPage target database.",
             )
-            .command("build")
-            .description("Discover and build once.")
-            .action(async () => {
-                await this.generateCapExecs("build");
-            })
-            .command("dry-run")
-            .description("Run pipelines but do not write outputs.")
-            .action(async () => {
-                await this.generateCapExecs("dry-run");
-            })
             .command("watch")
             .description(
                 // deno-fmt-ignore
@@ -397,7 +671,7 @@ export class Orchestrator<Context extends OrchestrationContext> {
                 const debounceMs = 150;
                 let timer: number | null = null;
 
-                await this.generateCapExecs("build");
+                await this.orchestrate();
 
                 // Basic FS watch (use your own watcher if you need cross-platform globs)
                 const watcher = Deno.watchFs(roots);
@@ -410,7 +684,7 @@ export class Orchestrator<Context extends OrchestrationContext> {
                         console.log(
                             colors.cyan("⟳ change detected, rebuilding…"),
                         );
-                        await this.generateCapExecs("build");
+                        await this.orchestrate();
                     }, debounceMs) as unknown as number;
                 }
             })
