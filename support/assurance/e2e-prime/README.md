@@ -3,32 +3,29 @@
 deno install
 
 # setup symlink to Spry stdlib
-ln -s ../../../lib/std spry
+./orchestrate.ts init          # only required once
 
-# e2ectl.ts lets you perform different controller functions
-./e2ectl.ts help
-
-# setup
-spry init                      # TODO: generate `e2ectl.ts` in CWD, setup symlinks, egenerate `on_connect.sql`,
-                               #       setup SQLite extensions, etc.
+# orchestrate.ts lets you perform different functions
+./orchestrate.ts help
+./orchestrate.ts watch
 
 # informational
-./e2ectl.ts ls                 # list all candidate sqlpage_files content files and if there are any annotation errors
-./e2ectl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
-./e2ectl.ts ls head            # list all SQL DDL for "init" operations that go before sqlpage_files inserts
-./e2ectl.ts ls tail            # list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
-./e2ectl.ts ls routes          # list all discovered files that have route annotations as a tree
-./e2ectl.ts ls routes -t       # list all discovered files that have route annotations as a table
-./e2ectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
-./e2ectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
+./orchestrate.ts ls                 # list all candidate sqlpage_files content files and if there are any annotation errors
+./orchestrate.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
+./orchestrate.ts ls head            # list all SQL DDL for "init" operations that go before sqlpage_files inserts
+./orchestrate.ts ls tail            # list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
+./orchestrate.ts ls routes          # list all discovered files that have route annotations as a tree
+./orchestrate.ts ls routes -t       # list all discovered files that have route annotations as a table
+./orchestrate.ts ls routes -j       # list all discovered files that have route annotations as JSON
+./orchestrate.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # emit SQL
-./e2ectl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./e2ectl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./e2ectl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
+./orchestrate.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./orchestrate.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./orchestrate.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
 
 # developer experience
-./e2ectl.ts dx watchexec       # TODO: generate watchexec CLI for bash to watch all roots / files / etc.
+./orchestrate.ts dx watchexec       # TODO: generate watchexec CLI for bash to watch all roots / files / etc.
 
 # deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
@@ -44,8 +41,8 @@ WIP
       `spry/lib/forest.d/spry.json.ts` in "capturable executable" style
       (emitting STDOUT, for example) but excluded from `package.sql.ts` when
       built. for example, `spry/templates/abc.handlebars.ts` would generate
-      `spry/templates/abc.handlebars` during build `e2ectl.ts build` and then
-      get picked up by package.json. Same for `*.sql.ts`, etc.
+      `spry/templates/abc.handlebars` during build `orchestrate.ts build` and
+      then get picked up by package.json. Same for `*.sql.ts`, etc.
 - [ ] Support mix of SQLite and PostgreSQL in the same `app` (annotations, file
       extensions, file names, etc.)
 - [ ] Use `on_connect.sql` to initialize the `app` (add annotations for truly

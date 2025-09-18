@@ -26,6 +26,12 @@ import {
 import { detectLanguageByPath } from "../universal/content/code.ts";
 import { MarkdownStore } from "../universal/markdown.ts";
 import { defineRegistry, defineRule, LintResults } from "../universal/lint.ts";
+import { omitPathsReplacer } from "../universal/json.ts";
+import {
+    pathTree,
+    pathTreeNavigation,
+    pathTreeSerializers,
+} from "../universal/path-tree.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -34,6 +40,8 @@ type YieldOf<T extends (...args: Any) => Any> = Awaited<ReturnType<T>> extends
     AsyncGenerator<infer Y, Any, Any> ? Y
     : Awaited<ReturnType<T>> extends AsyncIterableIterator<infer Y> ? Y
     : never;
+
+const SRC = "src" as const;
 
 /**
  * Basic filesystem store. Writes text/bytes to caller-provided RELATIVE paths under destRoot.
@@ -99,11 +107,12 @@ export class JsonStore<
     async write(
         relPath: I,
         value: Z extends z.ZodTypeAny ? z.infer<NonNullable<Z>> : unknown,
+        replacer?: (this: Any, key: string, value: Any) => Any,
     ): Promise<string> {
         const validated = this.validate(value);
         const json = this.init?.pretty
-            ? JSON.stringify(validated, null, 2)
-            : JSON.stringify(validated);
+            ? JSON.stringify(validated, replacer, 2)
+            : JSON.stringify(validated, replacer);
         return await this.store.writeText(relPath, json);
     }
 
@@ -118,7 +127,6 @@ export interface WalkSpecsSupplier {
 }
 
 export class SqlPageFiles implements WalkSpecsSupplier {
-    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
     constructor(readonly importMetaMainHome: string) {
     }
 
@@ -130,7 +138,7 @@ export class SqlPageFiles implements WalkSpecsSupplier {
             baseDir: this.importMetaMainHome,
         }, {
             identity: "stdlib-sql",
-            root: fromFileUrl(import.meta.resolve("./")),
+            root: "./src/spry", // this is symlink and won't be found in ./src by default
             include: ["**/*.sql"],
             baseDir: this.importMetaMainHome,
         }];
@@ -272,7 +280,7 @@ export class Annotations implements WalkSpecsSupplier {
             baseDir: this.importMetaMainHome,
         }, {
             identity: "stdlib-sql",
-            root: fromFileUrl(import.meta.resolve("./")),
+            root: "./src/spry", // this is symlink and won't be found in ./src by default
             include: ["**/*.sql"],
             baseDir: this.importMetaMainHome,
         }];
@@ -384,6 +392,51 @@ export class Annotations implements WalkSpecsSupplier {
     }
 }
 
+export class Routes {
+    constructor(readonly routeAnns: Iterable<SpryRouteAnnotation>) {
+    }
+
+    async populate() {
+        const forest = await pathTree<SpryRouteAnnotation, string>(
+            this.routeAnns,
+            {
+                nodePath: (n) => n.path,
+                pathDelim: "/",
+                synthesizeContainers: true,
+                folderFirst: false,
+                indexBasenames: ["index.sql"],
+            },
+        );
+
+        const tree = forest.roots;
+        const nav = pathTreeNavigation(forest);
+        const serializers = {
+            ...pathTreeSerializers(forest),
+            crumbsJsonSchemaText: () =>
+                JSON.stringify(
+                    nav.ancestorsJsonSchema({
+                        outerIsMap: true,
+                        payloadItemSchema: z.toJSONSchema(spryRouteAnnSchema),
+                    }),
+                    null,
+                    2,
+                ),
+        };
+
+        const breadcrumbs: Record<string, ReturnType<typeof nav.ancestors>> =
+            {};
+        for (const node of forest.treeByPath.values()) {
+            if (node.payloads) {
+                for (const p of node.payloads) {
+                    breadcrumbs[p.path] = nav.ancestors(p);
+                }
+            }
+        }
+
+        return { forest, tree, breadcrumbs, serializers };
+    }
+}
+
 export const capExecCtxSchema = z.object({
     project: z.string(),
 });
@@ -420,7 +473,7 @@ export class CapExecs<Context extends CapExecContent>
             baseDir: this.importMetaMainHome,
         }, {
             identity: "stdlib-capexec",
-            root: fromFileUrl(import.meta.resolve("./")),
+            root: "./src/spry", // this is symlink and won't be found in ./src by default
             baseDir: this.importMetaMainHome,
         }];
     }
@@ -485,6 +538,48 @@ export class CapExecs<Context extends CapExecContent>
     }
 }
 
+export class LocalDev {
+    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+    constructor(
+        readonly importMetaMainHome: string,
+    ) {
+    }
+
+    spryPaths() {
+        const absPathToSpryLocal = join(
+            fromFileUrl(this.importMetaMainHome),
+            SRC,
+            "spry",
+        );
+        const spryHome = relative(
+            dirname(absPathToSpryLocal),
+            import.meta.dirname!,
+        );
+        const relPathToSpryHome = relative(Deno.cwd(), absPathToSpryLocal);
+        return {
+            spryHome,
+            relPathToSpryHome,
+        };
+    }
+
+    async init() {
+        const sp = this.spryPaths();
+        let removedExisting = false;
+        try {
+            await Deno.remove(sp.relPathToSpryHome);
+            removedExisting = true;
+        } catch {
+            /** ignore */
+        }
+        await Deno.symlink(sp.spryHome, sp.relPathToSpryHome);
+        return {
+            spryPaths: sp,
+            removedExisting,
+            linked: { from: sp.relPathToSpryHome, to: sp.spryHome },
+        };
+    }
+}
+
 export class Orchestrator implements WalkSpecsSupplier {
     // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
     constructor(
@@ -519,13 +614,13 @@ export class Orchestrator implements WalkSpecsSupplier {
     }
 
     srcStore<Path extends string>() {
-        return new Store<Path>(normalize(join(this.importMetaMainHome, "src")));
+        return new Store<Path>(normalize(join(this.importMetaMainHome, SRC)));
     }
 
     annotationsStore<Path extends string>() {
         return new JsonStore(
             new Store<Path>(
-                normalize(join(this.importMetaMainHome, "src", "annotations")),
+                normalize(join(this.importMetaMainHome, SRC, "annotations")),
             ),
             undefined,
             { pretty: true },
@@ -557,8 +652,8 @@ export class Orchestrator implements WalkSpecsSupplier {
     }
 
     stores() {
-        const mdStore = new MarkdownStore<"orchestrated.md">();
-        const orchMD = mdStore.markdown("orchestrated.md");
+        const mdStore = new MarkdownStore<"orchestrated.auto.md">();
+        const orchMD = mdStore.markdown("orchestrated.auto.md");
 
         const orchStore = this.orchStore();
         const srcStore = this.srcStore();
@@ -581,29 +676,50 @@ export class Orchestrator implements WalkSpecsSupplier {
             }
         };
 
-        await rmDirRecursive(join(stores.srcStore.destRoot, "orchestrated.md"));
+        await rmDirRecursive(
+            join(stores.srcStore.destRoot, "orchestrated.auto.md"),
+        );
         await rmDirRecursive(stores.annStore.store.destRoot);
     }
 
     async orchestrate(init?: { clean?: boolean }) {
+        const spf = this.sqlpageFiles();
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
         const lintr = this.lintResults();
         const { orchMD, srcStore, annStore } = stores;
+
         orchMD.h1("Orchestration Results");
+        orchMD.br().p(`Check the file date for when it was last executed.`);
+
+        orchMD.h2("SQLPage Files Candidates");
+        orchMD.table(
+            ["Root", "Path"],
+            (await Array.fromAsync(spf.sources())).map((src) => [
+                src.spec.origin.identity ?? "",
+                src.payload.relPath,
+            ]),
+        );
 
         // first get all the annotations and save their state for downstream use
-        const annotated = new Set<{ root?: string; relPath: string }>();
+        const routeAnns: SpryRouteAnnotation[] = [];
+        const annotated = new Set<
+            { root?: string; relPath: string; count: number }
+        >();
         for await (const a of this.annotations().catalog()) {
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
                 await annStore.write(
                     join("entry", a.entryAnn.parsed.relPath + ".auto.json"),
                     a.entryAnn,
+                    // don't store absPath because it will be different across systems
+                    // making it harder to store in Git (because it will show diffs)
+                    omitPathsReplacer(a.entryAnn, [["parsed", "absPath"]]),
                 );
                 annotated.add({
                     root: a.walkEntry.spec.origin.identity,
                     relPath: a.entryAnn.parsed.relPath,
+                    count: a.entryAnn.found,
                 });
             } else if (a.entryAnn.found > 0) {
                 lintr.add({
@@ -624,7 +740,9 @@ export class Orchestrator implements WalkSpecsSupplier {
                 annotated.add({
                     root: a.walkEntry.spec.origin.identity,
                     relPath: a.routeAnn.parsed.path,
+                    count: a.routeAnn.found,
                 });
+                routeAnns.push(a.routeAnn.parsed);
             } else if (a.routeAnn.found > 0) {
                 lintr.add({
                     rule: "invalid-annotation",
@@ -637,13 +755,31 @@ export class Orchestrator implements WalkSpecsSupplier {
             }
         }
 
-        orchMD.section(
-            "Annotated",
-            (md) => {
-                annotated.forEach((a) =>
-                    md.li(`${a.root ? `[${a.root}] ` : ""}${a.relPath}`)
-                );
-            },
+        const routes = new Routes(routeAnns);
+        const { serializers, breadcrumbs } = await routes.populate();
+        orchMD.h2("Routes Tree");
+        orchMD.code("ascii", serializers.asciiTreeText());
+
+        orchMD.h2("Breadcrumbs");
+        orchMD.table(
+            ["Path", "Breadcrumbs"],
+            Array.from(Object.entries(breadcrumbs)).map(([path, node]) => [
+                path,
+                node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash).join(
+                    "\n",
+                ),
+            ]),
+        );
+
+        orchMD.h2("Annotated Sources");
+        orchMD.table(
+            ["Path", "Count", "Root"],
+            Array.from(annotated.values()).map((a) => [
+                a.relPath,
+                String(a.count),
+                a.root ?? "",
+            ]),
+            ["left", "right", "left"],
         );
 
         for (const lr of lintr.allFindings()) {
@@ -651,17 +787,27 @@ export class Orchestrator implements WalkSpecsSupplier {
                 md.p(`[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message}`);
             });
         }
-        srcStore.writeText("orchestrated.md", orchMD.write());
+        srcStore.writeText("orchestrated.auto.md", orchMD.write());
     }
 
-    async cli() {
+    cli(importMetaMainHome: string, init?: { name?: string }) {
         const roots = this.watchRoots();
-        return await new Command()
-            .name("package.sql.ts")
+        const localDev = new LocalDev(importMetaMainHome);
+        return new Command()
+            .name(init?.name ?? "package.sql.ts")
             .version("0.1.0")
             .description(
                 "Generate the SQL which will be supplied to SQLPage target database.",
             )
+            .command("init")
+            .description("Setup local dev environment")
+            .action(async () => {
+                const ldi = await localDev.init();
+                if (ldi.removedExisting) {
+                    console.log("Removed", ldi.linked.from);
+                }
+                console.log("Linked", ldi.linked.from, "to", ldi.linked.to);
+            })
             .command("watch")
             .description(
                 // deno-fmt-ignore
@@ -687,7 +833,6 @@ export class Orchestrator implements WalkSpecsSupplier {
                         await this.orchestrate();
                     }, debounceMs) as unknown as number;
                 }
-            })
-            .parse(Deno.args);
+            });
     }
 }

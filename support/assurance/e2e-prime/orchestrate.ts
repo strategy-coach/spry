@@ -9,5 +9,11 @@ export class EndToEndTestPrime extends o.Orchestrator {
   }
 }
 
-const e2e = new EndToEndTestPrime();
-await e2e.orchestrate({ clean: true });
+if (import.meta.main) {
+  const e2e = new EndToEndTestPrime();
+  if (Deno.args.length > 0) {
+    await e2e.cli(import.meta.resolve("./")).parse(Deno.args);
+  } else {
+    await e2e.orchestrate({ clean: true });
+  }
+}
