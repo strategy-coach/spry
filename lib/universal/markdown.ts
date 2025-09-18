@@ -711,22 +711,76 @@ export class MarkdownStore<I extends string> {
             rows: Array<string[]>,
             align?: Array<"left" | "center" | "right" | "-">,
         ) {
-            const h = headers.map((c) => this.escCell(c)).join(" | ");
-            const sep = (align && align.length === headers.length)
-                ? align.map((a) =>
-                    a === "left"
-                        ? ":---"
-                        : a === "right"
-                        ? "---:"
-                        : a === "center"
-                        ? ":---:"
-                        : "---"
-                ).join(" | ")
-                : headers.map(() => "---").join(" | ");
-            this.raw(`| ${h} |`, `| ${sep} |`);
-            rows.forEach((r) =>
-                this.raw(`| ${r.map((c) => this.escCell(c)).join(" | ")} |`)
+            const colCount = headers.length;
+
+            // Escape + normalize to a rectangular matrix (fill missing with "")
+            const H = headers.map((c) => this.escCell(c));
+            const R = rows.map((r) =>
+                Array.from(
+                    { length: colCount },
+                    (_, i) => this.escCell(r?.[i] ?? ""),
+                )
             );
+
+            // Column widths (min 3 so the --- rule looks clean)
+            const widths = Array.from(
+                { length: colCount },
+                (_, i) =>
+                    Math.max(
+                        3,
+                        H[i]?.length ?? 0,
+                        ...R.map((row) => row[i]?.length ?? 0),
+                    ),
+            );
+
+            const aOf = (i: number): "left" | "center" | "right" | "-" =>
+                (align && align[i]) ? align[i]! : "-";
+
+            const pad = (
+                s: string,
+                w: number,
+                a: "left" | "center" | "right" | "-",
+            ) => {
+                const len = s.length;
+                if (len >= w) return s;
+                const diff = w - len;
+                if (a === "right") return " ".repeat(diff) + s;
+                if (a === "center") {
+                    const l = Math.floor(diff / 2);
+                    const r = diff - l;
+                    return " ".repeat(l) + s + " ".repeat(r);
+                }
+                // left or "-" (default)
+                return s + " ".repeat(diff);
+            };
+
+            // Header line (padded per alignment for better monospace layout)
+            const headerLine = H.map((c, i) => pad(c, widths[i], aOf(i))).join(
+                " | ",
+            );
+
+            // Separator uses widths too, with proper colon placement for MD alignment
+            const sepLine = widths.map((w, i) => {
+                const a = aOf(i);
+                const d = Math.max(3, w);
+                if (a === "left") return ":" + "-".repeat(d - 1);
+                if (a === "right") return "-".repeat(d - 1) + ":";
+                if (a === "center") {
+                    return ":" + "-".repeat(Math.max(1, d - 2)) + ":";
+                }
+                return "-".repeat(d); // "-"
+            }).join(" | ");
+
+            this.raw(`| ${headerLine} |`, `| ${sepLine} |`);
+
+            // Body rows
+            for (const r of R) {
+                const line = r.map((c, i) => pad(c, widths[i], aOf(i))).join(
+                    " | ",
+                );
+                this.raw(`| ${line} |`);
+            }
+
             return this.raw("");
         }
 
