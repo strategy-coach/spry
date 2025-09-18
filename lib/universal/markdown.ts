@@ -711,30 +711,29 @@ export class MarkdownStore<I extends string> {
             rows: Array<string[]>,
             align?: Array<"left" | "center" | "right" | "-">,
         ) {
-            const colCount = headers.length;
-
-            // Escape + normalize to a rectangular matrix (fill missing with "")
-            const H = headers.map((c) => this.escCell(c));
-            const R = rows.map((r) =>
-                Array.from(
-                    { length: colCount },
-                    (_, i) => this.escCell(r?.[i] ?? ""),
-                )
-            );
-
-            // Column widths (min 3 so the --- rule looks clean)
-            const widths = Array.from(
-                { length: colCount },
-                (_, i) =>
-                    Math.max(
-                        3,
-                        H[i]?.length ?? 0,
-                        ...R.map((row) => row[i]?.length ?? 0),
-                    ),
-            );
-
+            const cols = headers.length;
             const aOf = (i: number): "left" | "center" | "right" | "-" =>
                 (align && align[i]) ? align[i]! : "-";
+
+            // Escape + convert newlines to <br>; return both rendered text and its width
+            const renderCell = (s: string) => {
+                const esc = this.escCell(String(s));
+                const rendered = esc.replace(/\r?\n/g, "<br>");
+                return { rendered, width: rendered.length };
+            };
+
+            // Normalize into rectangular matrix
+            const H = headers.map(renderCell);
+            const R = rows.map((r) =>
+                Array.from({ length: cols }, (_, i) => renderCell(r?.[i] ?? ""))
+            );
+
+            // Column widths based on rendered content (min 3 so separators look right)
+            const widths = Array.from(
+                { length: cols },
+                (_, i) =>
+                    Math.max(3, H[i].width, ...R.map((row) => row[i].width)),
+            );
 
             const pad = (
                 s: string,
@@ -747,37 +746,33 @@ export class MarkdownStore<I extends string> {
                 if (a === "right") return " ".repeat(diff) + s;
                 if (a === "center") {
                     const l = Math.floor(diff / 2);
-                    const r = diff - l;
-                    return " ".repeat(l) + s + " ".repeat(r);
+                    return " ".repeat(l) + s + " ".repeat(diff - l);
                 }
-                // left or "-" (default)
+                // left or "-"
                 return s + " ".repeat(diff);
             };
 
-            // Header line (padded per alignment for better monospace layout)
-            const headerLine = H.map((c, i) => pad(c, widths[i], aOf(i))).join(
-                " | ",
-            );
-
-            // Separator uses widths too, with proper colon placement for MD alignment
+            // Header + separator (use widths for pretty source alignment)
+            const headerLine = H.map((c, i) =>
+                pad(c.rendered, widths[i], aOf(i))
+            ).join(" | ");
             const sepLine = widths.map((w, i) => {
                 const a = aOf(i);
-                const d = Math.max(3, w);
-                if (a === "left") return ":" + "-".repeat(d - 1);
-                if (a === "right") return "-".repeat(d - 1) + ":";
+                if (a === "left") return ":" + "-".repeat(w - 1);
+                if (a === "right") return "-".repeat(w - 1) + ":";
                 if (a === "center") {
-                    return ":" + "-".repeat(Math.max(1, d - 2)) + ":";
+                    return ":" + "-".repeat(Math.max(1, w - 2)) + ":";
                 }
-                return "-".repeat(d); // "-"
+                return "-".repeat(w);
             }).join(" | ");
 
             this.raw(`| ${headerLine} |`, `| ${sepLine} |`);
 
             // Body rows
-            for (const r of R) {
-                const line = r.map((c, i) => pad(c, widths[i], aOf(i))).join(
-                    " | ",
-                );
+            for (const row of R) {
+                const line = row.map((c, i) =>
+                    pad(c.rendered, widths[i], aOf(i))
+                ).join(" | ");
                 this.raw(`| ${line} |`);
             }
 
