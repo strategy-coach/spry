@@ -14,10 +14,7 @@ import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
 import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
-import {
-    prepareCapExecsFs,
-    type PrepareMode,
-} from "../universal/cap-exec/mod.ts";
+import { CapExec } from "../universal/cap-exec.ts";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
@@ -299,6 +296,7 @@ export class Walkers<
 export class EncountersSuppliers {
     readonly sqlPageCandidates: EncountersSupplier;
     readonly annotationCandidates: EncountersSupplier;
+    readonly capExecCandidates: EncountersSupplier;
 
     constructor(readonly projectModule: FsPathSupplier) {
         this.sqlPageCandidates = Walkers.builder()
@@ -316,6 +314,18 @@ export class EncountersSuppliers {
         this.annotationCandidates = Walkers.builder()
             .addRoot(projectModule, {
                 exts: [".sql", ".ts"],
+                includeDirs: false,
+                includeFiles: true,
+                includeSymlinks: false,
+                followSymlinks: true, // important for "src/spry"
+                canonicalize: true, // important for "src/spry"
+            })
+            .build();
+
+        // any executable files in our path(s) can be capexec candidates
+        // TODO: restrict it a bit more, though
+        this.capExecCandidates = Walkers.builder()
+            .addRoot(projectModule, {
                 includeDirs: false,
                 includeFiles: true,
                 includeSymlinks: false,
@@ -617,103 +627,40 @@ export class Routes {
     }
 }
 
-export const capExecCtxSchema = z.object({
-    project: z.string(),
-});
-export type CapExecContent = z.infer<typeof capExecCtxSchema>;
-
-export class CapExecs<Context extends CapExecContent> {
-    readonly logger = (
-        e: {
-            level: "debug" | "info" | "warn" | "error";
-            msg: string;
-            meta?: Record<string, unknown>;
-        },
-    ) => {
-        const tag = e.level.toUpperCase().padEnd(5);
-        const line = `${colors.bold(colors.gray(`[${tag}]`))} ${e.msg} ${
-            e.meta ? colors.gray(JSON.stringify(e.meta)) : ""
-        }`;
-        console.log(line);
-    };
-
+export class CapExecs {
     constructor(
-        readonly importMetaMainHome: string, // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+        readonly ceCandidates: EncountersSupplier,
+        readonly webPaths: PathSupplier,
         readonly init?: {
-            readonly mergeCtx?: Partial<Context>; // overrides merged into schema defaults
+            readonly mergeCtx?: Record<string, unknown>; // overrides merged into schema defaults
         },
     ) {
     }
 
-    walkSpecs() {
-        return [{
-            identity: "local-capexec",
-            root: "./src",
-            baseDir: this.importMetaMainHome,
-        }, {
-            identity: "stdlib-capexec",
-            root: "./src/spry", // this is symlink and won't be found in ./src by default
-            baseDir: this.importMetaMainHome,
-        }];
-    }
-
-    capExecsCtx() {
-        const ctxDefaults = capExecCtxSchema.parse({}) as Context; // defaults
-        return capExecCtxSchema.parse({
-            ...ctxDefaults,
-            ...(this.init?.mergeCtx ?? {}),
-        }) as Context;
-    }
-
-    env(mode: PrepareMode) {
+    env() {
         return {
-            CAPEXEC_MODE: mode,
-            CAPEXEC_CONTEXT_JSON: JSON.stringify(this.capExecsCtx()),
+            CAPEXEC_CONTEXT_JSON: JSON.stringify({ ...this.init?.mergeCtx }),
         };
     }
 
-    async execute(mode: PrepareMode = "build") {
-        for await (
-            const ev of prepareCapExecsFs<Context>({
-                specs: this.walkSpecs(),
-                mode,
-                run: mode !== "dry-run",
-                context: this.capExecsCtx(),
-                logger: this.logger,
-                adapter: {
-                    projectEnv: () => this.env(mode), // inject CAPEXEC_* and context vars
-                    // (Optional) override resolvers/materializers here if desired
-                    // resolveStage: async (...) => ({ argv: ["sh","-c","..."], cwd: "..." }),
-                    // resolveSink: async  (...) => ({ argv: ["deno","run","-A", "script.ts"], cwd: "..." }),
-                    // materializeSingle: async (...args) => {...},
-                    // materializeMulti: async  (...args) => {...},
-                },
-            })
-        ) {
-            if (ev.phase === "prepared") {
-                this.logger({
-                    level: "info",
-                    msg: "prepared",
-                    meta: {
-                        name: relative(
-                            Deno.cwd(),
-                            ev.prepared.source.item.path,
-                        ),
-                    },
-                });
-            } else {
-                this.logger({
-                    level: "info",
-                    msg: "executed",
-                    meta: {
-                        name: relative(
-                            Deno.cwd(),
-                            ev.prepared.source.item.path,
-                        ),
-                    },
-                });
-            }
+    async execute() {
+        const ceCandidates: WalkEncounter<WalkSpec>[] = [];
+        for await (const cec of this.ceCandidates.encountered()) {
+            const cecc = CapExec.capExecCandidacy(cec.entry.name);
+            console.log(cecc.base, cecc.isExecutable, cecc.isCapExec);
+            if (cecc.isCapExec) ceCandidates.push(cec);
+            if (cecc.base == "index.sql.ts") console.log(cecc);
         }
+        const ce = CapExec.create()
+            .withCandidates(ceCandidates.map((cec) => cec.entry.path))
+            .withEnv(this.env())
+            .withDryRun()
+            .on("error", (...args) => {
+                console.error(...args);
+            });
+        ///await ce.runSettled();
+        // console.log(ceCandidates);
+        console.dir(await ce.runSettled());
     }
 }
 
@@ -775,7 +722,7 @@ export class Orchestrator {
     }
 
     capExecs() {
-        return new CapExecs(this.es.projectModule.root);
+        return new CapExecs(this.es.capExecCandidates, this.project.webPaths);
     }
 
     stores() {
@@ -919,6 +866,9 @@ export class Orchestrator {
             ]),
             ["left", "right", "left"],
         );
+
+        const ce = this.capExecs();
+        await ce.execute();
 
         for (const lr of lintr.allFindings()) {
             orchMD.section("Lint Results", (md) => {
