@@ -5,14 +5,17 @@ import * as o from "../../../lib/std/orchestrate.ts";
 
 export class EndToEndTestPrime extends o.Orchestrator {
   constructor() {
-    super(fromFileUrl(import.meta.resolve("./")));
+    super(o.projectPaths(
+      fromFileUrl(import.meta.resolve("./")),
+      "../../../lib/std",
+    ));
   }
 }
 
 if (import.meta.main) {
   const e2e = new EndToEndTestPrime();
   if (Deno.args.length > 0) {
-    await e2e.cli(import.meta.resolve("./")).parse(Deno.args);
+    await e2e.cli().parse(Deno.args);
   } else {
     await e2e.orchestrate({ clean: true });
   }

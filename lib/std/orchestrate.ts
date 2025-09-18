@@ -4,12 +4,12 @@ import {
     basename,
     dirname,
     extname,
-    fromFileUrl,
     isAbsolute,
     join,
     normalize,
     relative,
 } from "jsr:@std/path@1";
+import { walk, WalkEntry, WalkOptions } from "jsr:@std/fs@1/walk";
 import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
 import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
@@ -18,7 +18,6 @@ import {
     prepareCapExecsFs,
     type PrepareMode,
 } from "../universal/cap-exec/mod.ts";
-import { type FSWalkSpec, walkFS } from "../universal/walk/mod.ts";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
@@ -122,36 +121,226 @@ export class JsonStore<
     }
 }
 
-export interface WalkSpecsSupplier {
-    readonly walkSpecs: () => Iterable<FSWalkSpec>;
+export type PathSupplier = {
+    readonly absolute: (path: string | WalkEntry) => string;
+    readonly relative: (path: string | WalkEntry) => string;
+};
+
+export type FsPathSupplier = PathSupplier & {
+    readonly root: string;
+    readonly identity?: string;
+};
+
+export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
+    const pickPath = (p: string | WalkEntry) =>
+        typeof p === "string" ? p : p.path;
+
+    const relToPrjOrStd = (p: string | WalkEntry) => {
+        const supplied = pickPath(p);
+        const result = relative(moduleHome, supplied);
+        if (result.startsWith(sprySymlinkDest)) {
+            return relative(
+                Deno.cwd(),
+                join("src", "spry", relative(sprySymlinkDest, supplied)),
+            );
+        }
+        return result;
+    };
+
+    const fsPaths: FsPathSupplier = {
+        identity: "project", // current module's unique identity
+        root: moduleHome,
+        absolute: (p) => join(moduleHome, pickPath(p)),
+        relative: relToPrjOrStd,
+    };
+
+    const webPaths: PathSupplier = {
+        absolute: (p) => relToPrjOrStd(p).replace(/^.*src\//, ""),
+        relative: (p) => relToPrjOrStd(p).replace(/^.*src\//, ""),
+    };
+
+    const absPathToSpryLocal = join(moduleHome, SRC, "spry");
+    const spryHome = relative(
+        dirname(absPathToSpryLocal),
+        import.meta.dirname!,
+    );
+    const relPathToSpryHome = relative(Deno.cwd(), absPathToSpryLocal);
+
+    const initLocalDev = async () => {
+        let removedExisting = false;
+        try {
+            await Deno.remove(relPathToSpryHome);
+            removedExisting = true;
+        } catch {
+            /** ignore */
+        }
+        await Deno.symlink(spryHome, relPathToSpryHome);
+        return {
+            spryPaths: { spryHome, relPathToSpryHome, absPathToSpryLocal },
+            removedExisting,
+            linked: { from: relPathToSpryHome, to: spryHome },
+        };
+    };
+
+    return { fsPaths, webPaths, initLocalDev };
 }
 
-export class SqlPageFiles implements WalkSpecsSupplier {
-    constructor(readonly importMetaMainHome: string) {
+export type WalkSpec = {
+    readonly paths: FsPathSupplier;
+    readonly options?: WalkOptions;
+};
+
+export type WalkEncounter<S extends WalkSpec> = {
+    readonly origin: S;
+    readonly entry: WalkEntry;
+};
+
+export type EncountersSupplier<
+    S extends WalkSpec = WalkSpec,
+    E extends WalkEncounter<S> = WalkEncounter<S>,
+> = {
+    readonly encountered: () => AsyncGenerator<E>;
+};
+
+export class Walker<
+    S extends WalkSpec = WalkSpec,
+    E extends WalkEncounter<S> = WalkEncounter<S>,
+> implements EncountersSupplier<S, E> {
+    constructor(readonly init: S) {}
+
+    transform(entry: WalkEntry) {
+        return { origin: this.init, entry } as E;
     }
 
-    walkSpecs() {
-        return [{
-            identity: "local-sql",
-            root: "./src",
-            include: ["**/*.sql"],
-            baseDir: this.importMetaMainHome,
-        }, {
-            identity: "stdlib-sql",
-            root: "./src/spry", // this is symlink and won't be found in ./src by default
-            include: ["**/*.sql"],
-            baseDir: this.importMetaMainHome,
-        }];
+    async *encountered() {
+        for await (
+            const we of walk(this.init.paths.root, this.init?.options)
+        ) {
+            yield this.transform(we) as E;
+        }
+    }
+}
+
+export class Walkers<
+    S extends WalkSpec = WalkSpec,
+    E extends WalkEncounter<S> = WalkEncounter<S>,
+> implements EncountersSupplier<S, E> {
+    readonly walkers: Walker<S, E>[];
+
+    constructor(...walkers: Walker<S, E>[]) {
+        this.walkers = walkers;
     }
 
-    async *sources() {
-        yield* walkFS({ specs: this.walkSpecs() });
+    /** Static factory: wrap existing walkers */
+    static of<
+        TS extends WalkSpec = WalkSpec,
+        TE extends WalkEncounter<TS> = WalkEncounter<TS>,
+    >(...walkers: Walker<TS, TE>[]) {
+        return new Walkers<TS, TE>(...walkers);
+    }
+
+    /** Static factory: build walkers from specs */
+    static fromSpecs<
+        TS extends WalkSpec = WalkSpec,
+        TE extends WalkEncounter<TS> = WalkEncounter<TS>,
+    >(...specs: TS[]) {
+        const ws = specs.map((s) => new Walker<TS, TE>(s));
+        return new Walkers<TS, TE>(...ws);
+    }
+
+    /** Builder entrypoint */
+    static builder<
+        TS extends WalkSpec = WalkSpec,
+        TE extends WalkEncounter<TS> = WalkEncounter<TS>,
+    >() {
+        return new (class {
+            private walkers: Walker<TS, TE>[] = [];
+
+            addWalker(w: Walker<TS, TE>) {
+                this.walkers.push(w);
+                return this;
+            }
+
+            addSpec(spec: TS) {
+                this.walkers.push(new Walker<TS, TE>(spec));
+                return this;
+            }
+
+            addRoot(
+                paths: FsPathSupplier,
+                options?: WalkOptions,
+            ) {
+                const spec = { paths, options } as TS;
+                this.walkers.push(new Walker<TS, TE>(spec));
+                return this;
+            }
+
+            build() {
+                return new Walkers<TS, TE>(...this.walkers);
+            }
+        })();
+    }
+
+    // Sequential merge with dedupe (by entry.path)
+    async *encountered() {
+        const seen = new Set<string>();
+
+        for (const w of this.walkers) {
+            for await (const e of w.encountered()) {
+                const key = e.entry.path;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                yield e as E;
+            }
+        }
+    }
+}
+
+export class EncountersSuppliers {
+    readonly sqlPageCandidates: EncountersSupplier;
+    readonly annotationCandidates: EncountersSupplier;
+
+    constructor(readonly projectModule: FsPathSupplier) {
+        this.sqlPageCandidates = Walkers.builder()
+            .addRoot(projectModule, {
+                exts: [".sql", ".json"],
+                includeDirs: false,
+                includeFiles: true,
+                includeSymlinks: false,
+                followSymlinks: true, // important for "src/spry"
+                canonicalize: true, // important for "src/spry"
+            })
+            .build();
+
+        // any files in our path(s) can be annotation candidates
+        this.annotationCandidates = Walkers.builder()
+            .addRoot(projectModule, {
+                exts: [".sql", ".ts"],
+                includeDirs: false,
+                includeFiles: true,
+                includeSymlinks: false,
+                followSymlinks: true, // important for "src/spry"
+                canonicalize: true, // important for "src/spry"
+            })
+            .build();
+    }
+
+    private static readonly cache = new Map<string, EncountersSuppliers>();
+
+    static singleton(projectModule: FsPathSupplier): EncountersSuppliers {
+        const id = projectModule.identity ?? projectModule.root;
+        let instance = this.cache.get(id);
+        if (!instance) {
+            instance = new EncountersSuppliers(projectModule);
+            this.cache.set(id, instance);
+        }
+        return instance;
     }
 }
 
 const spryEntryAnnCommon = {
-    absPath: z.string(),
-    relPath: z.string(),
+    absFsPath: z.string(),
+    relFsPath: z.string(),
     documentation: z.json().optional(),
 };
 
@@ -257,10 +446,10 @@ export const spryRouteAnnSchema = z.object({
 export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
 export type SpryRouteAnnotation = z.infer<typeof spryRouteAnnSchema>;
 
-export class Annotations implements WalkSpecsSupplier {
-    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
+export class Annotations {
     constructor(
-        readonly importMetaMainHome: string,
+        readonly annotatable: EncountersSupplier,
+        readonly webPaths: PathSupplier,
         readonly init?: {
             readonly transformEntryAnn?: (
                 enc: SpryEntryAnnotation,
@@ -272,22 +461,8 @@ export class Annotations implements WalkSpecsSupplier {
     ) {
     }
 
-    walkSpecs() {
-        return [{
-            identity: "local-sql",
-            root: "./src",
-            include: ["**/*.sql"],
-            baseDir: this.importMetaMainHome,
-        }, {
-            identity: "stdlib-sql",
-            root: "./src/spry", // this is symlink and won't be found in ./src by default
-            include: ["**/*.sql"],
-            baseDir: this.importMetaMainHome,
-        }];
-    }
-
     async *sources() {
-        yield* walkFS({ specs: this.walkSpecs() });
+        yield* this.annotatable.encountered();
     }
 
     async safeAnnGroup<S extends z.ZodTypeAny, Payload>(
@@ -339,8 +514,8 @@ export class Annotations implements WalkSpecsSupplier {
             this.init?.transformEntryAnn,
             {
                 "nature": "page",
-                "absPath": we.item.path,
-                "relPath": we.payload.relPath,
+                "absFsPath": we.entry.path,
+                "relFsPath": we.origin.paths.relative(we.entry),
             },
         );
     }
@@ -349,17 +524,18 @@ export class Annotations implements WalkSpecsSupplier {
         we: YieldOf<typeof this.sources>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
     ) {
-        const pathBasename = basename(we.payload.relPath);
+        const pathBasename = basename(we.entry.path);
+        const webPath = this.webPaths.absolute(we.entry);
         return await this.safeAnnGroup(
             spryRouteAnnSchema,
             "route.",
             anns,
             this.init?.transformRouteAnn,
             {
-                "path": we.payload.relPath,
+                "path": webPath,
                 "pathBasename": pathBasename,
                 "pathBasenameNoExtn": pathBasename.split(".")[0],
-                "pathDirname": dirname(we.payload.relPath),
+                "pathDirname": dirname(webPath),
                 "pathExtnTerminal": extname(pathBasename),
                 "pathExtns":
                     (pathBasename.includes(".")
@@ -371,23 +547,27 @@ export class Annotations implements WalkSpecsSupplier {
 
     async *catalog() {
         for await (const we of this.sources()) {
-            const anns = await extractAnnotationsFromText(
-                await Deno.readTextFile(we.item.path),
-                detectLanguageByPath(we.item.path)!, // give sane default
-                {
-                    tags: { multi: true, valueMode: "json" },
-                    kv: false,
-                    yaml: false,
-                    json: false,
-                },
-            );
+            try {
+                const anns = await extractAnnotationsFromText(
+                    await Deno.readTextFile(we.entry.path),
+                    detectLanguageByPath(we.entry.path)!, // TODO: give sane default
+                    {
+                        tags: { multi: true, valueMode: "json" },
+                        kv: false,
+                        yaml: false,
+                        json: false,
+                    },
+                );
 
-            yield {
-                walkEntry: we,
-                annotations: anns,
-                entryAnn: await this.entryAnnFromCatalog(we, anns),
-                routeAnn: await this.routeAnnFromCatalog(we, anns),
-            };
+                yield {
+                    walkEntry: we,
+                    annotations: anns,
+                    entryAnn: await this.entryAnnFromCatalog(we, anns),
+                    routeAnn: await this.routeAnnFromCatalog(we, anns),
+                };
+            } catch (err) {
+                console.error(we.origin.paths.relative(we.entry), err);
+            }
         }
     }
 }
@@ -442,8 +622,7 @@ export const capExecCtxSchema = z.object({
 });
 export type CapExecContent = z.infer<typeof capExecCtxSchema>;
 
-export class CapExecs<Context extends CapExecContent>
-    implements WalkSpecsSupplier {
+export class CapExecs<Context extends CapExecContent> {
     readonly logger = (
         e: {
             level: "debug" | "info" | "warn" | "error";
@@ -538,52 +717,11 @@ export class CapExecs<Context extends CapExecContent>
     }
 }
 
-export class LocalDev {
+export class Orchestrator {
     // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
     constructor(
-        readonly importMetaMainHome: string,
-    ) {
-    }
-
-    spryPaths() {
-        const absPathToSpryLocal = join(
-            fromFileUrl(this.importMetaMainHome),
-            SRC,
-            "spry",
-        );
-        const spryHome = relative(
-            dirname(absPathToSpryLocal),
-            import.meta.dirname!,
-        );
-        const relPathToSpryHome = relative(Deno.cwd(), absPathToSpryLocal);
-        return {
-            spryHome,
-            relPathToSpryHome,
-        };
-    }
-
-    async init() {
-        const sp = this.spryPaths();
-        let removedExisting = false;
-        try {
-            await Deno.remove(sp.relPathToSpryHome);
-            removedExisting = true;
-        } catch {
-            /** ignore */
-        }
-        await Deno.symlink(sp.spryHome, sp.relPathToSpryHome);
-        return {
-            spryPaths: sp,
-            removedExisting,
-            linked: { from: sp.relPathToSpryHome, to: sp.spryHome },
-        };
-    }
-}
-
-export class Orchestrator implements WalkSpecsSupplier {
-    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
-    constructor(
-        readonly importMetaMainHome: string,
+        readonly project: ReturnType<typeof projectPaths>,
+        readonly es = EncountersSuppliers.singleton(project.fsPaths),
     ) {
     }
 
@@ -610,45 +748,34 @@ export class Orchestrator implements WalkSpecsSupplier {
     }
 
     orchStore<Path extends string>() {
-        return new Store<Path>(normalize(join(this.importMetaMainHome)));
+        return new Store<Path>(normalize(this.es.projectModule.root));
     }
 
     srcStore<Path extends string>() {
-        return new Store<Path>(normalize(join(this.importMetaMainHome, SRC)));
+        return new Store<Path>(
+            normalize(join(this.es.projectModule.root, SRC)),
+        );
     }
 
     annotationsStore<Path extends string>() {
         return new JsonStore(
             new Store<Path>(
-                normalize(join(this.importMetaMainHome, SRC, "annotations")),
+                normalize(join(this.es.projectModule.root, SRC, "annotations")),
             ),
             undefined,
             { pretty: true },
         );
     }
 
-    sqlpageFiles() {
-        return new SqlPageFiles(this.importMetaMainHome);
-    }
-
     annotations() {
-        return new Annotations(this.importMetaMainHome);
+        return new Annotations(
+            this.es.annotationCandidates,
+            this.project.webPaths,
+        );
     }
 
     capExecs() {
-        return new CapExecs(this.importMetaMainHome);
-    }
-
-    walkSpecs() {
-        return [
-            ...this.sqlpageFiles().walkSpecs(),
-            ...this.annotations().walkSpecs(),
-            ...this.capExecs().walkSpecs(),
-        ];
-    }
-
-    watchRoots() {
-        return Array.from(new Set(this.walkSpecs().map((s) => s.root)));
+        return new CapExecs(this.es.projectModule.root);
     }
 
     stores() {
@@ -683,7 +810,7 @@ export class Orchestrator implements WalkSpecsSupplier {
     }
 
     async orchestrate(init?: { clean?: boolean }) {
-        const spf = this.sqlpageFiles();
+        const spc = this.es.sqlPageCandidates;
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
@@ -695,10 +822,11 @@ export class Orchestrator implements WalkSpecsSupplier {
 
         orchMD.h2("SQLPage Files Candidates");
         orchMD.table(
-            ["Root", "Path"],
-            (await Array.fromAsync(spf.sources())).map((src) => [
-                src.spec.origin.identity ?? "",
-                src.payload.relPath,
+            ["Root", "Web Path", "Fs Path"],
+            (await Array.fromAsync(spc.encountered())).map((src) => [
+                src.origin.paths.identity ?? "",
+                this.project.webPaths.absolute(src.entry),
+                src.origin.paths.relative(src.entry),
             ]),
         );
 
@@ -710,22 +838,30 @@ export class Orchestrator implements WalkSpecsSupplier {
         for await (const a of this.annotations().catalog()) {
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
                 await annStore.write(
-                    join("entry", a.entryAnn.parsed.relPath + ".auto.json"),
-                    a.entryAnn,
-                    // don't store absPath because it will be different across systems
+                    join("entry", a.entryAnn.parsed.relFsPath + ".auto.json"),
+                    {
+                        ...a.entryAnn.parsed,
+                        webPath: this.project.webPaths.absolute(
+                            a.walkEntry.entry,
+                        ),
+                        ".source": a.entryAnn.anns,
+                    },
+                    // don't store absFsPath because it will be different across systems
                     // making it harder to store in Git (because it will show diffs)
-                    omitPathsReplacer(a.entryAnn, [["parsed", "absPath"]]),
+                    omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
                 );
                 annotated.add({
-                    root: a.walkEntry.spec.origin.identity,
-                    relPath: a.entryAnn.parsed.relPath,
+                    root: a.walkEntry.origin.paths.identity,
+                    relPath: a.entryAnn.parsed.relFsPath,
                     count: a.entryAnn.found,
                 });
             } else if (a.entryAnn.found > 0) {
                 lintr.add({
                     rule: "invalid-annotation",
                     code: "entry",
-                    content: a.walkEntry.payload.relPath,
+                    content: a.walkEntry.origin.paths.relative(
+                        a.walkEntry.entry,
+                    ),
                     message: "Invalid entry annotation",
                     data: { annotation: a.entryAnn },
                     severity: "error",
@@ -735,10 +871,10 @@ export class Orchestrator implements WalkSpecsSupplier {
             if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
                 await annStore.write(
                     join("route", a.routeAnn.parsed.path + ".auto.json"),
-                    a.routeAnn,
+                    { ...a.routeAnn.parsed, ".source": a.routeAnn.anns },
                 );
                 annotated.add({
-                    root: a.walkEntry.spec.origin.identity,
+                    root: a.walkEntry.origin.paths.identity,
                     relPath: a.routeAnn.parsed.path,
                     count: a.routeAnn.found,
                 });
@@ -747,7 +883,9 @@ export class Orchestrator implements WalkSpecsSupplier {
                 lintr.add({
                     rule: "invalid-annotation",
                     code: "route",
-                    content: a.walkEntry.payload.relPath,
+                    content: a.walkEntry.origin.paths.relative(
+                        a.walkEntry.entry,
+                    ),
                     message: "Invalid route annotation",
                     data: { annotation: a.routeAnn },
                     severity: "error",
@@ -784,15 +922,17 @@ export class Orchestrator implements WalkSpecsSupplier {
 
         for (const lr of lintr.allFindings()) {
             orchMD.section("Lint Results", (md) => {
-                md.p(`[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message}`);
+                md.p(
+                    `[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message} in ${lr.content}`,
+                );
+                md.code("json", JSON.stringify(lr.data, null, 2));
             });
         }
         srcStore.writeText("orchestrated.auto.md", orchMD.write());
     }
 
-    cli(importMetaMainHome: string, init?: { name?: string }) {
-        const roots = this.watchRoots();
-        const localDev = new LocalDev(importMetaMainHome);
+    cli(init?: { name?: string }) {
+        const roots = [this.es.projectModule.root];
         return new Command()
             .name(init?.name ?? "package.sql.ts")
             .version("0.1.0")
@@ -802,11 +942,16 @@ export class Orchestrator implements WalkSpecsSupplier {
             .command("init")
             .description("Setup local dev environment")
             .action(async () => {
-                const ldi = await localDev.init();
+                const ldi = await this.project.initLocalDev();
                 if (ldi.removedExisting) {
                     console.log("Removed", ldi.linked.from);
                 }
                 console.log("Linked", ldi.linked.from, "to", ldi.linked.to);
+            })
+            .command("clean")
+            .description("Clean auto-generated directories or files")
+            .action(async () => {
+                await this.clean(this.stores());
             })
             .command("watch")
             .description(
@@ -817,7 +962,7 @@ export class Orchestrator implements WalkSpecsSupplier {
                 const debounceMs = 150;
                 let timer: number | null = null;
 
-                await this.orchestrate();
+                await this.orchestrate({ clean: true });
 
                 // Basic FS watch (use your own watcher if you need cross-platform globs)
                 const watcher = Deno.watchFs(roots);
@@ -830,7 +975,7 @@ export class Orchestrator implements WalkSpecsSupplier {
                         console.log(
                             colors.cyan("⟳ change detected, rebuilding…"),
                         );
-                        await this.orchestrate();
+                        await this.orchestrate({ clean: true });
                     }, debounceMs) as unknown as number;
                 }
             });

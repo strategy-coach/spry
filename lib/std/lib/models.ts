@@ -25,10 +25,10 @@ export function sqliteModels() {
     // 👆 path, contents, and lastModified are used by SQLPage
     // 👇 the remainder of the fields below are for Spry
 
-    // the kind of content (page, api, action, sql-sp), denormalized from @spry.nature annotation
+    // the kind of content (page, api, action, sql-sp), denormalized from \@spry.nature annotation
     nature: text().notNull().default("page"),
 
-    // if any @spry or @route annotations, they are stored here
+    // if any \@spry or \@route annotations, they are stored here
     annotations: text(),
 
     // custom data for use by the app
