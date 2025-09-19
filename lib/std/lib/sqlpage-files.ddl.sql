@@ -15,40 +15,23 @@ Purpose:
 
 Usage:
   • SQLPage uses:
-      - path          → maps files to URLs
+      - path          → maps files to URLs ("web paths")
       - contents      → SQL code executed to render the page
       - last_modified → detects when pages change for caching or live reload
   • Spry uses:
-      - nature        → classifies file type (e.g. 'page', 'partial', 'component')
-      - annotations   → JSON metadata for navigation, captions, etc.
-      - elaboration   → JSON custom data field for anything that's useful
+      - path          → paths starting with `.annotation` are for custom data
+      - contents      → entry, route, breadcrumbs, etc. are stored here
 
 Columns:
   path            VARCHAR  PRIMARY KEY, NOT NULL
       • Unique identifier for the file (usually relative path).
-      • Used by SQLPage to map routes.
+      • Used by SQLPage to map URLs to content.
+      • Used by Spry to store annoations in `.annotation/**`
   contents        TEXT, NOT NULL
-      • Stores the raw SQL code for rendering the page.
+      • Stores the raw SQL code SQLPage uses for rendering HTML and other content.
+      • Stores JSON and other code for Spry.
   last_modified   TIMESTAMPTZ, DEFAULT CURRENT_TIMESTAMP
       • Auto-updated when inserted; can be used for cache invalidation.
-  nature          TEXT, NOT NULL, DEFAULT 'page'
-      • Categorizes the file’s role in the app:
-          'page'      → regular page
-          'partial'   → reusable snippet
-          'component' → custom UI element
-          'data'      → data provider
-  annotations     TEXT, JSON (nullable)
-      • Optional metadata for Spry in JSON format.
-      • Must be either NULL or valid JSON (enforced by CHECK constraint).
-      • Typical structure:
-          {
-            "isRouteAnnotated": true,
-            "route": {
-              "path": "/spry/console/info-schema/index.sql",
-              "caption": "Spry Schema",
-              "title": "Spry BaaS Info Schema"
-            }
-          }
 
 Notes:
   • All SQLPage pages and components are stored here, enabling dynamic routing.
@@ -58,14 +41,7 @@ Notes:
 CREATE TABLE IF NOT EXISTS "sqlpage_files" (
   "path" VARCHAR PRIMARY KEY NOT NULL,
   "contents" TEXT NOT NULL,
-  "last_modified" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-
-  -- path, contents, and lastModified are used by SQLPage
-  -- the remainder of the fields below are for Spry
-
-  "nature" TEXT NOT NULL DEFAULT 'page',
-  "annotations" TEXT CHECK (json_valid("annotations") OR NULL),
-  "elaboration" TEXT CHECK (json_valid("elaboration") OR NULL)
+  "last_modified" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- should match `contents.ts` SpryRouteAnnotation shape;

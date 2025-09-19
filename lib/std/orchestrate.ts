@@ -15,6 +15,8 @@ import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { CapExec } from "../universal/cap-exec.ts";
+import { drizzle } from "npm:drizzle-orm@0.44.5/libsql";
+import { eq, getTableName } from "npm:drizzle-orm@0.44.5";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
@@ -28,6 +30,7 @@ import {
     pathTreeNavigation,
     pathTreeSerializers,
 } from "../universal/path-tree.ts";
+import { inlinedSQL } from "../universal/sql-text.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -37,7 +40,40 @@ type YieldOf<T extends (...args: Any) => Any> = Awaited<ReturnType<T>> extends
     : Awaited<ReturnType<T>> extends AsyncIterableIterator<infer Y> ? Y
     : never;
 
-const SRC = "src" as const;
+import { sql } from "npm:drizzle-orm@0.44.5";
+import {
+    check,
+    SQLiteColumn,
+    sqliteTable,
+    text,
+} from "npm:drizzle-orm@0.44.5/sqlite-core";
+import { resolve } from "node:path";
+
+export function sqliteModels() {
+    const checkJSON = (c: SQLiteColumn) =>
+        check(
+            `${c.name}_check_valid_json`,
+            sql`json_valid(${c}) OR ${c} IS NULL`,
+        );
+
+    const sqlpageFiles = sqliteTable("sqlpage_files", {
+        // web path which SQLPage translates from URL to `contents`
+        path: text().primaryKey().notNull(),
+
+        // SQLPage file contents for rendering
+        contents: text().notNull(),
+
+        // Last modified timestamp for SQLPage to auto-refresh, defaults to CURRENT_TIMESTAMP
+        lastModified: text("last_modified")
+            .default(sql`CURRENT_TIMESTAMP`)
+            .notNull(),
+    });
+
+    return {
+        checkJSON,
+        sqlpageFiles,
+    };
+}
 
 /**
  * Basic filesystem store. Writes text/bytes to caller-provided RELATIVE paths under destRoot.
@@ -129,6 +165,7 @@ export type FsPathSupplier = PathSupplier & {
 };
 
 export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
+    const SRC = "src" as const;
     const pickPath = (p: string | WalkEntry) =>
         typeof p === "string" ? p : p.path;
 
@@ -138,17 +175,25 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
         if (result.startsWith(sprySymlinkDest)) {
             return relative(
                 Deno.cwd(),
-                join("src", "spry", relative(sprySymlinkDest, supplied)),
+                join(SRC, "spry", relative(sprySymlinkDest, supplied)),
             );
         }
         return result;
     };
 
-    const fsPaths: FsPathSupplier = {
+    const projectFsPaths: FsPathSupplier = {
         identity: "project", // current module's unique identity
         root: moduleHome,
         absolute: (p) => join(moduleHome, pickPath(p)),
         relative: relToPrjOrStd,
+    };
+
+    const projectSrcFsPaths: FsPathSupplier = {
+        identity: "project-src", // current module's unique identity
+        root: join(moduleHome, SRC),
+        absolute: (p) => join(moduleHome, SRC, pickPath(p)),
+        relative: (p: string | WalkEntry) =>
+            relative(join(moduleHome, SRC), pickPath(p)),
     };
 
     const webPaths: PathSupplier = {
@@ -179,7 +224,7 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
         };
     };
 
-    return { fsPaths, webPaths, initLocalDev };
+    return { projectFsPaths, projectSrcFsPaths, webPaths, initLocalDev };
 }
 
 export type WalkSpec = {
@@ -297,6 +342,7 @@ export class EncountersSuppliers {
     readonly sqlPageCandidates: EncountersSupplier;
     readonly annotationCandidates: EncountersSupplier;
     readonly capExecCandidates: EncountersSupplier;
+    readonly headSQL: EncountersSupplier;
 
     constructor(readonly projectModule: FsPathSupplier) {
         this.sqlPageCandidates = Walkers.builder()
@@ -323,7 +369,7 @@ export class EncountersSuppliers {
             .build();
 
         // any executable files in our path(s) can be capexec candidates
-        // TODO: restrict it a bit more, though
+        // TODO: restrict it a bit more, though?
         this.capExecCandidates = Walkers.builder()
             .addRoot(projectModule, {
                 includeDirs: false,
@@ -333,6 +379,31 @@ export class EncountersSuppliers {
                 canonicalize: true, // important for "src/spry"
             })
             .build();
+
+        this.headSQL = {
+            async *encountered() {
+                yield {
+                    entry: {
+                        name: "sqlpage-files.ddl.sql",
+                        isDirectory: false,
+                        isFile: true,
+                        isSymlink: false,
+                        path: resolve(
+                            join(
+                                projectModule.root,
+                                "src",
+                                "spry",
+                                "lib",
+                                "sqlpage-files.ddl.sql",
+                            ),
+                        ),
+                    },
+                    origin: {
+                        paths: projectModule,
+                    },
+                };
+            },
+        };
     }
 
     private static readonly cache = new Map<string, EncountersSuppliers>();
@@ -345,6 +416,40 @@ export class EncountersSuppliers {
             this.cache.set(id, instance);
         }
         return instance;
+    }
+}
+
+export class SqlPageFiles {
+    constructor(
+        readonly candidates: EncountersSupplier,
+        readonly webPaths: PathSupplier,
+    ) {
+    }
+
+    async *sources() {
+        yield* this.candidates.encountered();
+    }
+
+    async *seedInserts() {
+        const { sqlpageFiles: sqlpageFilesTable } = sqliteModels();
+        //type SqlPageFileRow = typeof sqlpageFilesTable.$inferInsert;
+
+        // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
+        const db = drizzle({ connection: { url: ":memory:" } });
+        for await (const spf of this.sources()) {
+            const path = this.webPaths.absolute(spf.entry);
+            yield inlinedSQL(
+                db.delete(sqlpageFilesTable).where(
+                    eq(sqlpageFilesTable.path, path),
+                ).toSQL(),
+            );
+            yield inlinedSQL(
+                db.insert(sqlpageFilesTable).values({
+                    path: path,
+                    contents: await Deno.readTextFile(spf.entry.path),
+                }).toSQL(),
+            );
+        }
     }
 }
 
@@ -662,8 +767,8 @@ export class CapExecs {
 export class Orchestrator {
     // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
     constructor(
-        readonly project: ReturnType<typeof projectPaths>,
-        readonly es = EncountersSuppliers.singleton(project.fsPaths),
+        readonly pp: ReturnType<typeof projectPaths>,
+        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
     ) {
     }
 
@@ -695,29 +800,36 @@ export class Orchestrator {
 
     srcStore<Path extends string>() {
         return new Store<Path>(
-            normalize(join(this.es.projectModule.root, SRC)),
+            normalize(this.pp.projectSrcFsPaths.root),
         );
     }
 
     annotationsStore<Path extends string>() {
         return new JsonStore(
             new Store<Path>(
-                normalize(join(this.es.projectModule.root, SRC, "annotations")),
+                normalize(join(this.pp.projectSrcFsPaths.root, ".annotation")),
             ),
             undefined,
             { pretty: true },
         );
     }
 
+    sqlpageFiles() {
+        return new SqlPageFiles(
+            this.es.sqlPageCandidates,
+            this.pp.webPaths,
+        );
+    }
+
     annotations() {
         return new Annotations(
             this.es.annotationCandidates,
-            this.project.webPaths,
+            this.pp.webPaths,
         );
     }
 
     capExecs() {
-        return new CapExecs(this.es.capExecCandidates, this.project.webPaths);
+        return new CapExecs(this.es.capExecCandidates, this.pp.webPaths);
     }
 
     stores() {
@@ -767,7 +879,7 @@ export class Orchestrator {
             ["Root", "Web Path", "Fs Path"],
             (await Array.fromAsync(spc.encountered())).map((src) => [
                 src.origin.paths.identity ?? "",
-                this.project.webPaths.absolute(src.entry),
+                this.pp.webPaths.absolute(src.entry),
                 src.origin.paths.relative(src.entry),
             ]),
         );
@@ -783,7 +895,7 @@ export class Orchestrator {
                     join("entry", a.entryAnn.parsed.relFsPath + ".auto.json"),
                     {
                         ...a.entryAnn.parsed,
-                        webPath: this.project.webPaths.absolute(
+                        webPath: this.pp.webPaths.absolute(
                             a.walkEntry.entry,
                         ),
                         ".source": a.entryAnn.anns,
@@ -834,13 +946,18 @@ export class Orchestrator {
                 });
             }
         }
-
         const routes = new Routes(routeAnns);
         const { serializers, breadcrumbs } = await routes.populate();
         orchMD.h2("Routes Tree");
         orchMD.code("ascii", serializers.asciiTreeText());
 
         orchMD.h2("Breadcrumbs");
+        for (const [path, node] of Object.entries(breadcrumbs)) {
+            await annStore.write(
+                join("breadcrumbs", path + ".auto.json"),
+                node,
+            );
+        }
         orchMD.table(
             ["Path", "Breadcrumbs"],
             Array.from(Object.entries(breadcrumbs)).map(([path, node]) => [
@@ -876,6 +993,22 @@ export class Orchestrator {
         srcStore.writeText("orchestrated.auto.md", orchMD.write());
     }
 
+    async SQL() {
+        const { sqlpageFiles } = sqliteModels();
+        const spf = this.sqlpageFiles();
+
+        for await (const h of this.es.headSQL.encountered()) {
+            console.log(await Deno.readTextFile(h.entry.path));
+        }
+
+        console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
+        for await (const insert of spf.seedInserts()) {
+            console.log(insert);
+        }
+
+        // await cli.tail();
+    }
+
     cli(init?: { name?: string }) {
         const roots = [this.es.projectModule.root];
         return new Command()
@@ -887,7 +1020,7 @@ export class Orchestrator {
             .command("init")
             .description("Setup local dev environment")
             .action(async () => {
-                const ldi = await this.project.initLocalDev();
+                const ldi = await this.pp.initLocalDev();
                 if (ldi.removedExisting) {
                     console.log("Removed", ldi.linked.from);
                 }
@@ -897,6 +1030,11 @@ export class Orchestrator {
             .description("Clean auto-generated directories or files")
             .action(async () => {
                 await this.clean(this.stores());
+            })
+            .command("build")
+            .description("Perform orchestration (annotations, routes, capexes)")
+            .action(async () => {
+                await this.orchestrate({ clean: true });
             })
             .command("watch")
             .description(
