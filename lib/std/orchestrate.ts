@@ -1252,7 +1252,6 @@ export class Orchestrator {
             .action(async () => {
                 await this.orchestrate({ clean: true });
             })
-            .action(ls)
             .command("help", new HelpCommand().global())
             .command(
                 "ls",
