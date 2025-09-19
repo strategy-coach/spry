@@ -3,7 +3,7 @@
 import { fromFileUrl } from "jsr:@std/path@1";
 import * as o from "../../../lib/std/orchestrate.ts";
 
-export class EndToEndTestPrime extends o.Orchestrator {
+export class EndToEndTestPrime extends o.Plan {
   constructor() {
     super(o.projectPaths(
       fromFileUrl(import.meta.resolve("./")),
@@ -15,8 +15,8 @@ export class EndToEndTestPrime extends o.Orchestrator {
 if (import.meta.main) {
   const e2e = new EndToEndTestPrime();
   if (Deno.args.length > 0) {
-    await e2e.cli().parse(Deno.args);
+    await new o.CLI(e2e).cli().parse(Deno.args);
   } else {
-    await e2e.SQL();
+    await new o.SQL(e2e).toStdOut();
   }
 }

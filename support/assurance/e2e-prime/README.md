@@ -7,30 +7,28 @@ deno install
 
 # orchestrate.ts lets you perform different functions
 ./e2ectl.ts help
-./e2ectl.ts watch
+./e2ectl.ts watch              # TODO: not well tested yet
 
 # informational
-./e2ectl.ts ls                 # list all candidate sqlpage_files content files and if there are any annotation errors
+./e2ectl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
+./e2ectl.ts ls ann             # TODO: list all candidate sqlpage_files that have been annotated with `@spry.*`
 ./e2ectl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
-./e2ectl.ts ls head            # list all SQL DDL for "init" operations that go before sqlpage_files inserts
-./e2ectl.ts ls tail            # list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
+./e2ectl.ts ls head            # TODO: list all SQL DDL for "init" operations that go before sqlpage_files inserts
+./e2ectl.ts ls tail            # TODO: list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
 ./e2ectl.ts ls routes          # list all discovered files that have route annotations as a tree
 ./e2ectl.ts ls routes -t       # list all discovered files that have route annotations as a table
 ./e2ectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
 ./e2ectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # emit SQL
-./e2ectl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./e2ectl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./e2ectl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
-
-# developer experience
-./e2ectl.ts dx watchexec       # TODO: generate watchexec CLI for bash to watch all roots / files / etc.
+./e2ectl.ts sql head           # TODO: generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./e2ectl.ts sql tail           # TODO: generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./e2ectl.ts sql sqlpage-files  # TODO: generate the INSERT SQL DML for sqlpage_files contents
 
 # deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
-./package.sql.ts > sqlpage-package.sql
-./package.sql.ts | sqlite3 sqlpage.db
+./e2ectl.ts > sqlpage-package.sql
+./e2ectl.ts | sqlite3 sqlpage.db
 ```
 
 ### TODO: explain how `spry.d` fits in

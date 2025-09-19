@@ -344,28 +344,6 @@ export class SqlPageFiles {
     async *sources() {
         yield* this.candidates.encountered();
     }
-
-    async *seedInserts() {
-        const { sqlpageFiles: sqlpageFilesTable } = sqliteModels();
-        //type SqlPageFileRow = typeof sqlpageFilesTable.$inferInsert;
-
-        // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
-        const db = drizzle({ connection: { url: ":memory:" } });
-        for await (const spf of this.sources()) {
-            const path = this.webPaths.absolute(spf.entry);
-            yield inlinedSQL(
-                db.delete(sqlpageFilesTable).where(
-                    eq(sqlpageFilesTable.path, path),
-                ).toSQL(),
-            );
-            yield inlinedSQL(
-                db.insert(sqlpageFilesTable).values({
-                    path: path,
-                    contents: await Deno.readTextFile(spf.entry.path),
-                }).toSQL(),
-            );
-        }
-    }
 }
 
 const spryEntryAnnCommon = {
@@ -727,23 +705,23 @@ export class Linter {
     }
 }
 
-export class OrchSession {
+export class Workflow {
     readonly linter: Linter;
     readonly lintr: ReturnType<Linter["lintResults"]>;
-    readonly stores: ReturnType<Orchestrator["stores"]>;
-    readonly pp: Orchestrator["pp"];
-    readonly spf: ReturnType<Orchestrator["sqlpageFiles"]>;
-    readonly annotations: ReturnType<Orchestrator["annotations"]>;
-    readonly capExecs: ReturnType<Orchestrator["capExecs"]>;
+    readonly stores: ReturnType<Plan["stores"]>;
+    readonly pp: Plan["pp"];
+    readonly spf: ReturnType<Plan["sqlpageFiles"]>;
+    readonly annotations: ReturnType<Plan["annotations"]>;
+    readonly capExecs: ReturnType<Plan["capExecs"]>;
 
     #annsCatalog?: YieldOf<
-        ReturnType<Orchestrator["annotations"]>["catalog"]
+        ReturnType<Plan["annotations"]>["catalog"]
     >[];
 
     readonly mdStore = new MarkdownStore<"orchestrated.auto.md">();
     readonly orchMD = this.mdStore.markdown("orchestrated.auto.md");
 
-    constructor(readonly orch: Orchestrator) {
+    constructor(readonly orch: Plan) {
         this.pp = orch.pp;
         this.linter = orch.linter();
         this.lintr = this.linter.lintResults();
@@ -784,13 +762,13 @@ export class OrchSession {
     // deno-lint-ignore require-await
     async entryAnnotations(lint = false) {
         const entryAnns: {
-            we: OrchSession["annsCatalog"][number]["walkEntry"];
-            ann: OrchSession["annsCatalog"][number]["entryAnn"];
+            we: Workflow["annsCatalog"][number]["walkEntry"];
+            ann: Workflow["annsCatalog"][number]["entryAnn"];
             entryAnn: SpryEntryAnnotation;
         }[] = [];
         const issues: {
-            we: OrchSession["annsCatalog"][number]["walkEntry"];
-            ann: OrchSession["annsCatalog"][number]["entryAnn"];
+            we: Workflow["annsCatalog"][number]["walkEntry"];
+            ann: Workflow["annsCatalog"][number]["entryAnn"];
         }[] = [];
         for (const a of this.annsCatalog) {
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
@@ -841,17 +819,17 @@ export class OrchSession {
         }
     }
 
-    // deno-lint-ignore require-await
     async routeAnnotations(lint = false) {
         const routeAnns: {
-            we: OrchSession["annsCatalog"][number]["walkEntry"];
-            ann: OrchSession["annsCatalog"][number]["routeAnn"];
+            we: Workflow["annsCatalog"][number]["walkEntry"];
+            ann: Workflow["annsCatalog"][number]["routeAnn"];
             routeAnn: SpryRouteAnnotation;
         }[] = [];
         const issues: {
-            we: OrchSession["annsCatalog"][number]["walkEntry"];
-            ann: OrchSession["annsCatalog"][number]["routeAnn"];
+            we: Workflow["annsCatalog"][number]["walkEntry"];
+            ann: Workflow["annsCatalog"][number]["routeAnn"];
         }[] = [];
+
         for (const a of this.annsCatalog) {
             if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
                 routeAnns.push({
@@ -876,7 +854,55 @@ export class OrchSession {
                 }
             }
         }
-        return { valid: routeAnns, issues };
+
+        const forest = await pathTree<SpryRouteAnnotation, string>(
+            routeAnns.map((ra) => ra.routeAnn),
+            {
+                nodePath: (n) => n.path,
+                pathDelim: "/",
+                synthesizeContainers: true,
+                folderFirst: false,
+                indexBasenames: ["index.sql"],
+            },
+        );
+
+        const tree = forest.roots;
+        const nav = pathTreeNavigation(forest);
+        const serializers = {
+            ...pathTreeSerializers(forest),
+            crumbsJsonSchemaText: () =>
+                JSON.stringify(
+                    nav.ancestorsJsonSchema({
+                        outerIsMap: true,
+                        payloadItemSchema: z.toJSONSchema(
+                            spryRouteAnnSchema,
+                        ),
+                    }),
+                    null,
+                    2,
+                ),
+        };
+
+        const breadcrumbs: Record<
+            string,
+            ReturnType<typeof nav.ancestors>
+        > = {};
+        for (const node of forest.treeByPath.values()) {
+            if (node.payloads) {
+                for (const p of node.payloads) {
+                    breadcrumbs[p.path] = nav.ancestors(p);
+                }
+            }
+        }
+
+        return {
+            valid: routeAnns,
+            issues,
+            forest,
+            tree,
+            breadcrumbs,
+            serializers,
+        };
     }
 
     async dropInRouteAnns(
@@ -962,15 +988,72 @@ export class OrchSession {
     }
 }
 
-export class Orchestrator {
-    constructor(readonly pp: ReturnType<typeof projectPaths>) {
+export class SQL {
+    constructor(readonly plan: Plan) {
     }
-
     get provenanceHint() {
         return provenanceText({
             importMetaURL: import.meta.url,
             framesToSkip: 2,
         });
+    }
+
+    async *headSQL() {
+        // deno-fmt-ignore
+        yield `-- tail SQL defined in ${this.provenanceHint}`;
+        yield Deno.readTextFile(this.plan.pp.projectSrcFsPaths.absolute(
+            join("spry", "lib", "sqlpage-files.ddl.sql"),
+        ));
+    }
+
+    async *seedInserts() {
+        const { sqlpageFiles: sqlpageFilesTable } = sqliteModels();
+        const spf = this.plan.sqlpageFiles();
+        //type SqlPageFileRow = typeof sqlpageFilesTable.$inferInsert;
+
+        // needed for drizzle-orm with @libsql/client because it doesn't generate SQL without it
+        const db = drizzle({ connection: { url: ":memory:" } });
+        for await (const f of spf.sources()) {
+            const path = this.plan.pp.webPaths.absolute(f.entry);
+            yield inlinedSQL(
+                db.delete(sqlpageFilesTable).where(
+                    eq(sqlpageFilesTable.path, path),
+                ).toSQL(),
+            );
+            yield inlinedSQL(
+                db.insert(sqlpageFilesTable).values({
+                    path: path,
+                    contents: await Deno.readTextFile(f.entry.path),
+                }).toSQL(),
+            );
+        }
+    }
+
+    async *tailSQL() {
+        // deno-fmt-ignore
+        yield `-- no tail SQL defined in ${this.provenanceHint}`;
+    }
+
+    async toStdOut() {
+        const { sqlpageFiles } = sqliteModels();
+
+        for await (const sql of this.headSQL()) {
+            console.log(sql);
+        }
+
+        console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
+        for await (const insert of this.seedInserts()) {
+            console.log(insert);
+        }
+
+        for await (const sql of this.tailSQL()) {
+            console.log(sql);
+        }
+    }
+}
+
+export class Plan {
+    constructor(readonly pp: ReturnType<typeof projectPaths>) {
     }
 
     linter() {
@@ -1020,7 +1103,7 @@ export class Orchestrator {
         };
     }
 
-    async clean(stores: ReturnType<typeof this.stores>) {
+    async clean(stores = this.stores()) {
         const rmDirRecursive = async (path: string) => {
             try {
                 await Deno.remove(path, { recursive: true });
@@ -1032,155 +1115,88 @@ export class Orchestrator {
         await rmDirRecursive(stores.spryDistStores.polyglot.destRoot);
     }
 
+    async workflow() {
+        return await new Workflow(this).init();
+    }
+
     async orchestrate(init?: { clean?: boolean }) {
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
-        const session = await new OrchSession(this).init();
-        await session.dropInAnnotations();
-        await session.captureExecutables();
-        await session.finalize();
+        const workflow = await this.workflow();
+        await workflow.dropInAnnotations();
+        await workflow.captureExecutables();
+        await workflow.finalize();
+    }
+}
+
+export class CLI {
+    constructor(readonly plan: Plan) {
     }
 
-    async *headSQL() {
-        // deno-fmt-ignore
-        yield `-- tail SQL defined in ${this.provenanceHint}`;
-        yield Deno.readTextFile(this.pp.projectSrcFsPaths.absolute(
-            join("spry", "lib", "sqlpage-files.ddl.sql"),
-        ));
+    async ls() {
+        const workflow = await this.plan.workflow();
+        const entries = await workflow.entryAnnotations();
+        const table = new Table({
+            head: ["", "Nature", "Path", "Ann Error"],
+        });
+        for (const ea of entries.issues) {
+            table.push([
+                ea.ann.found ? "📝" : dim("❔"),
+                dim("unknown"),
+                ea.we.entry.path,
+                ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
+            ]);
+        }
+        for (const ea of entries.valid) {
+            table.push([
+                ea.ann.found ? "📝" : dim("❔"),
+                ea.entryAnn.nature,
+                ea.we.entry.path,
+                ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
+            ]);
+        }
+        console.log(table.toString());
     }
 
-    async *tailSQL() {
-        // deno-fmt-ignore
-        yield `-- no tail SQL defined in ${this.provenanceHint}`;
+    async routes(opts?: { json?: boolean }) {
+        const workflow = await this.plan.workflow();
+        const { serializers } = await workflow.routeAnnotations();
+
+        if (opts?.json) {
+            console.log(serializers.jsonText({ space: 2 }));
+        } else {
+            console.log(
+                serializers.asciiTreeText({
+                    showPath: true,
+                    includeCounts: true,
+                }),
+            );
+        }
     }
 
-    async SQL() {
-        const { sqlpageFiles } = sqliteModels();
-        const spf = this.sqlpageFiles();
+    async crumbs(opts: { json?: boolean }) {
+        const workflow = await this.plan.workflow();
+        const { breadcrumbs } = await workflow.routeAnnotations();
 
-        for await (const sql of this.headSQL()) {
-            console.log(sql);
+        if (opts.json) {
+            console.dir(breadcrumbs);
+            return;
         }
 
-        console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
-        for await (const insert of spf.seedInserts()) {
-            console.log(insert);
+        const table = new Table({ head: ["Path", "Breadcrumbs"] });
+        for (const [path, node] of Object.entries(breadcrumbs)) {
+            table.push([
+                path,
+                node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash)
+                    .join("\n"),
+            ]);
         }
-
-        for await (const sql of this.tailSQL()) {
-            console.log(sql);
-        }
+        console.log(table.toString());
     }
 
     cli(init?: { name?: string }) {
-        const roots = [this.pp.projectFsPaths.root];
-
-        const ls = async () => {
-            const session = await new OrchSession(this).init();
-            const entries = await session.entryAnnotations();
-            const table = new Table({
-                head: ["", "Nature", "Path", "Ann Error"],
-            });
-            for (const ea of entries.issues) {
-                table.push([
-                    ea.ann.found ? "📝" : dim("❔"),
-                    dim("unknown"),
-                    ea.we.entry.path,
-                    ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
-                ]);
-            }
-            for (const ea of entries.valid) {
-                table.push([
-                    ea.ann.found ? "📝" : dim("❔"),
-                    ea.entryAnn.nature,
-                    ea.we.entry.path,
-                    ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
-                ]);
-            }
-            console.log(table.toString());
-        };
-
-        const routesTree = async () => {
-            const session = await new OrchSession(this).init();
-            const routes = await session.routeAnnotations();
-
-            const forest = await pathTree<SpryRouteAnnotation, string>(
-                routes.valid.map((ra) => ra.routeAnn),
-                {
-                    nodePath: (n) => n.path,
-                    pathDelim: "/",
-                    synthesizeContainers: true,
-                    folderFirst: false,
-                    indexBasenames: ["index.sql"],
-                },
-            );
-
-            const tree = forest.roots;
-            const nav = pathTreeNavigation(forest);
-            const serializers = {
-                ...pathTreeSerializers(forest),
-                crumbsJsonSchemaText: () =>
-                    JSON.stringify(
-                        nav.ancestorsJsonSchema({
-                            outerIsMap: true,
-                            payloadItemSchema: z.toJSONSchema(
-                                spryRouteAnnSchema,
-                            ),
-                        }),
-                        null,
-                        2,
-                    ),
-            };
-
-            const breadcrumbs: Record<
-                string,
-                ReturnType<typeof nav.ancestors>
-            > = {};
-            for (const node of forest.treeByPath.values()) {
-                if (node.payloads) {
-                    for (const p of node.payloads) {
-                        breadcrumbs[p.path] = nav.ancestors(p);
-                    }
-                }
-            }
-
-            return { forest, tree, breadcrumbs, serializers };
-        };
-
-        async function routes(opts?: { json?: boolean }) {
-            const { serializers } = await routesTree();
-
-            if (opts?.json) {
-                console.log(serializers.jsonText({ space: 2 }));
-            } else {
-                console.log(
-                    serializers.asciiTreeText({
-                        showPath: true,
-                        includeCounts: true,
-                    }),
-                );
-            }
-        }
-
-        async function crumbs(opts: { json?: boolean }) {
-            const { breadcrumbs } = await routesTree();
-
-            if (opts.json) {
-                console.dir(breadcrumbs);
-                return;
-            }
-
-            const table = new Table({ head: ["Path", "Breadcrumbs"] });
-            for (const [path, node] of Object.entries(breadcrumbs)) {
-                table.push([
-                    path,
-                    node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash)
-                        .join("\n"),
-                ]);
-            }
-            console.log(table.toString());
-        }
+        const roots = [this.plan.pp.projectFsPaths.root];
 
         return new Command()
             .name(init?.name ?? "e2ectl.ts")
@@ -1191,7 +1207,7 @@ export class Orchestrator {
             .command("init")
             .description("Setup local dev environment")
             .action(async () => {
-                const ldi = await this.pp.initLocalDev();
+                const ldi = await this.plan.pp.initLocalDev();
                 if (ldi.removedExisting) {
                     console.log("Removed", ldi.linked.from);
                 }
@@ -1200,12 +1216,12 @@ export class Orchestrator {
             .command("clean")
             .description("Clean auto-generated directories or files")
             .action(async () => {
-                await this.clean(this.stores());
+                await this.plan.clean();
             })
             .command("build")
             .description("Perform orchestration (annotations, routes, capexes)")
             .action(async () => {
-                await this.orchestrate({ clean: true });
+                await this.plan.orchestrate({ clean: true });
             })
             .command("help", new HelpCommand().global())
             .command(
@@ -1214,7 +1230,7 @@ export class Orchestrator {
                     .description(
                         "List SQLPage .sql files excluding migrations.",
                     )
-                    .action(ls)
+                    .action(async () => await this.ls())
                     .command(
                         "routes",
                         new Command()
@@ -1225,7 +1241,7 @@ export class Orchestrator {
                                 "-j, --json",
                                 "Emit as JSON instead of tree",
                             )
-                            .action(routes),
+                            .action(async (opts) => await this.routes(opts)),
                     )
                     .command(
                         "breadcrumbs",
@@ -1237,7 +1253,7 @@ export class Orchestrator {
                                 "-j, --json",
                                 "dump the entire breadcrumbs object as JSON",
                             )
-                            .action(crumbs),
+                            .action(async (opts) => await this.crumbs(opts)),
                     ),
             )
             .command(
@@ -1275,7 +1291,7 @@ export class Orchestrator {
                 const debounceMs = 150;
                 let timer: number | null = null;
 
-                await this.orchestrate({ clean: true });
+                await this.plan.orchestrate({ clean: true });
 
                 // Basic FS watch (use your own watcher if you need cross-platform globs)
                 const watcher = Deno.watchFs(roots);
@@ -1288,7 +1304,7 @@ export class Orchestrator {
                         console.log(
                             colors.cyan("⟳ change detected, rebuilding…"),
                         );
-                        await this.orchestrate({ clean: true });
+                        await this.plan.orchestrate({ clean: true });
                     }, debounceMs) as unknown as number;
                 }
             });
