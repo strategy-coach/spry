@@ -761,10 +761,190 @@ export class Linter {
 }
 
 export class OrchSession {
-    constructor(
-        readonly pp: ReturnType<typeof projectPaths>,
-        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
+    readonly linter: Linter;
+    readonly lintr: ReturnType<Linter["lintResults"]>;
+    readonly stores: ReturnType<Orchestrator["stores"]>;
+    readonly pp: Orchestrator["pp"];
+    readonly es: EncountersSuppliers;
+    readonly spc: EncountersSuppliers["sqlPageCandidates"];
+    readonly annotations: ReturnType<Orchestrator["annotations"]>;
+    readonly capExecs: ReturnType<Orchestrator["capExecs"]>;
+
+    #annsCatalog?: YieldOf<
+        ReturnType<Orchestrator["annotations"]>["catalog"]
+    >[];
+
+    readonly mdStore = new MarkdownStore<"orchestrated.auto.md">();
+    readonly orchMD = this.mdStore.markdown("orchestrated.auto.md");
+
+    constructor(readonly orch: Orchestrator) {
+        this.pp = orch.pp;
+        this.linter = orch.linter();
+        this.lintr = this.linter.lintResults();
+        this.stores = orch.stores();
+        this.es = orch.es;
+        this.spc = this.es.sqlPageCandidates;
+        this.annotations = orch.annotations();
+        this.capExecs = orch.capExecs();
+    }
+
+    get annsCatalog() {
+        return this.#annsCatalog!; // will become available after call to init()
+    }
+
+    async init() {
+        this.#annsCatalog = await Array.fromAsync(this.annotations.catalog());
+
+        this.orchMD.h1("Orchestration Results");
+        this.orchMD.br().p(
+            `Check the file date for when it was last executed.`,
+        );
+
+        this.orchMD.h2("SQLPage Files Candidates");
+        this.orchMD.table(
+            ["Root", "Web Path", "Fs Path"],
+            (await Array.fromAsync(this.spc.encountered())).map((src) => [
+                src.origin.paths.identity ?? "",
+                this.pp.webPaths.absolute(src.entry),
+                src.origin.paths.relative(src.entry),
+            ]),
+        );
+    }
+
+    protected async dropInEntryAnns(
+        annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
+        const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
+        for (const a of this.annsCatalog) {
+            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
+                const webPath = this.pp.webPaths.absolute(
+                    a.walkEntry.entry,
+                );
+                await spryDistJsonStore.write(
+                    join("entry", webPath + ".auto.json"),
+                    {
+                        ...a.entryAnn.parsed,
+                        webPath,
+                        ".source": a.entryAnn.anns,
+                    },
+                    // don't store absFsPath because it will be different across systems
+                    // making it harder to store in Git (because it will show diffs)
+                    omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
+                );
+                annotated.add({
+                    root: a.walkEntry.origin.paths.identity,
+                    relPath: a.entryAnn.parsed.relFsPath,
+                    count: a.entryAnn.found,
+                });
+            } else if (a.entryAnn.found > 0) {
+                this.lintr.add({
+                    rule: "invalid-annotation",
+                    code: "entry",
+                    content: a.walkEntry.origin.paths.relative(
+                        a.walkEntry.entry,
+                    ),
+                    message: "Invalid entry annotation",
+                    data: { annotation: a.entryAnn },
+                    severity: "error",
+                });
+            }
+        }
+    }
+
+    async dropInRouteAnns(
+        annotated: Set<{ root?: string; relPath: string; count: number }>,
+    ) {
+        const routeAnns: SpryRouteAnnotation[] = [];
+        const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
+        for (const a of this.annsCatalog) {
+            if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
+                await spryDistJsonStore.write(
+                    join("route", a.routeAnn.parsed.path + ".auto.json"),
+                    { ...a.routeAnn.parsed, ".source": a.routeAnn.anns },
+                );
+                annotated.add({
+                    root: a.walkEntry.origin.paths.identity,
+                    relPath: a.routeAnn.parsed.path,
+                    count: a.routeAnn.found,
+                });
+                routeAnns.push(a.routeAnn.parsed);
+            } else if (a.routeAnn.found > 0) {
+                this.lintr.add({
+                    rule: "invalid-annotation",
+                    code: "route",
+                    content: a.walkEntry.origin.paths.relative(
+                        a.walkEntry.entry,
+                    ),
+                    message: "Invalid route annotation",
+                    data: { annotation: a.routeAnn },
+                    severity: "error",
+                });
+            }
+        }
+
+        const routes = new Routes(routeAnns);
+        const { serializers, breadcrumbs } = await routes.populate();
+        this.orchMD.h2("Routes Tree");
+        this.orchMD.code("ascii", serializers.asciiTreeText());
+
+        this.orchMD.h2("Breadcrumbs");
+        for (const [path, node] of Object.entries(breadcrumbs)) {
+            await spryDistJsonStore.write(
+                join("breadcrumbs", path + ".auto.json"),
+                node,
+            );
+        }
+        this.orchMD.table(
+            ["Path", "Breadcrumbs"],
+            Array.from(Object.entries(breadcrumbs)).map(([path, node]) => [
+                path,
+                node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash).join(
+                    "\n",
+                ),
+            ]),
+        );
+
+        return routeAnns;
+    }
+
+    async dropInAnnotations() {
+        const annotated = new Set<
+            { root?: string; relPath: string; count: number }
+        >();
+
+        await this.dropInEntryAnns(annotated);
+        await this.dropInRouteAnns(annotated);
+
+        this.orchMD.h2("Annotated Sources");
+        this.orchMD.table(
+            ["Path", "Count", "Root"],
+            Array.from(annotated.values()).map((a) => [
+                a.relPath,
+                String(a.count),
+                a.root ?? "",
+            ]),
+            ["left", "right", "left"],
+        );
+    }
+
+    async captureExecutables() {
+        await this.capExecs.execute();
+    }
+
+    // deno-lint-ignore require-await
+    async finalize() {
+        for (const lr of this.lintr.allFindings()) {
+            this.orchMD.section("Lint Results", (md) => {
+                md.p(
+                    `[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message} in ${lr.content}`,
+                );
+                md.code("json", JSON.stringify(lr.data, null, 2));
+            });
+        }
+        this.stores.spryDistStores.polyglot.writeText(
+            "orchestrated.auto.md",
+            this.orchMD.write(),
+        );
     }
 }
 
@@ -825,16 +1005,11 @@ export class Orchestrator {
     }
 
     stores() {
-        const mdStore = new MarkdownStore<"orchestrated.auto.md">();
-        const orchMD = mdStore.markdown("orchestrated.auto.md");
-
         const orchStore = this.orchStore();
         const srcStore = this.srcStore();
         const spryDistStores = this.spryDistStores();
         return {
-            orchMD,
             spryDistStores,
-            mdStore,
             orchStore,
             srcStore,
         };
@@ -853,140 +1028,14 @@ export class Orchestrator {
     }
 
     async orchestrate(init?: { clean?: boolean }) {
-        const spc = this.es.sqlPageCandidates;
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
-        const lintr = this.linter().lintResults();
-        const {
-            orchMD,
-            spryDistStores: {
-                json: spryDistJsonStore,
-                polyglot: spryDistStore,
-            },
-        } = stores;
-
-        orchMD.h1("Orchestration Results");
-        orchMD.br().p(`Check the file date for when it was last executed.`);
-
-        orchMD.h2("SQLPage Files Candidates");
-        orchMD.table(
-            ["Root", "Web Path", "Fs Path"],
-            (await Array.fromAsync(spc.encountered())).map((src) => [
-                src.origin.paths.identity ?? "",
-                this.pp.webPaths.absolute(src.entry),
-                src.origin.paths.relative(src.entry),
-            ]),
-        );
-
-        // first get all the annotations and save their state for downstream use
-        const routeAnns: SpryRouteAnnotation[] = [];
-        const annotated = new Set<
-            { root?: string; relPath: string; count: number }
-        >();
-        for await (const a of this.annotations().catalog()) {
-            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
-                const webPath = this.pp.webPaths.absolute(
-                    a.walkEntry.entry,
-                );
-                await spryDistJsonStore.write(
-                    join("entry", webPath + ".auto.json"),
-                    {
-                        ...a.entryAnn.parsed,
-                        webPath,
-                        ".source": a.entryAnn.anns,
-                    },
-                    // don't store absFsPath because it will be different across systems
-                    // making it harder to store in Git (because it will show diffs)
-                    omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
-                );
-                annotated.add({
-                    root: a.walkEntry.origin.paths.identity,
-                    relPath: a.entryAnn.parsed.relFsPath,
-                    count: a.entryAnn.found,
-                });
-            } else if (a.entryAnn.found > 0) {
-                lintr.add({
-                    rule: "invalid-annotation",
-                    code: "entry",
-                    content: a.walkEntry.origin.paths.relative(
-                        a.walkEntry.entry,
-                    ),
-                    message: "Invalid entry annotation",
-                    data: { annotation: a.entryAnn },
-                    severity: "error",
-                });
-            }
-
-            if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
-                await spryDistJsonStore.write(
-                    join("route", a.routeAnn.parsed.path + ".auto.json"),
-                    { ...a.routeAnn.parsed, ".source": a.routeAnn.anns },
-                );
-                annotated.add({
-                    root: a.walkEntry.origin.paths.identity,
-                    relPath: a.routeAnn.parsed.path,
-                    count: a.routeAnn.found,
-                });
-                routeAnns.push(a.routeAnn.parsed);
-            } else if (a.routeAnn.found > 0) {
-                lintr.add({
-                    rule: "invalid-annotation",
-                    code: "route",
-                    content: a.walkEntry.origin.paths.relative(
-                        a.walkEntry.entry,
-                    ),
-                    message: "Invalid route annotation",
-                    data: { annotation: a.routeAnn },
-                    severity: "error",
-                });
-            }
-        }
-        const routes = new Routes(routeAnns);
-        const { serializers, breadcrumbs } = await routes.populate();
-        orchMD.h2("Routes Tree");
-        orchMD.code("ascii", serializers.asciiTreeText());
-
-        orchMD.h2("Breadcrumbs");
-        for (const [path, node] of Object.entries(breadcrumbs)) {
-            await spryDistJsonStore.write(
-                join("breadcrumbs", path + ".auto.json"),
-                node,
-            );
-        }
-        orchMD.table(
-            ["Path", "Breadcrumbs"],
-            Array.from(Object.entries(breadcrumbs)).map(([path, node]) => [
-                path,
-                node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash).join(
-                    "\n",
-                ),
-            ]),
-        );
-
-        orchMD.h2("Annotated Sources");
-        orchMD.table(
-            ["Path", "Count", "Root"],
-            Array.from(annotated.values()).map((a) => [
-                a.relPath,
-                String(a.count),
-                a.root ?? "",
-            ]),
-            ["left", "right", "left"],
-        );
-
-        const ce = this.capExecs();
-        await ce.execute();
-
-        for (const lr of lintr.allFindings()) {
-            orchMD.section("Lint Results", (md) => {
-                md.p(
-                    `[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message} in ${lr.content}`,
-                );
-                md.code("json", JSON.stringify(lr.data, null, 2));
-            });
-        }
-        spryDistStore.writeText("orchestrated.auto.md", orchMD.write());
+        const session = new OrchSession(this);
+        await session.init();
+        await session.dropInAnnotations();
+        await session.captureExecutables();
+        await session.finalize();
     }
 
     async *headSQL() {
