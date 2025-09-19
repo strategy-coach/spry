@@ -1,5 +1,11 @@
 #!/usr/bin/env -S deno run -A
 
+import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
+import * as colors from "jsr:@std/fmt@1/colors";
+import { dim } from "jsr:@std/fmt@1/colors";
+import { walk, WalkEntry, WalkOptions } from "jsr:@std/fs@1/walk";
+import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
 import {
     basename,
     dirname,
@@ -9,38 +15,32 @@ import {
     normalize,
     relative,
 } from "jsr:@std/path@1";
-import { dim } from "jsr:@std/fmt@1/colors";
-import { walk, WalkEntry, WalkOptions } from "jsr:@std/fs@1/walk";
-import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
-import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
-import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
-import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
-import { CapExec } from "../universal/cap-exec.ts";
-import { drizzle } from "npm:drizzle-orm@0.44.5/libsql";
+import Table from "npm:cli-table3@0.6.5";
 import { eq, getTableName, sql } from "npm:drizzle-orm@0.44.5";
+import { drizzle } from "npm:drizzle-orm@0.44.5/libsql";
 import {
     check,
     SQLiteColumn,
     sqliteTable,
     text,
 } from "npm:drizzle-orm@0.44.5/sqlite-core";
-import Table from "npm:cli-table3@0.6.5";
+import { CapExec } from "../universal/cap-exec.ts";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
 import { detectLanguageByPath } from "../universal/content/code.ts";
-import { MarkdownStore } from "../universal/markdown.ts";
-import { defineRegistry, defineRule, LintResults } from "../universal/lint.ts";
 import { omitPathsReplacer } from "../universal/json.ts";
+import { defineRegistry, defineRule, LintResults } from "../universal/lint.ts";
+import { MarkdownStore } from "../universal/markdown.ts";
 import {
     pathTree,
     pathTreeNavigation,
     pathTreeSerializers,
 } from "../universal/path-tree.ts";
-import { inlinedSQL } from "../universal/sql-text.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
+import { inlinedSQL } from "../universal/sql-text.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -274,23 +274,6 @@ export class Walkers<
         this.walkers = walkers;
     }
 
-    /** Static factory: wrap existing walkers */
-    static of<
-        TS extends WalkSpec = WalkSpec,
-        TE extends WalkEncounter<TS> = WalkEncounter<TS>,
-    >(...walkers: Walker<TS, TE>[]) {
-        return new Walkers<TS, TE>(...walkers);
-    }
-
-    /** Static factory: build walkers from specs */
-    static fromSpecs<
-        TS extends WalkSpec = WalkSpec,
-        TE extends WalkEncounter<TS> = WalkEncounter<TS>,
-    >(...specs: TS[]) {
-        const ws = specs.map((s) => new Walker<TS, TE>(s));
-        return new Walkers<TS, TE>(...ws);
-    }
-
     /** Builder entrypoint */
     static builder<
         TS extends WalkSpec = WalkSpec,
@@ -339,13 +322,14 @@ export class Walkers<
     }
 }
 
-export class EncountersSuppliers {
-    readonly sqlPageCandidates: EncountersSupplier;
-    readonly annotationCandidates: EncountersSupplier;
-    readonly capExecCandidates: EncountersSupplier;
+export class SqlPageFiles {
+    readonly candidates: EncountersSupplier;
 
-    constructor(readonly projectModule: FsPathSupplier) {
-        this.sqlPageCandidates = Walkers.builder()
+    constructor(
+        readonly projectModule: FsPathSupplier,
+        readonly webPaths: PathSupplier,
+    ) {
+        this.candidates = Walkers.builder()
             .addRoot(projectModule, {
                 exts: [".sql", ".json"],
                 includeDirs: false,
@@ -355,50 +339,6 @@ export class EncountersSuppliers {
                 canonicalize: true, // important for "src/spry"
             })
             .build();
-
-        // any files in our path(s) can be annotation candidates
-        this.annotationCandidates = Walkers.builder()
-            .addRoot(projectModule, {
-                exts: [".sql", ".ts"],
-                includeDirs: false,
-                includeFiles: true,
-                includeSymlinks: false,
-                followSymlinks: true, // important for "src/spry"
-                canonicalize: true, // important for "src/spry"
-            })
-            .build();
-
-        // any executable files in our path(s) can be capexec candidates
-        // TODO: restrict it a bit more, though?
-        this.capExecCandidates = Walkers.builder()
-            .addRoot(projectModule, {
-                includeDirs: false,
-                includeFiles: true,
-                includeSymlinks: false,
-                followSymlinks: true, // important for "src/spry"
-                canonicalize: true, // important for "src/spry"
-            })
-            .build();
-    }
-
-    private static readonly cache = new Map<string, EncountersSuppliers>();
-
-    static singleton(projectModule: FsPathSupplier): EncountersSuppliers {
-        const id = projectModule.identity ?? projectModule.root;
-        let instance = this.cache.get(id);
-        if (!instance) {
-            instance = new EncountersSuppliers(projectModule);
-            this.cache.set(id, instance);
-        }
-        return instance;
-    }
-}
-
-export class SqlPageFiles {
-    constructor(
-        readonly candidates: EncountersSupplier,
-        readonly webPaths: PathSupplier,
-    ) {
     }
 
     async *sources() {
@@ -537,8 +477,10 @@ export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
 export type SpryRouteAnnotation = z.infer<typeof spryRouteAnnSchema>;
 
 export class Annotations {
+    readonly annotatable: EncountersSupplier;
+
     constructor(
-        readonly annotatable: EncountersSupplier,
+        readonly projectModule: FsPathSupplier,
         readonly webPaths: PathSupplier,
         readonly init?: {
             readonly transformEntryAnn?: (
@@ -549,6 +491,16 @@ export class Annotations {
             ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>;
         },
     ) {
+        this.annotatable = Walkers.builder()
+            .addRoot(projectModule, {
+                exts: [".sql", ".ts"],
+                includeDirs: false,
+                includeFiles: true,
+                includeSymlinks: false,
+                followSymlinks: true, // important for "src/spry"
+                canonicalize: true, // important for "src/spry"
+            })
+            .build();
     }
 
     async *sources() {
@@ -708,13 +660,25 @@ export class Routes {
 }
 
 export class CapExecs {
+    readonly candidates: EncountersSupplier;
     constructor(
-        readonly ceCandidates: EncountersSupplier,
+        readonly projectModule: FsPathSupplier,
         readonly webPaths: PathSupplier,
         readonly init?: {
             readonly mergeCtx?: Record<string, unknown>; // overrides merged into schema defaults
         },
     ) {
+        // any executable files in our path(s) can be capexec candidates
+        // TODO: restrict it a bit more, though?
+        this.candidates = Walkers.builder()
+            .addRoot(projectModule, {
+                includeDirs: false,
+                includeFiles: true,
+                includeSymlinks: false,
+                followSymlinks: true, // important for "src/spry"
+                canonicalize: true, // important for "src/spry"
+            })
+            .build();
     }
 
     env() {
@@ -725,7 +689,7 @@ export class CapExecs {
 
     async execute() {
         const ceCandidates: WalkEncounter<WalkSpec>[] = [];
-        for await (const cec of this.ceCandidates.encountered()) {
+        for await (const cec of this.candidates.encountered()) {
             const cecc = CapExec.capExecCandidacy(cec.entry.path);
             if (cecc.isCapExec) ceCandidates.push(cec);
         }
@@ -768,8 +732,7 @@ export class OrchSession {
     readonly lintr: ReturnType<Linter["lintResults"]>;
     readonly stores: ReturnType<Orchestrator["stores"]>;
     readonly pp: Orchestrator["pp"];
-    readonly es: EncountersSuppliers;
-    readonly spc: EncountersSuppliers["sqlPageCandidates"];
+    readonly spf: ReturnType<Orchestrator["sqlpageFiles"]>;
     readonly annotations: ReturnType<Orchestrator["annotations"]>;
     readonly capExecs: ReturnType<Orchestrator["capExecs"]>;
 
@@ -785,8 +748,7 @@ export class OrchSession {
         this.linter = orch.linter();
         this.lintr = this.linter.lintResults();
         this.stores = orch.stores();
-        this.es = orch.es;
-        this.spc = this.es.sqlPageCandidates;
+        this.spf = orch.sqlpageFiles();
         this.annotations = orch.annotations();
         this.capExecs = orch.capExecs();
     }
@@ -806,7 +768,9 @@ export class OrchSession {
         this.orchMD.h2("SQLPage Files Candidates");
         this.orchMD.table(
             ["Root", "Web Path", "Fs Path"],
-            (await Array.fromAsync(this.spc.encountered())).map((src) => [
+            (await Array.fromAsync(this.spf.candidates.encountered())).map((
+                src,
+            ) => [
                 src.origin.paths.identity ?? "",
                 this.pp.webPaths.absolute(src.entry),
                 src.origin.paths.relative(src.entry),
@@ -999,10 +963,7 @@ export class OrchSession {
 }
 
 export class Orchestrator {
-    constructor(
-        readonly pp: ReturnType<typeof projectPaths>,
-        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
-    ) {
+    constructor(readonly pp: ReturnType<typeof projectPaths>) {
     }
 
     get provenanceHint() {
@@ -1017,7 +978,7 @@ export class Orchestrator {
     }
 
     orchStore<Path extends string>() {
-        return new Store<Path>(normalize(this.es.projectModule.root));
+        return new Store<Path>(normalize(this.pp.projectFsPaths.root));
     }
 
     srcStore<Path extends string>() {
@@ -1037,21 +998,15 @@ export class Orchestrator {
     }
 
     sqlpageFiles() {
-        return new SqlPageFiles(
-            this.es.sqlPageCandidates,
-            this.pp.webPaths,
-        );
+        return new SqlPageFiles(this.pp.projectFsPaths, this.pp.webPaths);
     }
 
     annotations() {
-        return new Annotations(
-            this.es.annotationCandidates,
-            this.pp.webPaths,
-        );
+        return new Annotations(this.pp.projectFsPaths, this.pp.webPaths);
     }
 
     capExecs() {
-        return new CapExecs(this.es.capExecCandidates, this.pp.webPaths);
+        return new CapExecs(this.pp.projectFsPaths, this.pp.webPaths);
     }
 
     stores() {
@@ -1119,7 +1074,7 @@ export class Orchestrator {
     }
 
     cli(init?: { name?: string }) {
-        const roots = [this.es.projectModule.root];
+        const roots = [this.pp.projectFsPaths.root];
 
         const ls = async () => {
             const session = await new OrchSession(this).init();
