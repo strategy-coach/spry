@@ -16,7 +16,13 @@ import { z } from "jsr:@zod/zod@4";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { CapExec } from "../universal/cap-exec.ts";
 import { drizzle } from "npm:drizzle-orm@0.44.5/libsql";
-import { eq, getTableName } from "npm:drizzle-orm@0.44.5";
+import { eq, getTableName, sql } from "npm:drizzle-orm@0.44.5";
+import {
+    check,
+    SQLiteColumn,
+    sqliteTable,
+    text,
+} from "npm:drizzle-orm@0.44.5/sqlite-core";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
@@ -31,6 +37,7 @@ import {
     pathTreeSerializers,
 } from "../universal/path-tree.ts";
 import { inlinedSQL } from "../universal/sql-text.ts";
+import { provenanceText } from "../universal/reflect/provenance.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -39,15 +46,6 @@ type YieldOf<T extends (...args: Any) => Any> = Awaited<ReturnType<T>> extends
     AsyncGenerator<infer Y, Any, Any> ? Y
     : Awaited<ReturnType<T>> extends AsyncIterableIterator<infer Y> ? Y
     : never;
-
-import { sql } from "npm:drizzle-orm@0.44.5";
-import {
-    check,
-    SQLiteColumn,
-    sqliteTable,
-    text,
-} from "npm:drizzle-orm@0.44.5/sqlite-core";
-import { resolve } from "node:path";
 
 export function sqliteModels() {
     const checkJSON = (c: SQLiteColumn) =>
@@ -342,7 +340,6 @@ export class EncountersSuppliers {
     readonly sqlPageCandidates: EncountersSupplier;
     readonly annotationCandidates: EncountersSupplier;
     readonly capExecCandidates: EncountersSupplier;
-    readonly headSQL: EncountersSupplier;
 
     constructor(readonly projectModule: FsPathSupplier) {
         this.sqlPageCandidates = Walkers.builder()
@@ -379,31 +376,6 @@ export class EncountersSuppliers {
                 canonicalize: true, // important for "src/spry"
             })
             .build();
-
-        this.headSQL = {
-            async *encountered() {
-                yield {
-                    entry: {
-                        name: "sqlpage-files.ddl.sql",
-                        isDirectory: false,
-                        isFile: true,
-                        isSymlink: false,
-                        path: resolve(
-                            join(
-                                projectModule.root,
-                                "src",
-                                "spry",
-                                "lib",
-                                "sqlpage-files.ddl.sql",
-                            ),
-                        ),
-                    },
-                    origin: {
-                        paths: projectModule,
-                    },
-                };
-            },
-        };
     }
 
     private static readonly cache = new Map<string, EncountersSuppliers>();
@@ -764,14 +736,7 @@ export class CapExecs {
     }
 }
 
-export class Orchestrator {
-    // usually `fromFileUrl(import.meta.resolve("./"))` of module constructing class
-    constructor(
-        readonly pp: ReturnType<typeof projectPaths>,
-        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
-    ) {
-    }
-
+export class Linter {
     lintRegistry() {
         return defineRegistry(
             {
@@ -793,6 +758,33 @@ export class Orchestrator {
             runMeta: { tool: "spry" },
         });
     }
+}
+
+export class OrchSession {
+    constructor(
+        readonly pp: ReturnType<typeof projectPaths>,
+        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
+    ) {
+    }
+}
+
+export class Orchestrator {
+    constructor(
+        readonly pp: ReturnType<typeof projectPaths>,
+        readonly es = EncountersSuppliers.singleton(pp.projectFsPaths),
+    ) {
+    }
+
+    get provenanceHint() {
+        return provenanceText({
+            importMetaURL: import.meta.url,
+            framesToSkip: 2,
+        });
+    }
+
+    linter() {
+        return new Linter();
+    }
 
     orchStore<Path extends string>() {
         return new Store<Path>(normalize(this.es.projectModule.root));
@@ -804,14 +796,14 @@ export class Orchestrator {
         );
     }
 
-    annotationsStore<Path extends string>() {
-        return new JsonStore(
-            new Store<Path>(
-                normalize(join(this.pp.projectSrcFsPaths.root, ".annotation")),
-            ),
-            undefined,
-            { pretty: true },
+    spryDistStores<Path extends string>() {
+        const polyglot = new Store<Path>(
+            normalize(join(this.pp.projectSrcFsPaths.root, "spry.d")),
         );
+        return {
+            polyglot,
+            json: new JsonStore(polyglot, undefined, { pretty: true }),
+        };
     }
 
     sqlpageFiles() {
@@ -838,10 +830,10 @@ export class Orchestrator {
 
         const orchStore = this.orchStore();
         const srcStore = this.srcStore();
-        const annStore = this.annotationsStore();
+        const spryDistStores = this.spryDistStores();
         return {
             orchMD,
-            annStore,
+            spryDistStores,
             mdStore,
             orchStore,
             srcStore,
@@ -857,10 +849,7 @@ export class Orchestrator {
             }
         };
 
-        await rmDirRecursive(
-            join(stores.srcStore.destRoot, "orchestrated.auto.md"),
-        );
-        await rmDirRecursive(stores.annStore.store.destRoot);
+        await rmDirRecursive(stores.spryDistStores.polyglot.destRoot);
     }
 
     async orchestrate(init?: { clean?: boolean }) {
@@ -868,8 +857,14 @@ export class Orchestrator {
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
-        const lintr = this.lintResults();
-        const { orchMD, srcStore, annStore } = stores;
+        const lintr = this.linter().lintResults();
+        const {
+            orchMD,
+            spryDistStores: {
+                json: spryDistJsonStore,
+                polyglot: spryDistStore,
+            },
+        } = stores;
 
         orchMD.h1("Orchestration Results");
         orchMD.br().p(`Check the file date for when it was last executed.`);
@@ -891,13 +886,14 @@ export class Orchestrator {
         >();
         for await (const a of this.annotations().catalog()) {
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
-                await annStore.write(
-                    join("entry", a.entryAnn.parsed.relFsPath + ".auto.json"),
+                const webPath = this.pp.webPaths.absolute(
+                    a.walkEntry.entry,
+                );
+                await spryDistJsonStore.write(
+                    join("entry", webPath + ".auto.json"),
                     {
                         ...a.entryAnn.parsed,
-                        webPath: this.pp.webPaths.absolute(
-                            a.walkEntry.entry,
-                        ),
+                        webPath,
                         ".source": a.entryAnn.anns,
                     },
                     // don't store absFsPath because it will be different across systems
@@ -923,7 +919,7 @@ export class Orchestrator {
             }
 
             if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
-                await annStore.write(
+                await spryDistJsonStore.write(
                     join("route", a.routeAnn.parsed.path + ".auto.json"),
                     { ...a.routeAnn.parsed, ".source": a.routeAnn.anns },
                 );
@@ -953,7 +949,7 @@ export class Orchestrator {
 
         orchMD.h2("Breadcrumbs");
         for (const [path, node] of Object.entries(breadcrumbs)) {
-            await annStore.write(
+            await spryDistJsonStore.write(
                 join("breadcrumbs", path + ".auto.json"),
                 node,
             );
@@ -990,15 +986,28 @@ export class Orchestrator {
                 md.code("json", JSON.stringify(lr.data, null, 2));
             });
         }
-        srcStore.writeText("orchestrated.auto.md", orchMD.write());
+        spryDistStore.writeText("orchestrated.auto.md", orchMD.write());
+    }
+
+    async *headSQL() {
+        // deno-fmt-ignore
+        yield `-- tail SQL defined in ${this.provenanceHint}`;
+        yield Deno.readTextFile(this.pp.projectSrcFsPaths.absolute(
+            join("spry", "lib", "sqlpage-files.ddl.sql"),
+        ));
+    }
+
+    async *tailSQL() {
+        // deno-fmt-ignore
+        yield `-- no tail SQL defined in ${this.provenanceHint}`;
     }
 
     async SQL() {
         const { sqlpageFiles } = sqliteModels();
         const spf = this.sqlpageFiles();
 
-        for await (const h of this.es.headSQL.encountered()) {
-            console.log(await Deno.readTextFile(h.entry.path));
+        for await (const sql of this.headSQL()) {
+            console.log(sql);
         }
 
         console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
@@ -1006,7 +1015,9 @@ export class Orchestrator {
             console.log(insert);
         }
 
-        // await cli.tail();
+        for await (const sql of this.tailSQL()) {
+            console.log(sql);
+        }
     }
 
     cli(init?: { name?: string }) {

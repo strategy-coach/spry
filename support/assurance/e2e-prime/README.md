@@ -3,35 +3,77 @@
 deno install
 
 # setup symlink to Spry stdlib
-./orchestrate.ts init          # only required once
+./e2ectl.ts init          # only required once
 
 # orchestrate.ts lets you perform different functions
-./orchestrate.ts help
-./orchestrate.ts watch
+./e2ectl.ts help
+./e2ectl.ts watch
 
 # informational
-./orchestrate.ts ls                 # list all candidate sqlpage_files content files and if there are any annotation errors
-./orchestrate.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
-./orchestrate.ts ls head            # list all SQL DDL for "init" operations that go before sqlpage_files inserts
-./orchestrate.ts ls tail            # list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
-./orchestrate.ts ls routes          # list all discovered files that have route annotations as a tree
-./orchestrate.ts ls routes -t       # list all discovered files that have route annotations as a table
-./orchestrate.ts ls routes -j       # list all discovered files that have route annotations as JSON
-./orchestrate.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
+./e2ectl.ts ls                 # list all candidate sqlpage_files content files and if there are any annotation errors
+./e2ectl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
+./e2ectl.ts ls head            # list all SQL DDL for "init" operations that go before sqlpage_files inserts
+./e2ectl.ts ls tail            # list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
+./e2ectl.ts ls routes          # list all discovered files that have route annotations as a tree
+./e2ectl.ts ls routes -t       # list all discovered files that have route annotations as a table
+./e2ectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
+./e2ectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # emit SQL
-./orchestrate.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./orchestrate.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./orchestrate.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
+./e2ectl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./e2ectl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./e2ectl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
 
 # developer experience
-./orchestrate.ts dx watchexec       # TODO: generate watchexec CLI for bash to watch all roots / files / etc.
+./e2ectl.ts dx watchexec       # TODO: generate watchexec CLI for bash to watch all roots / files / etc.
 
 # deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
 ./package.sql.ts > sqlpage-package.sql
 ./package.sql.ts | sqlite3 sqlpage.db
 ```
+
+### TODO: explain how `spry.d` fits in
+
+- Purpose: `spry.d` acts as a drop-in _distribution_ directory for modular,
+  extendable annotation, route, breadcrumbs, and other generated files.
+- Contents: Inside `spry.d`, you can have SQL, JSON, or other files that Spry
+  generates and it becomes available to SQLPage.
+- Role: These files are not just “extras” — they’re actually required at runtime
+  by SQLPage as part of its normal distribution.
+
+So instead of one giant config or schema, SQLPage can simply read everything in
+`spry.d` and use those pieces together. This makes the setup clean, modular, and
+easy to extend — exactly in line with the `.d` convention elsewhere on Linux.
+
+When SQLPage starts up it sees `spry.d/` as just another directory where it can
+pick up web contents.
+
+- ⚠️ `spry.d` is not meant for _non_-spry content because it's deleted
+  recursively and recreated each time the build occurs. It's basically a
+  _distribution_ directory. It's not safe for project-level files, it's for
+  `spry` only.
+- 👉 If you want to do something similar for your project you can create
+  `project.d` similarly and manage it on your own.
+
+### Why this is useful for SQLPage
+
+1. Modularity – You can drop in new SQL or JSON snippets without touching core
+   SQLPage code.
+2. Extendability – Developers can add functionality just by generating files in
+   `spry.d`.
+3. Runtime requirements – Since SQLPage needs these generated files to function
+   properly, `spry.d` ensures they’re always available and loaded consistently.
+4. Convention – Following the familiar `.d` pattern makes it easier for Linux
+   users/admins to understand what’s going on.
+
+✅ In short: `spry.d` is SQLPage’s drop-in _distribution_ directory. Whatever
+goes in there (SQL, JSON, or other generated artifacts from Spry) becomes part
+of the runtime environment for SQLPage under the web path `/spry.d/**`. It’s the
+same modular, extendable configuration approach you see with `conf.d`, just
+applied to SQLPage’s distribution.
+
+---
 
 WIP
 
