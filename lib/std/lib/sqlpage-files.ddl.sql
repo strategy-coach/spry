@@ -36,6 +36,95 @@ CREATE INDEX IF NOT EXISTS idx_sqlpage_files_last_modified
 
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- View: spry_annotation
+-- Purpose:
+--   Flatten annotations from `.source` objects found in:
+--     - spry.d/route/**/*.auto.json   (path = $.path)
+--     - spry.d/entry/**/*.auto.json   (path = $.webPath)
+--   One row per annotation key (e.g., "title", "caption", "description").
+--
+-- Columns:
+--   path        TEXT   -- logical path for the resource (route.path or entry.webPath)
+--   namespace   TEXT   -- 'route' | 'entry'
+--   annotation  TEXT   -- the key inside `.source` (e.g., 'title')
+--   id          TEXT   -- $.id inside the annotation object
+--   key         TEXT   -- $.key (e.g., 'route.title')
+--   kind        TEXT   -- $.kind (e.g., 'tag')
+--   value       TEXT   -- $.value (human string)
+--   raw         TEXT   -- $.raw (original tag text)
+--   source      JSON   -- $.source (raw JSON with languageId, loc, etc.)
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS spry_annotation;
+CREATE VIEW spry_annotation AS
+WITH route_files AS (
+  SELECT
+    contents,
+    contents ->> '$.path' AS path
+  FROM sqlpage_files
+  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+    AND json_valid(contents)
+    AND json_type(contents, '$.path') = 'text'
+    AND json_type(contents, '$.".source"') = 'object'
+),
+entry_files AS (
+  SELECT
+    contents,
+    contents ->> '$.webPath' AS path
+  FROM sqlpage_files
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json'
+    AND json_valid(contents)
+    AND json_type(contents, '$.webPath') = 'text'
+    AND json_type(contents, '$.".source"') = 'object'
+),
+route_ann AS (
+  SELECT
+    rf.path                         AS path,
+    'route'                         AS namespace,
+    a.key                           AS annotation,
+    a.value ->> '$.id'              AS id,
+    a.value ->> '$.key'             AS key,
+    a.value ->> '$.kind'            AS kind,
+    a.value ->> '$.value'           AS value,
+    a.value ->> '$.raw'             AS raw,
+    a.value ->  '$.source'          AS source
+  FROM route_files rf,
+       json_each(rf.contents, '$.".source"') AS a
+),
+entry_ann AS (
+  SELECT
+    ef.path                         AS path,
+    'entry'                         AS namespace,
+    a.key                           AS annotation,
+    a.value ->> '$.id'              AS id,
+    a.value ->> '$.key'             AS key,
+    a.value ->> '$.kind'            AS kind,
+    a.value ->> '$.value'           AS value,
+    a.value ->> '$.raw'             AS raw,
+    a.value ->  '$.source'          AS source
+  FROM entry_files ef,
+       json_each(ef.contents, '$.".source"') AS a
+)
+SELECT * FROM route_ann
+UNION ALL
+SELECT * FROM entry_ann;
+
+CREATE INDEX IF NOT EXISTS idx_route_source_json
+  ON sqlpage_files (json_extract(contents, '$.".source"'))
+  WHERE path GLOB 'spry.d/route/**/*.auto.json' AND json_valid(contents);
+
+CREATE INDEX IF NOT EXISTS idx_entry_source_json
+  ON sqlpage_files (json_extract(contents, '$.".source"'))
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json' AND json_valid(contents);
+
+CREATE INDEX IF NOT EXISTS idx_route_path
+  ON sqlpage_files (contents ->> '$.path')
+  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+
+CREATE INDEX IF NOT EXISTS idx_entry_webpath
+  ON sqlpage_files (contents ->> '$.webPath')
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
+
 /*------------------------------------------------------------------------------
 View: spry_route
 
@@ -52,67 +141,45 @@ Notes
 ------------------------------------------------------------------------------*/
 DROP VIEW IF EXISTS spry_route;
 CREATE VIEW spry_route AS
-WITH files AS (
+WITH f AS (
   SELECT
-    f.path          AS src_path,
-    f.last_modified AS src_last_modified,
-    f.contents
-  FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry.d/route/**/*.auto.json'
-    AND json_valid(f.contents)
-),
-norm AS (
-  SELECT
-    files.src_path,
-    files.src_last_modified,
-    files.contents                       AS r,
-    src.value                            AS ann_provenance   -- robust extraction of ".source"
-  FROM files
-  LEFT JOIN json_each(files.contents) AS src
-    ON src.key = '.source'
+    path          AS spf_path,
+    last_modified AS spf_last_modified,
+    contents
+  FROM sqlpage_files
+  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+    AND json_valid(contents)
 )
 SELECT
-  -- route fields
-  r ->> '$.path'               AS "path",
-  r ->> '$.pathBasename'       AS "path_basename",
-  r ->> '$.pathBasenameNoExtn' AS "path_basename_no_extn",
-  r ->> '$.pathDirname'        AS "path_dirname",
-  r ->> '$.pathExtnTerminal'   AS "path_extn_terminal",
-  r ->> '$.pathExtns'          AS "path_extns",
+  contents ->> '$.path'                AS "path",
+  contents ->> '$.pathBasename'        AS "path_basename",
+  contents ->> '$.pathBasenameNoExtn'  AS "path_basename_no_extn",
+  contents ->> '$.pathDirname'         AS "path_dirname",
+  contents ->> '$.pathExtnTerminal'    AS "path_extn_terminal",
+  contents ->  '$.pathExtns'           AS "path_extns",
 
-  r ->> '$.caption'            AS "caption",
-  r ->> '$.siblingOrder'       AS "sibling_order",
-  r ->> '$.url'                AS "url",
-  r ->> '$.title'              AS "title",
-  r ->> '$.abbreviatedCaption' AS "abbreviated_caption",
-  r ->> '$.description'        AS "description",
-  r ->  '$.elaboration'        AS "elaboration",
+  contents ->> '$.caption'             AS "caption",
+  contents ->> '$.siblingOrder'        AS "sibling_order",
+  contents ->> '$.url'                 AS "url",
+  contents ->> '$.title'               AS "title",
+  contents ->> '$.abbreviatedCaption'  AS "abbreviated_caption",
+  contents ->> '$.description'         AS "description",
+  contents ->  '$.elaboration'         AS "elaboration",
 
-  -- annotation provenance (raw JSON for ".source")
-  ann_provenance,
-
-  -- provenance of the route file row
-  src_path          AS spf_path,
-  src_last_modified AS spf_last_modified
-FROM norm
-WHERE json_type(r, '$.path') = 'text';
-
--- discover route files fast
-CREATE INDEX IF NOT EXISTS idx_route_dir
-  ON sqlpage_files (path)
-  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+  spf_path,
+  spf_last_modified
+FROM f
+WHERE json_type(contents, '$.path') = 'text';
 
 -- fast lookups by route path
 CREATE INDEX IF NOT EXISTS idx_route_json_path_flat
-  ON sqlpage_files (json_extract(contents, '$.path'))
+  ON sqlpage_files (contents ->> '$.path')
   WHERE path GLOB 'spry.d/route/**/*.auto.json';
 
--- help queries that scan JSON content (e.g., json_each over contents)
+-- help queries that scan JSON content
 CREATE INDEX IF NOT EXISTS idx_route_json_scan
-  ON sqlpage_files (json_extract(contents))
+  ON sqlpage_files (json(contents))  -- or (contents -> '$') if you prefer
   WHERE path GLOB 'spry.d/route/**/*.auto.json';
-
--- ---------------------------------------------------------------------------
 
 /*------------------------------------------------------------------------------
 View: spry_route_crumb
@@ -262,22 +329,33 @@ JOIN spry_route     AS c
   ON c."path" = e.child
 ORDER BY e.parent, c."path";
 
+-- Speed extraction of the raw ".source" annotations in entry files
+CREATE INDEX IF NOT EXISTS idx_entry_source_json
+  ON sqlpage_files (json_extract(contents, '$.".source"'))
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json'
+    AND json_valid(contents);
+
+-- Speed extraction of the raw ".source" annotations in route files
+CREATE INDEX IF NOT EXISTS idx_route_source_json
+  ON sqlpage_files (json_extract(contents, '$.".source"'))
+  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+    AND json_valid(contents);
+
 -- ---------------------------------------------------------------------------
--- View: spry_annotation_catalog
--- Purpose: Catalog per-entry annotations emitted at spry.d/entry/**/*.auto.json
+-- View: spry_entry
+-- Purpose: Surface entry metadata + annotations for files under spry.d/entry/**
 -- Columns:
---   path            ← contents.webPath                (text; join-friendly)
---   nature          ← contents.nature                 (text)
---   rel_fs_path     ← contents.relFsPath              (text)
---   ann_provenance  ← contents[".source"]             (JSON object)
---   entry_source_path, entry_source_last_modified     (provenance)
+--   path           ← contents.webPath
+--   nature         ← contents.nature
+--   rel_fs_path    ← contents.relFsPath
+--   entry_source_path, entry_source_last_modified (provenance)
 -- ---------------------------------------------------------------------------
-DROP VIEW IF EXISTS spry_annotation_catalog;
-CREATE VIEW spry_annotation_catalog AS
+DROP VIEW IF EXISTS spry_entry;
+CREATE VIEW spry_entry AS
 WITH files AS (
   SELECT
-    f.path          AS entry_source_path,
-    f.last_modified AS entry_source_last_modified,
+    f.path          AS src_path,
+    f.last_modified AS src_last_modified,
     f.contents
   FROM sqlpage_files AS f
   WHERE f.path GLOB 'spry.d/entry/**/*.auto.json'
@@ -287,24 +365,12 @@ SELECT
   files.contents ->> '$.webPath'   AS path,
   files.contents ->> '$.nature'    AS nature,
   files.contents ->> '$.relFsPath' AS rel_fs_path,
-  src.value                        AS ann_provenance,   -- robust extraction of ".source"
-  entry_source_path,
-  entry_source_last_modified
+  files.src_path            AS entry_source_path,
+  files.src_last_modified   AS entry_source_last_modified
 FROM files
-LEFT JOIN json_each(files.contents) AS src
-  ON src.key = '.source'
 WHERE json_type(files.contents, '$.webPath') = 'text';
 
-
--- Discovery & join accelerators for annotations
-CREATE INDEX IF NOT EXISTS idx_entry_dir
-  ON sqlpage_files (path)
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
-
-CREATE INDEX IF NOT EXISTS idx_entry_webpath
+-- Fast lookups by relFsPath
+CREATE INDEX IF NOT EXISTS idx_entry_relfs
   ON sqlpage_files (json_extract(contents, '$.webPath'))
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
-
-CREATE INDEX IF NOT EXISTS idx_entry_nature
-  ON sqlpage_files (json_extract(contents, '$.nature'))
   WHERE path GLOB 'spry.d/entry/**/*.auto.json';
