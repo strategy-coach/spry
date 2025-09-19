@@ -248,3 +248,48 @@ FROM spry_route_edge AS e
 JOIN spry_route     AS c
   ON c."path" = e.child
 ORDER BY e.parent, c."path";
+
+-- ---------------------------------------------------------------------------
+-- View: spry_annotation_catalog
+-- Purpose: Catalog per-entry annotations emitted at spry.d/entry/**/*.auto.json
+-- Columns:
+--   path            ← contents.webPath                (text; join-friendly)
+--   nature          ← contents.nature                 (text)
+--   rel_fs_path     ← contents.relFsPath              (text)
+--   ann_provenance  ← contents[".source"]             (JSON object)
+--   entry_source_path, entry_source_last_modified     (provenance)
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS spry_annotation_catalog;
+
+CREATE VIEW spry_annotation_catalog AS
+WITH files AS (
+  SELECT
+    f.path          AS entry_source_path,
+    f.last_modified AS entry_source_last_modified,
+    f.contents
+  FROM sqlpage_files AS f
+  WHERE f.path GLOB 'spry.d/entry/**/*.auto.json'
+    AND json_valid(f.contents)
+)
+SELECT
+  contents ->> '$.webPath'     AS path,
+  contents ->> '$.nature'      AS nature,
+  contents ->> '$.relFsPath'   AS rel_fs_path,
+  contents ->  '$[".source"]'  AS ann_provenance,
+  entry_source_path,
+  entry_source_last_modified
+FROM files
+WHERE json_type(contents, '$.webPath') = 'text';
+
+-- Discovery & join accelerators for annotations
+CREATE INDEX IF NOT EXISTS idx_entry_dir
+  ON sqlpage_files (path)
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
+
+CREATE INDEX IF NOT EXISTS idx_entry_webpath
+  ON sqlpage_files (json_extract(contents, '$.webPath'))
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
+
+CREATE INDEX IF NOT EXISTS idx_entry_nature
+  ON sqlpage_files (json_extract(contents, '$.nature'))
+  WHERE path GLOB 'spry.d/entry/**/*.auto.json';

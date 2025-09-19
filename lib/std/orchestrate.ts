@@ -998,6 +998,9 @@ export class SQL {
         yield Deno.readTextFile(this.plan.pp.projectSrcFsPaths.absolute(
             join("spry", "lib", "sqlpage-files.ddl.sql"),
         ));
+        yield Deno.readTextFile(this.plan.pp.projectSrcFsPaths.absolute(
+            join("spry", "lib", "schema-info.dml.sql"),
+        ));
     }
 
     async *seedInserts() {
