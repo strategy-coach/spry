@@ -14,10 +14,13 @@
 
 import { Spawnable } from "./spawnable.ts";
 import {
-  dirname as pathDirname,
-  isAbsolute as pathIsAbsolute,
-  resolve as pathResolve,
-} from "jsr:@std/path@^1.0.6";
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  resolve,
+} from "jsr:@std/path@1";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -136,31 +139,33 @@ function detectMultiGen(
  *  - "<name>.<domain>"           ->  "<name>.auto"
  *  - "<name>"                    ->  "<name>.auto"
  *  Strips any trailing "+" from <name> or <nature>.
- *  Keeps any extra segments before <nature> (e.g. "pkg.data.sql.ts" -> "pkg.data.auto.sql").
+ *  Places the output in the **same directory** as the command (resolved against baseCwd).
  */
-function defaultOutPath(c: NCandidate): string {
-  const base = cmdBase(c.cmd); // e.g. "package.sql.ts", "abc+.sql.ts", "abc.sql+.ts"
+function defaultOutPath(c: NCandidate, baseCwd: string): string {
+  const cmdStr = c.cmd instanceof URL ? c.cmd.pathname : String(c.cmd);
 
-  const lastDot = base.lastIndexOf(".");
-  if (lastDot <= 0) {
-    // no dot or dotfile like ".env" with no additional dot
-    const name = base.replace(/\+$/, ""); // strip trailing "+" on basename
-    return `${name}.auto`;
-  }
+  // Where to place the output
+  const dirPart = dirname(cmdStr); // "." for bare names like "deno"
+  const dirAbs = dirPart === "."
+    ? baseCwd
+    : (isAbsolute(dirPart) ? dirPart : resolve(baseCwd, dirPart));
 
-  const secondLastDot = base.lastIndexOf(".", lastDot - 1);
-  if (secondLastDot <= 0) {
-    // only one extension present: "<name>.<domain>" -> "<name>.auto"
-    const name = base.slice(0, lastDot).replace(/\+$/, ""); // strip trailing "+" on basename
-    return `${name}.auto`;
-  }
+  // Build the output filename
+  const base = basename(cmdStr); // e.g. "package.sql.ts"
+  const lastExt = extname(base); // e.g. ".ts" or ""
+  const nameMinusLast = lastExt ? basename(base, lastExt) : base; // e.g. "package.sql"
+  const secondExt = extname(nameMinusLast); // e.g. ".sql+" or ".sql" or ""
+  const head = secondExt ? basename(nameMinusLast, secondExt) : nameMinusLast; // e.g. "package" or "abc+"
 
-  // two or more extensions:
-  // head = everything before the <nature> segment
-  // nature = second-to-last extension (strip trailing "+")
-  const head = base.slice(0, secondLastDot).replace(/\+$/, ""); // e.g. "abc+" -> "abc"
-  const nature = base.slice(secondLastDot + 1, lastDot).replace(/\+$/, ""); // e.g. "sql+" -> "sql"
-  return nature ? `${head}.auto.${nature}` : `${head}.auto`;
+  const stripPlus = (s: string) => s.replace(/\+$/, ""); // trailing '+' only
+
+  const outBase = secondExt
+    // "<head>.<nature>.<domain...>" -> "<head>.auto.<nature>"
+    ? `${stripPlus(head)}.auto${stripPlus(secondExt)}`
+    // "<head>[.<domain>]" -> "<head>.auto"
+    : `${stripPlus(head)}.auto`;
+
+  return join(dirAbs, outBase);
 }
 
 function hcDefault() {
@@ -185,7 +190,7 @@ async function ensureWriteTextSafe(
   content: string,
 ): Promise<{ ok: true } | { ok: false; error: unknown }> {
   try {
-    await Deno.mkdir(pathDirname(absPath), { recursive: true });
+    await Deno.mkdir(dirname(absPath), { recursive: true });
     await Deno.writeTextFile(absPath, content);
     return { ok: true };
   } catch (error) {
@@ -361,17 +366,28 @@ export class CapExec<R = SpawnRunResult> {
 
   static isExecutable(path: string) {
     try {
+      // lstat first so we know if it's a symlink
+      const lst = Deno.lstatSync(path);
+      if (lst.isSymlink) {
+        try {
+          // resolve symlink to its real target for accurate checks
+          path = Deno.realPathSync(path);
+        } catch {
+          return false; // dangling / inaccessible target
+        }
+      }
+
       const info = Deno.statSync(path);
       if (!info.isFile) return false;
 
       const mode = info.mode ?? 0;
       // POSIX: any of user/group/other execute bits
-      if (mode !== 0) return (mode & 0o111) !== 0;
+      if (mode) return (mode & 0o111) !== 0;
 
-      // Windows / platforms without mode: fall back to extension heuristic
-      const p = path.toLowerCase();
+      // Windows / filesystems without mode: check the TARGET's extension
+      const lower = path.toLowerCase();
       return [".exe", ".cmd", ".bat", ".com", ".ps1"].some((ext) =>
-        p.endsWith(ext)
+        lower.endsWith(ext)
       );
     } catch {
       return false;
@@ -430,6 +446,7 @@ export class CapExec<R = SpawnRunResult> {
     const isCapExec = !!nature && isExecutable;
 
     return {
+      filename,
       base,
       stem,
       stemNoPlus,
@@ -470,8 +487,10 @@ export class CapExec<R = SpawnRunResult> {
   }
 
   private outPathFor(c: NCandidate) {
-    return c.outPath ??
-      (this.cfg.outPathRule ? this.cfg.outPathRule(c) : defaultOutPath(c));
+    if (c.outPath) return c.outPath;
+    if (this.cfg.outPathRule) return this.cfg.outPathRule(c);
+    const baseCwd = c.cwd ?? this.cfg.cwd ?? Deno.cwd();
+    return defaultOutPath(c, baseCwd);
   }
 
   private mapResult(raw: SpawnRunResult, c: NCandidate): R {
@@ -683,9 +702,7 @@ export class CapExec<R = SpawnRunResult> {
                   }
                   const rel = (obj as Any).path as string;
                   const content = (obj as Any).content as string;
-                  const abs = pathIsAbsolute(rel)
-                    ? rel
-                    : pathResolve(baseCwd, rel);
+                  const abs = isAbsolute(rel) ? rel : resolve(baseCwd, rel);
                   const wrote = await ensureWriteTextSafe(abs, content);
                   if (!wrote.ok) {
                     this.emit("error", c, wrote.error);
@@ -878,7 +895,7 @@ export class CapExec<R = SpawnRunResult> {
               }
               const rel = (obj as Any).path as string;
               const content = (obj as Any).content as string;
-              const abs = pathIsAbsolute(rel) ? rel : pathResolve(baseCwd, rel);
+              const abs = isAbsolute(rel) ? rel : resolve(baseCwd, rel);
               const wrote = await ensureWriteTextSafe(abs, content);
               if (!wrote.ok) {
                 this.emit("error", c, wrote.error);

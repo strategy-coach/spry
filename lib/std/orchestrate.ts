@@ -646,21 +646,16 @@ export class CapExecs {
     async execute() {
         const ceCandidates: WalkEncounter<WalkSpec>[] = [];
         for await (const cec of this.ceCandidates.encountered()) {
-            const cecc = CapExec.capExecCandidacy(cec.entry.name);
-            console.log(cecc.base, cecc.isExecutable, cecc.isCapExec);
+            const cecc = CapExec.capExecCandidacy(cec.entry.path);
             if (cecc.isCapExec) ceCandidates.push(cec);
-            if (cecc.base == "index.sql.ts") console.log(cecc);
         }
         const ce = CapExec.create()
             .withCandidates(ceCandidates.map((cec) => cec.entry.path))
             .withEnv(this.env())
-            .withDryRun()
             .on("error", (...args) => {
                 console.error(...args);
             });
-        ///await ce.runSettled();
-        // console.log(ceCandidates);
-        console.dir(await ce.runSettled());
+        await ce.runSettled();
     }
 }
 
