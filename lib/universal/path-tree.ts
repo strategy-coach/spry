@@ -681,3 +681,123 @@ export function pathTreeSerializers<Node, Path extends string = string>(
 
   return { asciiTreeText, jsonText, jsonSchemaText };
 }
+
+/**
+ * Convert a forest (with multiple roots) into a flat edge list.
+ * - Each edge uses canonical route paths like "spry/console/index.sql" (no leading slash).
+ * - For a directory node, its "own index route" is taken from a child whose basename === "index.sql".
+ * - Edges:
+ *   1) parentDirIndex → dirIndex (for the child whose basename is "index.sql")
+ *   2) dirIndex       → other child payload routes in that directory
+ */
+export function forestToEdges<Node, Path extends string = string>(
+  forest: Awaited<ReturnType<typeof pathTree<Node, Path>>>,
+) {
+  const edges: { parent: string; child: string }[] = [];
+  const seen = new Set<string>(); // dedupe using `${parent}→${child}`
+
+  const norm = (p?: string | null) => (p ?? "").replace(/^\/+/, ""); // drop any leading '/'
+
+  // Extract the root index route if present (e.g., "index.sql")
+  const rootIndexRoute = (() => {
+    const roots = Array.isArray(forest?.roots) ? forest.roots : [];
+    for (const n of roots) {
+      if (
+        typeof n?.basename === "string" &&
+        n.basename.toLowerCase() === "index.sql"
+      ) {
+        const pp = n?.path;
+        if (typeof pp === "string") return norm(pp);
+      }
+    }
+    return null as string | null;
+  })();
+
+  // Return the canonical "index" route for a node (directory or file), or null
+  const getIndexRoute = (node: Any): string | null => {
+    // If the node itself is an index.sql (file node)
+    if (
+      typeof node?.basename === "string" &&
+      node.basename.toLowerCase() === "index.sql"
+    ) {
+      const pp = node?.payloads?.[0]?.path;
+      return typeof pp === "string" ? norm(pp) : null;
+    }
+    // Else, look for a child that is index.sql and use its payload path
+    const kids = Array.isArray(node?.children) ? node.children : [];
+    for (const k of kids) {
+      if (
+        typeof k?.basename === "string" &&
+        k.basename.toLowerCase() === "index.sql"
+      ) {
+        const pp = k?.payloads?.[0]?.path;
+        if (typeof pp === "string") return norm(pp);
+      }
+    }
+    return null;
+  };
+
+  // Collect all payload route paths for a node (usually 0 or 1; can be more)
+  const getPayloadRoutes = (node: Any): string[] => {
+    const ps = Array.isArray(node?.payloads) ? node.payloads : [];
+    const out: string[] = [];
+    for (const p of ps) {
+      if (typeof p?.path === "string") out.push(norm(p.path));
+    }
+    return out;
+  };
+
+  const addEdge = (parent: string | null, child: string | null) => {
+    if (!parent || !child) return;
+    if (parent === child) return; // avoid self-edges
+    const key = `${parent}→${child}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      edges.push({ parent, child });
+    }
+  };
+
+  // Depth-first traversal
+  const walk = (node: Any, parentIndex: string | null) => {
+    const ownIndex = getIndexRoute(node);
+    const children = Array.isArray(node?.children) ? node.children : [];
+
+    // emit edges for each child node's payloads
+    for (const childNode of children) {
+      const childIndex = getIndexRoute(childNode);
+      const childPayloads = getPayloadRoutes(childNode);
+
+      // Case 1: child is the directory index (basename === "index.sql")
+      //         Link it upward to *this* node's parentIndex.
+      if (childIndex) {
+        addEdge(parentIndex, childIndex);
+      }
+
+      // Case 2: other child payload routes link from this directory's own index
+      for (const ch of childPayloads) {
+        if (childIndex && ch === childIndex) {
+          // Already linked upward in Case 1
+        } else {
+          addEdge(ownIndex ?? parentIndex, ch);
+        }
+      }
+
+      // Recurse: the child's own index becomes the parent for its subtree
+      walk(childNode, childIndex ?? ownIndex ?? parentIndex);
+    }
+  };
+
+  // Kick off from each root; top-level parent is the root index route (if any)
+  const roots = Array.isArray(forest?.roots) ? forest.roots : [];
+  for (const root of roots) {
+    // If the root is itself an index.sql (a file), it has no parent; skip linking it upward.
+    const isRootIndex = typeof root?.basename === "string" &&
+      root.basename.toLowerCase() === "index.sql";
+
+    // For directory roots, link their index.sql up to the global root index (if present)
+    // The generic walk logic handles this via parentIndex passed down.
+    walk(root, isRootIndex ? null : rootIndexRoute);
+  }
+
+  return edges;
+}

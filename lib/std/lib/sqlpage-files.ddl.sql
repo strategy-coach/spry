@@ -6,37 +6,23 @@
 /*------------------------------------------------------------------------------
 Table: sqlpage_files
 
-Purpose:
-  Stores SQL-based page definitions and related metadata for both SQLPage
-  and Spry. This is the canonical source of truth for all SQL-driven pages,
-  partials, and components.
+What it stores
+  One row per “file” that SQLPage/Spry can read:
+    • SQL pages / partials (as text)
+    • JSON control files (routes, breadcrumbs, entries, etc.)
 
-  TODO: consider generating sqlpage_files using Drizzle ORM?
+Why it exists
+  Keeps runtime-ready artifacts inside the DB so routing, nav, and content can be
+  queried and transformed with SQL.
 
-Usage:
-  • SQLPage uses:
-      - path          → maps files to URLs ("web paths")
-      - contents      → SQL code executed to render the page
-      - last_modified → detects when pages change for caching or live reload
-  • Spry uses:
-      - path          → paths starting with `.annotation` are for custom data
-      - contents      → entry, route, breadcrumbs, etc. are stored here
+How it’s used
+  • SQLPage: maps path → contents to render pages.
+  • Spry: reads JSON files under spry.d/* for routes/breadcrumbs/entries, etc.
 
-Columns:
-  path            VARCHAR  PRIMARY KEY, NOT NULL
-      • Unique identifier for the file (usually relative path).
-      • Used by SQLPage to map URLs to content.
-      • Used by Spry to store annoations in `.annotation/**`
-  contents        TEXT, NOT NULL
-      • Stores the raw SQL code SQLPage uses for rendering HTML and other content.
-      • Stores JSON and other code for Spry.
-  last_modified   TIMESTAMPTZ, DEFAULT CURRENT_TIMESTAMP
-      • Auto-updated when inserted; can be used for cache invalidation.
-
-Notes:
-  • All SQLPage pages and components are stored here, enabling dynamic routing.
-  • Spry builds navigation trees, breadcrumbs, and titles based on annotations.
-  • Combine with views like `spry_route` to expose structured navigation data.
+Columns
+  path          PK “filename” (e.g. spry/console/index.sql.auto.json)
+  contents      The raw text/JSON for the file
+  last_modified For cache-invalidation and “pick newest” semantics
 ------------------------------------------------------------------------------*/
 CREATE TABLE IF NOT EXISTS "sqlpage_files" (
   "path" VARCHAR PRIMARY KEY NOT NULL,
@@ -44,222 +30,221 @@ CREATE TABLE IF NOT EXISTS "sqlpage_files" (
   "last_modified" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- should match `contents.ts` SpryRouteAnnotation shape;
--- if the same path should be able to arrive from multiple routes then
--- create a common partial liked `partial-content.sql` and then two or
--- more separate *.sql files with different routes that `include` 
--- `partial-content.sql`. 
-DROP VIEW IF EXISTS "spry_route";
-CREATE VIEW "spry_route" AS
-SELECT
-  f.path AS spf_path,
-  f.last_modified AS spf_last_modified,
-  annotations ->> '$.route.path'               AS "path",
-  annotations ->> '$.route.pathBasename'       AS "path_basename",
-  annotations ->> '$.route.pathBasenameNoExtn' AS "path_basename_no_extn",
-  annotations ->> '$.route.pathDirname'        AS "path_dirname",
-  annotations ->> '$.route.pathExtnTerminal'   AS "path_extn_terminal",
-  annotations ->> '$.route.pathExtns'          AS "path_extns",
-  annotations ->> '$.route.caption'            AS "caption",
-  annotations ->> '$.route.siblingOrder'       AS "sibling_order",
-  annotations ->> '$.route.url'                AS "url",
-  annotations ->> '$.route.title'              AS "title",
-  annotations ->> '$.route.abbreviatedCaption' AS "abbreviated_caption",
-  annotations ->> '$.route.description'        AS "description",
-  annotations ->  '$.route.elaboration'        AS "elaboration"
-FROM sqlpage_files AS f
-WHERE
-  annotations IS NOT NULL
-  AND json_type(annotations, '$.route') = 'object'
-  AND annotations ->> '$.route.path' IS NOT NULL;
+-- Helpful general index for recency-based joins/filters and debugging
+CREATE INDEX IF NOT EXISTS idx_sqlpage_files_last_modified
+  ON sqlpage_files (last_modified);
 
-CREATE INDEX IF NOT EXISTS idx_spry_route
-  ON sqlpage_files (json_extract(annotations, '$.route'))
-  WHERE annotations -> '$.route' IS NOT NULL;
+-- ---------------------------------------------------------------------------
 
--- Accelerate lookups of route details by path
-CREATE INDEX IF NOT EXISTS idx_spry_route_path
-  ON sqlpage_files (json_extract(annotations, '$.route.path'))
-  WHERE json_type(annotations, '$.route') = 'object';
+/*------------------------------------------------------------------------------
+View: spry_route
 
--- Flattened breadcrumbs, joined to per-route metadata
-DROP VIEW IF EXISTS spry_route_crumb;
-CREATE VIEW spry_route_crumb AS
+Purpose
+  Projects one row per route from files under spry.d/route/**\/*.auto.json.
+
+Shape (selected)
+  path, title, caption, url, description, elaboration, plus provenance:
+  spf_path (source file path), spf_last_modified.
+
+Notes
+  • Expects each file’s contents to be a JSON object with the route fields.
+  • Filtered indexes below speed up discovery and path lookups.
+------------------------------------------------------------------------------*/
+DROP VIEW IF EXISTS spry_route;
+CREATE VIEW spry_route AS
 WITH files AS (
-  SELECT
-    f.path         AS src_path,
-    f.last_modified AS src_last_modified,
-    f.contents
-  FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry/lib/route/breadcrumbs.d/*.json'
-    AND json_valid(f.contents)
-),
-raw AS (
-  SELECT
-    src_path,
-    src_last_modified,
-    b.key                    AS active_path,     -- top-level map key
-    CAST(c.key AS INTEGER)   AS crumb_index,     -- index within breadcrumb array
-    c.value                  AS crumb            -- the { node, hrefs } object
-  FROM files,
-       json_each(contents) AS b,                 -- iterate map: active_path -> array
-       json_each(b.value)  AS c                  -- iterate array elements
-),
-link AS (
-  SELECT
-    src_path,
-    src_last_modified,
-    active_path,
-    crumb_index,
-    CASE
-      WHEN json_type(crumb, '$.hrefs.index') = 'text'
-        THEN crumb ->> '$.hrefs.index'
-      WHEN json_type(crumb, '$.node.payloads[0].path') = 'text'
-        THEN crumb ->> '$.node.payloads[0].path'
-      WHEN json_type(crumb, '$.hrefs.canonical') = 'text'
-           AND (substr(crumb ->> '$.hrefs.canonical', -1) = '/' OR instr(crumb ->> '$.hrefs.canonical', '.') = 0)
-        THEN (crumb ->> '$.hrefs.canonical') || 'index.sql'
-      ELSE crumb ->> '$.hrefs.canonical'
-    END AS join_path
-  FROM raw
-),
--- If multiple files provide the same crumb, prefer the most recently modified
-ranked AS (
-  SELECT
-    active_path,
-    crumb_index,
-    join_path,
-    src_path,
-    src_last_modified,
-    ROW_NUMBER() OVER (
-      PARTITION BY active_path, crumb_index, join_path
-      ORDER BY src_last_modified DESC, src_path DESC
-    ) AS rn
-  FROM link
-)
-SELECT
-  r.active_path,
-  r.crumb_index,
-  r.src_path       AS breadcrumbs_source_path,
-  r.src_last_modified AS breadcrumbs_source_last_modified,
-  s.*
-FROM ranked AS r
-JOIN spry_route AS s
-  ON s."path" = r.join_path
-WHERE r.rn = 1;
-
--- Here’s a single view, **`spry_route_child`**, that lists every child route for every parent in your `contents` JSON. It includes:
-
--- * `parent_path` – the node’s own path (e.g. `/spry/console`)
--- * `parent_path_ts` – **trailing-slash** version of the parent path (e.g. `/spry/console/`)
--- * `parent_path_index` – **index.sql** version of the parent path (e.g. `/spry/console/index.sql`)
--- * `sr.*` – all columns from `spry_route` for each **child payload** (so you get full route details for children)
-
--- This view scans the canonical routes JSON row at `sqlpage_files.path = 'spry/lib/routes.auto.json'`. Adjust that path if your file is elsewhere.
-
-DROP VIEW IF EXISTS spry_route_child;
-
-CREATE VIEW spry_route_child AS
-WITH
--- All valid forest files: each file is a top-level array of roots
-files AS (
   SELECT
     f.path          AS src_path,
     f.last_modified AS src_last_modified,
     f.contents
   FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry/lib/route/forests.d/*.json'
+  WHERE f.path GLOB 'spry.d/route/**/*.auto.json'
     AND json_valid(f.contents)
 ),
-
--- Each array element is a root node
-roots AS (
+norm AS (
   SELECT
     src_path,
     src_last_modified,
-    r.value AS node
-  FROM files,
-       json_each(contents) AS r
-),
-
--- Flatten trees via children
-all_nodes(src_path, src_last_modified, node) AS (
-  SELECT src_path, src_last_modified, node
-  FROM roots
-  UNION ALL
-  SELECT an.src_path, an.src_last_modified, c.value
-  FROM all_nodes AS an,
-       json_each(an.node, '$.children') AS c
-),
-
--- Parent → direct child pairs
-parent_child AS (
-  SELECT
-    an.src_path,
-    an.src_last_modified,
-    an.node AS parent,
-    c.value AS child
-  FROM all_nodes AS an,
-       json_each(an.node, '$.children') AS c
-),
-
--- Only children that actually have payloads
-child_payloads AS (
-  SELECT
-    pc.src_path,
-    pc.src_last_modified,
-    pc.parent,
-    pc.child,
-    p.value AS payload
-  FROM parent_child AS pc,
-       json_each(pc.child, '$.payloads') AS p
+    contents AS r
+  FROM files
 )
-
 SELECT
-  -- parent path
-  pc.parent ->> '$.path' AS parent_path,
+  r ->> '$.path'               AS "path",
+  r ->> '$.pathBasename'       AS "path_basename",
+  r ->> '$.pathBasenameNoExtn' AS "path_basename_no_extn",
+  r ->> '$.pathDirname'        AS "path_dirname",
+  r ->> '$.pathExtnTerminal'   AS "path_extn_terminal",
+  r ->> '$.pathExtns'          AS "path_extns",
 
-  -- trailing-slash form
-  CASE
-    WHEN (pc.parent ->> '$.path') LIKE '%/' THEN pc.parent ->> '$.path'
-    WHEN lower(pc.parent ->> '$.path') LIKE '%/index.sql'
-      THEN substr(pc.parent ->> '$.path', 1, length(pc.parent ->> '$.path') - 10) || '/'
-    WHEN (pc.parent ->> '$.path') LIKE '%.sql'
-      THEN substr(
-             pc.parent ->> '$.path',
-             1,
-             length(pc.parent ->> '$.path') - length(coalesce(pc.parent ->> '$.basename',''))
-           )
-    ELSE (pc.parent ->> '$.path') || '/'
-  END AS parent_path_ts,
-
-  -- index.sql form
-  CASE
-    WHEN (pc.parent ->> '$.path') LIKE '%/'    THEN (pc.parent ->> '$.path') || 'index.sql'
-    WHEN (pc.parent ->> '$.path') LIKE '%.sql' THEN (pc.parent ->> '$.path')
-    ELSE (pc.parent ->> '$.path') || '/index.sql'
-  END AS parent_path_index,
+  r ->> '$.caption'            AS "caption",
+  r ->> '$.siblingOrder'       AS "sibling_order",
+  r ->> '$.url'                AS "url",
+  r ->> '$.title'              AS "title",
+  r ->> '$.abbreviatedCaption' AS "abbreviated_caption",
+  r ->> '$.description'        AS "description",
+  r ->  '$.elaboration'        AS "elaboration",
 
   -- provenance
-  pc.src_path          AS forest_source_path,
-  pc.src_last_modified AS forest_source_last_modified,
+  src_path          AS spf_path,
+  src_last_modified AS spf_last_modified
+FROM norm
+WHERE json_type(r, '$.path') = 'text';
 
-  -- child route details (payload path)
-  sr.*
-FROM child_payloads AS cp
-JOIN parent_child  AS pc
-  ON pc.src_path = cp.src_path
- AND pc.parent   = cp.parent
- AND pc.child    = cp.child
-LEFT JOIN spry_route AS sr
-  ON sr."path" = (cp.payload ->> '$.path')
-ORDER BY parent_path, sr."path";
-
-CREATE INDEX IF NOT EXISTS idx_route_forests_dir
+-- Route discovery + JSON-path lookup accelerators
+CREATE INDEX IF NOT EXISTS idx_route_dir
   ON sqlpage_files (path)
-  WHERE path GLOB 'spry/lib/route/forests.d/*.json';
+  WHERE path GLOB 'spry.d/route/**/*.auto.json';
 
-CREATE INDEX IF NOT EXISTS idx_route_forests_json
+CREATE INDEX IF NOT EXISTS idx_route_json_path_flat
+  ON sqlpage_files (json_extract(contents, '$.path'))
+  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+
+-- ---------------------------------------------------------------------------
+
+/*------------------------------------------------------------------------------
+View: spry_route_crumb
+
+Purpose
+  Emits one row per breadcrumb “crumb” from files under
+  spry.d/breadcrumbs/**\/*.auto.json (each file is an array of objects).
+
+Shape (selected)
+  path (derived from filename), crumb_index, href_* (canonical/index/trailingSlash),
+  node_* (virtual/basename/path), plus source provenance.
+
+Notes
+  • Does not traverse children/payloads; reads only top-level keys of each array item.
+  • Filtered indexes below speed up discovery and JSON scans.
+------------------------------------------------------------------------------*/
+DROP VIEW IF EXISTS spry_route_crumb;
+CREATE VIEW spry_route_crumb AS
+WITH files AS (
+  SELECT
+    f.path          AS src_path,
+    f.last_modified AS src_last_modified,
+    f.contents,
+    -- filename-derived logical path (strip prefix/suffix)
+    substr(
+      f.path,
+      length('spry.d/breadcrumbs/') + 1,
+      length(f.path) - length('spry.d/breadcrumbs/') - length('.auto.json')
+    ) AS rel_path
+  FROM sqlpage_files AS f
+  WHERE f.path GLOB 'spry.d/breadcrumbs/**/*.auto.json'
+    AND json_valid(f.contents)
+),
+-- One row per crumb (array element)
+raw AS (
+  SELECT
+    files.src_path,
+    files.src_last_modified,
+    files.rel_path,                     -- qualified to avoid json_each.path name
+    CAST(c.key AS INTEGER) AS crumb_index,
+    c.value                AS crumb
+  FROM files
+  JOIN json_each(files.contents) AS c
+)
+SELECT
+  -- logical path derived from the filename
+  rel_path AS path,
+  crumb_index,
+
+  -- hrefs.* (top-level)
+  crumb ->> '$.hrefs.canonical'     AS href_canonical,
+  crumb ->> '$.hrefs.index'         AS href_index,
+  crumb ->> '$.hrefs.trailingSlash' AS href_trailing_slash,
+
+  -- node.* (top-level)
+  crumb ->> '$.node.virtual'  AS node_virtual,
+  crumb ->> '$.node.basename' AS node_basename,
+  crumb ->> '$.node.path'     AS node_path,
+
+  -- provenance
+  src_path            AS breadcrumbs_source_path,
+  src_last_modified   AS breadcrumbs_source_last_modified
+FROM raw
+WHERE json_type(crumb, '$.node.path') = 'text'
+ORDER BY src_path, crumb_index;
+
+-- Breadcrumb discovery + JSON scan accelerators
+CREATE INDEX IF NOT EXISTS idx_breadcrumbs_dir
+  ON sqlpage_files (path)
+  WHERE path GLOB 'spry.d/breadcrumbs/**/*.auto.json';
+
+CREATE INDEX IF NOT EXISTS idx_breadcrumbs_json
   ON sqlpage_files (json_extract(contents))
-  WHERE path GLOB 'spry/lib/route/forests.d/*.json';
+  WHERE path GLOB 'spry.d/breadcrumbs/**/*.auto.json';
 
+-- ---------------------------------------------------------------------------
+-- View: spry_route_edge
+-- Purpose: Flatten prebuilt edges (parent → child) into rows, newest-wins.
+-- Inputs:  sqlpage_files where path GLOB 'spry.d/route/*edges*.auto.json'
+-- Columns: parent, child, edges_source_path, edges_source_last_modified
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS spry_route_edge;
+CREATE VIEW spry_route_edge AS
+WITH files AS (
+  SELECT
+    f.path          AS src_path,
+    f.last_modified AS src_last_modified,
+    f.contents
+  FROM sqlpage_files AS f
+  WHERE f.path GLOB 'spry.d/route/*edges*.auto.json'
+    AND json_valid(f.contents)
+),
+edges_raw AS (
+  SELECT
+    src_path,
+    src_last_modified,
+    json_extract(e.value, '$.parent') AS parent,
+    json_extract(e.value, '$.child')  AS child
+  FROM files, json_each(files.contents) AS e
+  WHERE json_type(e.value, '$.parent') = 'text'
+    AND json_type(e.value, '$.child')  = 'text'
+),
+ranked AS (
+  SELECT
+    parent,
+    child,
+    src_path,
+    src_last_modified,
+    ROW_NUMBER() OVER (
+      PARTITION BY parent, child
+      ORDER BY src_last_modified DESC, src_path DESC
+    ) AS rn
+  FROM edges_raw
+)
+SELECT
+  parent,
+  child,
+  src_path          AS edges_source_path,
+  src_last_modified AS edges_source_last_modified
+FROM ranked
+WHERE rn = 1;
+
+-- Edges discovery + JSON scan accelerators on base table
+CREATE INDEX IF NOT EXISTS idx_route_edges_dir
+  ON sqlpage_files (path)
+  WHERE path GLOB 'spry.d/route/*edges*.auto.json';
+
+CREATE INDEX IF NOT EXISTS idx_route_edges_json
+  ON sqlpage_files (json_extract(contents))
+  WHERE path GLOB 'spry.d/route/*edges*.auto.json';
+
+-- ---------------------------------------------------------------------------
+-- View: spry_route_child
+-- Purpose: Join edges to spry_route for child metadata.
+-- Outputs: parent, child, c.* (all columns from spry_route for the child),
+--          edges_source_path, edges_source_last_modified
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS spry_route_child;
+CREATE VIEW spry_route_child AS
+SELECT
+  e.parent,
+  c.*,
+  e.edges_source_path,
+  e.edges_source_last_modified
+FROM spry_route_edge AS e
+JOIN spry_route     AS c
+  ON c."path" = e.child
+ORDER BY e.parent, c."path";

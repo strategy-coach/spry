@@ -3,32 +3,32 @@
 deno install
 
 # setup symlink to Spry stdlib
-./e2ectl.ts init          # only required once
+./spryctl.ts init          # only required once
 
 # orchestrate.ts lets you perform different functions
-./e2ectl.ts help
-./e2ectl.ts watch              # TODO: not well tested yet
+./spryctl.ts help
+./spryctl.ts watch              # TODO: not well tested yet
 
 # informational
-./e2ectl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
-./e2ectl.ts ls ann             # TODO: list all candidate sqlpage_files that have been annotated with `@spry.*`
-./e2ectl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
-./e2ectl.ts ls head            # TODO: list all SQL DDL for "init" operations that go before sqlpage_files inserts
-./e2ectl.ts ls tail            # TODO: list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
-./e2ectl.ts ls routes          # list all discovered files that have route annotations as a tree
-./e2ectl.ts ls routes -t       # list all discovered files that have route annotations as a table
-./e2ectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
-./e2ectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
+./spryctl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
+./spryctl.ts ls ann             # TODO: list all candidate sqlpage_files that have been annotated with `@spry.*`
+./spryctl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
+./spryctl.ts ls head            # TODO: list all SQL DDL for "init" operations that go before sqlpage_files inserts
+./spryctl.ts ls tail            # TODO: list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
+./spryctl.ts ls routes          # list all discovered files that have route annotations as a tree
+./spryctl.ts ls routes -t       # list all discovered files that have route annotations as a table
+./spryctl.ts ls routes -j       # list all discovered files that have route annotations as JSON
+./spryctl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # emit SQL
-./e2ectl.ts sql head           # TODO: generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./e2ectl.ts sql tail           # TODO: generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./e2ectl.ts sql sqlpage-files  # TODO: generate the INSERT SQL DML for sqlpage_files contents
+./spryctl.ts sql head           # TODO: generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./spryctl.ts sql tail           # TODO: generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./spryctl.ts sql sqlpage-files  # TODO: generate the INSERT SQL DML for sqlpage_files contents
 
 # deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
-./e2ectl.ts > sqlpage-package.sql
-./e2ectl.ts | sqlite3 sqlpage.db
+./spryctl.ts > sqlpage-package.sql
+./spryctl.ts | sqlite3 sqlpage.db
 ```
 
 ### TODO: explain how `spry.d` fits in

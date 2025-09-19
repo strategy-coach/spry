@@ -35,6 +35,7 @@ import { omitPathsReplacer } from "../universal/json.ts";
 import { defineRegistry, defineRule, LintResults } from "../universal/lint.ts";
 import { MarkdownStore } from "../universal/markdown.ts";
 import {
+    forestToEdges,
     pathTree,
     pathTreeNavigation,
     pathTreeSerializers,
@@ -447,6 +448,10 @@ export const spryRouteAnnSchema = z.object({
     elaboration: z.json().optional().describe(
         'Optional structured attributes (e.g., { "target": "_blank", "lang": { "fr": { "caption": "..." } } }).',
     ),
+    children: z.array(z.object({ path: z.string().describe("Child path") }))
+        .optional().describe(
+            "Simple array of paths filled out by path-tree computing and made available via SQL on the server",
+        ),
 }).strict().describe(
     "Navigation route annotation, supports hierarchy and ordered siblings.",
 );
@@ -610,6 +615,7 @@ export class Routes {
 
         const tree = forest.roots;
         const nav = pathTreeNavigation(forest);
+        const edges = forestToEdges(forest);
         const serializers = {
             ...pathTreeSerializers(forest),
             crumbsJsonSchemaText: () =>
@@ -633,7 +639,7 @@ export class Routes {
             }
         }
 
-        return { forest, tree, breadcrumbs, serializers };
+        return { forest, tree, breadcrumbs, serializers, edges };
     }
 }
 
@@ -765,15 +771,14 @@ export class Workflow {
 
     // deno-lint-ignore require-await
     async entryAnnotations(lint = false) {
-        const entryAnns: {
+        type base = {
             we: Workflow["annsCatalog"][number]["walkEntry"];
             ann: Workflow["annsCatalog"][number]["entryAnn"];
+        };
+        const entryAnns: (base & {
             entryAnn: SpryEntryAnnotation;
-        }[] = [];
-        const issues: {
-            we: Workflow["annsCatalog"][number]["walkEntry"];
-            ann: Workflow["annsCatalog"][number]["entryAnn"];
-        }[] = [];
+        })[] = [];
+        const issues: base[] = [];
         for (const a of this.annsCatalog) {
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
                 entryAnns.push({
@@ -824,23 +829,30 @@ export class Workflow {
     }
 
     async routeAnnotations(lint = false) {
-        const routeAnns: {
+        type base = {
             we: Workflow["annsCatalog"][number]["walkEntry"];
             ann: Workflow["annsCatalog"][number]["routeAnn"];
+        };
+        const routeAnnsByPath = new Map<
+            string,
+            (base & {
+                routeAnn: SpryRouteAnnotation;
+            })
+        >();
+        const routeAnns: (base & {
             routeAnn: SpryRouteAnnotation;
-        }[] = [];
-        const issues: {
-            we: Workflow["annsCatalog"][number]["walkEntry"];
-            ann: Workflow["annsCatalog"][number]["routeAnn"];
-        }[] = [];
+        })[] = [];
+        const issues: base[] = [];
 
         for (const a of this.annsCatalog) {
             if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
-                routeAnns.push({
+                const store = {
                     we: a.walkEntry,
                     ann: a.routeAnn,
                     routeAnn: a.routeAnn.parsed,
-                });
+                };
+                routeAnns.push(store);
+                routeAnnsByPath.set(store.routeAnn.path, store);
             } else if (a.routeAnn.found > 0) {
                 if (lint) {
                     this.lintr.add({
@@ -859,53 +871,11 @@ export class Workflow {
             }
         }
 
-        const forest = await pathTree<SpryRouteAnnotation, string>(
-            routeAnns.map((ra) => ra.routeAnn),
-            {
-                nodePath: (n) => n.path,
-                pathDelim: "/",
-                synthesizeContainers: true,
-                folderFirst: false,
-                indexBasenames: ["index.sql"],
-            },
-        );
-
-        const tree = forest.roots;
-        const nav = pathTreeNavigation(forest);
-        const serializers = {
-            ...pathTreeSerializers(forest),
-            crumbsJsonSchemaText: () =>
-                JSON.stringify(
-                    nav.ancestorsJsonSchema({
-                        outerIsMap: true,
-                        payloadItemSchema: z.toJSONSchema(
-                            spryRouteAnnSchema,
-                        ),
-                    }),
-                    null,
-                    2,
-                ),
-        };
-
-        const breadcrumbs: Record<
-            string,
-            ReturnType<typeof nav.ancestors>
-        > = {};
-        for (const node of forest.treeByPath.values()) {
-            if (node.payloads) {
-                for (const p of node.payloads) {
-                    breadcrumbs[p.path] = nav.ancestors(p);
-                }
-            }
-        }
-
+        const routes = new Routes(routeAnns.map((ra) => ra.routeAnn));
         return {
             valid: routeAnns,
             issues,
-            forest,
-            tree,
-            breadcrumbs,
-            serializers,
+            ...(await routes.populate()),
         };
     }
 
@@ -927,7 +897,18 @@ export class Workflow {
         }
 
         const routes = new Routes(routeAnns.valid.map((ra) => ra.routeAnn));
-        const { serializers, breadcrumbs } = await routes.populate();
+        const { serializers, breadcrumbs, forest, edges } = await routes
+            .populate();
+
+        await spryDistJsonStore.write(
+            join("route", "forest.auto.json"),
+            forest,
+        );
+        await spryDistJsonStore.write(
+            join("route", "edges.auto.json"),
+            edges,
+        );
+
         this.orchMD.h2("Routes Tree");
         this.orchMD.code("ascii", serializers.asciiTreeText());
 
@@ -1202,7 +1183,7 @@ export class CLI {
         const roots = [this.plan.pp.projectFsPaths.root];
 
         return new Command()
-            .name(init?.name ?? "e2ectl.ts")
+            .name(init?.name ?? "spryctl.ts")
             .version("0.1.0")
             .description(
                 "Orchestrate the content which will be supplied to SQLPage target database.",
