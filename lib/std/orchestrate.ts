@@ -721,21 +721,25 @@ export class Workflow {
     readonly mdStore = new MarkdownStore<"orchestrated.auto.md">();
     readonly orchMD = this.mdStore.markdown("orchestrated.auto.md");
 
-    constructor(readonly orch: Plan) {
-        this.pp = orch.pp;
-        this.linter = orch.linter();
+    protected constructor(readonly plan: Plan) {
+        this.pp = plan.pp;
+        this.linter = plan.linter();
         this.lintr = this.linter.lintResults();
-        this.stores = orch.stores();
-        this.spf = orch.sqlpageFiles();
-        this.annotations = orch.annotations();
-        this.capExecs = orch.capExecs();
+        this.stores = plan.stores();
+        this.spf = plan.sqlpageFiles();
+        this.annotations = plan.annotations();
+        this.capExecs = plan.capExecs();
+    }
+
+    static async build(plan: Plan) {
+        return await new Workflow(plan).init();
     }
 
     get annsCatalog() {
         return this.#annsCatalog!; // will become available after call to init()
     }
 
-    async init() {
+    protected async init() {
         this.#annsCatalog = await Array.fromAsync(this.annotations.catalog());
 
         this.orchMD.h1("Orchestration Results");
@@ -905,7 +909,7 @@ export class Workflow {
         };
     }
 
-    async dropInRouteAnns(
+    protected async dropInRouteAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
         const routeAnns = await this.routeAnnotations(true);
@@ -985,6 +989,15 @@ export class Workflow {
             "orchestrated.auto.md",
             this.orchMD.write(),
         );
+    }
+
+    async orchestrate(init?: { clean?: boolean }) {
+        const stores = this.stores;
+        if (init?.clean) await this.plan.clean(stores);
+
+        await this.dropInAnnotations();
+        await this.captureExecutables();
+        await this.finalize();
     }
 }
 
@@ -1116,17 +1129,7 @@ export class Plan {
     }
 
     async workflow() {
-        return await new Workflow(this).init();
-    }
-
-    async orchestrate(init?: { clean?: boolean }) {
-        const stores = this.stores();
-        if (init?.clean) await this.clean(stores);
-
-        const workflow = await this.workflow();
-        await workflow.dropInAnnotations();
-        await workflow.captureExecutables();
-        await workflow.finalize();
+        return await Workflow.build(this);
     }
 }
 
@@ -1221,7 +1224,7 @@ export class CLI {
             .command("build")
             .description("Perform orchestration (annotations, routes, capexes)")
             .action(async () => {
-                await this.plan.orchestrate({ clean: true });
+                await (await this.plan.workflow()).orchestrate({ clean: true });
             })
             .command("help", new HelpCommand().global())
             .command(
@@ -1291,7 +1294,7 @@ export class CLI {
                 const debounceMs = 150;
                 let timer: number | null = null;
 
-                await this.plan.orchestrate({ clean: true });
+                await (await this.plan.workflow()).orchestrate({ clean: true });
 
                 // Basic FS watch (use your own watcher if you need cross-platform globs)
                 const watcher = Deno.watchFs(roots);
@@ -1304,7 +1307,9 @@ export class CLI {
                         console.log(
                             colors.cyan("⟳ change detected, rebuilding…"),
                         );
-                        await this.plan.orchestrate({ clean: true });
+                        await (await this.plan.workflow()).orchestrate({
+                            clean: true,
+                        });
                     }, debounceMs) as unknown as number;
                 }
             });
