@@ -63,12 +63,16 @@ WITH files AS (
 ),
 norm AS (
   SELECT
-    src_path,
-    src_last_modified,
-    contents AS r
+    files.src_path,
+    files.src_last_modified,
+    files.contents                       AS r,
+    src.value                            AS ann_provenance   -- robust extraction of ".source"
   FROM files
+  LEFT JOIN json_each(files.contents) AS src
+    ON src.key = '.source'
 )
 SELECT
+  -- route fields
   r ->> '$.path'               AS "path",
   r ->> '$.pathBasename'       AS "path_basename",
   r ->> '$.pathBasenameNoExtn' AS "path_basename_no_extn",
@@ -84,19 +88,28 @@ SELECT
   r ->> '$.description'        AS "description",
   r ->  '$.elaboration'        AS "elaboration",
 
-  -- provenance
+  -- annotation provenance (raw JSON for ".source")
+  ann_provenance,
+
+  -- provenance of the route file row
   src_path          AS spf_path,
   src_last_modified AS spf_last_modified
 FROM norm
 WHERE json_type(r, '$.path') = 'text';
 
--- Route discovery + JSON-path lookup accelerators
+-- discover route files fast
 CREATE INDEX IF NOT EXISTS idx_route_dir
   ON sqlpage_files (path)
   WHERE path GLOB 'spry.d/route/**/*.auto.json';
 
+-- fast lookups by route path
 CREATE INDEX IF NOT EXISTS idx_route_json_path_flat
   ON sqlpage_files (json_extract(contents, '$.path'))
+  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+
+-- help queries that scan JSON content (e.g., json_each over contents)
+CREATE INDEX IF NOT EXISTS idx_route_json_scan
+  ON sqlpage_files (json_extract(contents))
   WHERE path GLOB 'spry.d/route/**/*.auto.json';
 
 -- ---------------------------------------------------------------------------
@@ -260,7 +273,6 @@ ORDER BY e.parent, c."path";
 --   entry_source_path, entry_source_last_modified     (provenance)
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS spry_annotation_catalog;
-
 CREATE VIEW spry_annotation_catalog AS
 WITH files AS (
   SELECT
@@ -272,14 +284,17 @@ WITH files AS (
     AND json_valid(f.contents)
 )
 SELECT
-  contents ->> '$.webPath'     AS path,
-  contents ->> '$.nature'      AS nature,
-  contents ->> '$.relFsPath'   AS rel_fs_path,
-  contents ->  '$[".source"]'  AS ann_provenance,
+  files.contents ->> '$.webPath'   AS path,
+  files.contents ->> '$.nature'    AS nature,
+  files.contents ->> '$.relFsPath' AS rel_fs_path,
+  src.value                        AS ann_provenance,   -- robust extraction of ".source"
   entry_source_path,
   entry_source_last_modified
 FROM files
-WHERE json_type(contents, '$.webPath') = 'text';
+LEFT JOIN json_each(files.contents) AS src
+  ON src.key = '.source'
+WHERE json_type(files.contents, '$.webPath') = 'text';
+
 
 -- Discovery & join accelerators for annotations
 CREATE INDEX IF NOT EXISTS idx_entry_dir
