@@ -9,11 +9,13 @@ import {
     normalize,
     relative,
 } from "jsr:@std/path@1";
+import { dim } from "jsr:@std/fmt@1/colors";
 import { walk, WalkEntry, WalkOptions } from "jsr:@std/fs@1/walk";
 import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
 import * as colors from "jsr:@std/fmt@1/colors";
 import { z } from "jsr:@zod/zod@4";
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import { CapExec } from "../universal/cap-exec.ts";
 import { drizzle } from "npm:drizzle-orm@0.44.5/libsql";
 import { eq, getTableName, sql } from "npm:drizzle-orm@0.44.5";
@@ -23,6 +25,7 @@ import {
     sqliteTable,
     text,
 } from "npm:drizzle-orm@0.44.5/sqlite-core";
+import Table from "npm:cli-table3@0.6.5";
 import {
     type AnnotationItem,
     extractAnnotationsFromText,
@@ -809,80 +812,127 @@ export class OrchSession {
                 src.origin.paths.relative(src.entry),
             ]),
         );
+
+        // allow method chaining, usually from constructor
+        return this;
+    }
+
+    // deno-lint-ignore require-await
+    async entryAnnotations(lint = false) {
+        const entryAnns: {
+            we: OrchSession["annsCatalog"][number]["walkEntry"];
+            ann: OrchSession["annsCatalog"][number]["entryAnn"];
+            entryAnn: SpryEntryAnnotation;
+        }[] = [];
+        const issues: {
+            we: OrchSession["annsCatalog"][number]["walkEntry"];
+            ann: OrchSession["annsCatalog"][number]["entryAnn"];
+        }[] = [];
+        for (const a of this.annsCatalog) {
+            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
+                entryAnns.push({
+                    we: a.walkEntry,
+                    ann: a.entryAnn,
+                    entryAnn: a.entryAnn.parsed,
+                });
+            } else if (a.entryAnn.found > 0) {
+                if (lint) {
+                    this.lintr.add({
+                        rule: "invalid-annotation",
+                        code: "entry",
+                        content: a.walkEntry.origin.paths.relative(
+                            a.walkEntry.entry,
+                        ),
+                        message: "Invalid entry annotation",
+                        data: { annotation: a.entryAnn },
+                        severity: "error",
+                    });
+                } else {
+                    issues.push({ we: a.walkEntry, ann: a.entryAnn });
+                }
+            }
+        }
+        return { valid: entryAnns, issues };
     }
 
     protected async dropInEntryAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
         const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
+        const entryAnns = await this.entryAnnotations(true);
+        for (const a of entryAnns.valid) {
+            const webPath = this.pp.webPaths.absolute(a.we.entry);
+            await spryDistJsonStore.write(
+                join("entry", webPath + ".auto.json"),
+                { ...a.entryAnn, webPath, ".source": a.ann.anns },
+                // don't store absFsPath because it will be different across systems
+                // making it harder to store in Git (because it will show diffs)
+                omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
+            );
+            annotated.add({
+                root: a.we.origin.paths.identity,
+                relPath: a.entryAnn.relFsPath,
+                count: a.ann.found,
+            });
+        }
+    }
+
+    // deno-lint-ignore require-await
+    async routeAnnotations(lint = false) {
+        const routeAnns: {
+            we: OrchSession["annsCatalog"][number]["walkEntry"];
+            ann: OrchSession["annsCatalog"][number]["routeAnn"];
+            routeAnn: SpryRouteAnnotation;
+        }[] = [];
+        const issues: {
+            we: OrchSession["annsCatalog"][number]["walkEntry"];
+            ann: OrchSession["annsCatalog"][number]["routeAnn"];
+        }[] = [];
         for (const a of this.annsCatalog) {
-            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
-                const webPath = this.pp.webPaths.absolute(
-                    a.walkEntry.entry,
-                );
-                await spryDistJsonStore.write(
-                    join("entry", webPath + ".auto.json"),
-                    {
-                        ...a.entryAnn.parsed,
-                        webPath,
-                        ".source": a.entryAnn.anns,
-                    },
-                    // don't store absFsPath because it will be different across systems
-                    // making it harder to store in Git (because it will show diffs)
-                    omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
-                );
-                annotated.add({
-                    root: a.walkEntry.origin.paths.identity,
-                    relPath: a.entryAnn.parsed.relFsPath,
-                    count: a.entryAnn.found,
+            if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
+                routeAnns.push({
+                    we: a.walkEntry,
+                    ann: a.routeAnn,
+                    routeAnn: a.routeAnn.parsed,
                 });
-            } else if (a.entryAnn.found > 0) {
-                this.lintr.add({
-                    rule: "invalid-annotation",
-                    code: "entry",
-                    content: a.walkEntry.origin.paths.relative(
-                        a.walkEntry.entry,
-                    ),
-                    message: "Invalid entry annotation",
-                    data: { annotation: a.entryAnn },
-                    severity: "error",
-                });
+            } else if (a.routeAnn.found > 0) {
+                if (lint) {
+                    this.lintr.add({
+                        rule: "invalid-annotation",
+                        code: "route",
+                        content: a.walkEntry.origin.paths.relative(
+                            a.walkEntry.entry,
+                        ),
+                        message: "Invalid route annotation",
+                        data: { annotation: a.routeAnn },
+                        severity: "error",
+                    });
+                } else {
+                    issues.push({ we: a.walkEntry, ann: a.routeAnn });
+                }
             }
         }
+        return { valid: routeAnns, issues };
     }
 
     async dropInRouteAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
-        const routeAnns: SpryRouteAnnotation[] = [];
+        const routeAnns = await this.routeAnnotations(true);
         const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
-        for (const a of this.annsCatalog) {
-            if (a.routeAnn.found > 0 && a.routeAnn.parsed) {
-                await spryDistJsonStore.write(
-                    join("route", a.routeAnn.parsed.path + ".auto.json"),
-                    { ...a.routeAnn.parsed, ".source": a.routeAnn.anns },
-                );
-                annotated.add({
-                    root: a.walkEntry.origin.paths.identity,
-                    relPath: a.routeAnn.parsed.path,
-                    count: a.routeAnn.found,
-                });
-                routeAnns.push(a.routeAnn.parsed);
-            } else if (a.routeAnn.found > 0) {
-                this.lintr.add({
-                    rule: "invalid-annotation",
-                    code: "route",
-                    content: a.walkEntry.origin.paths.relative(
-                        a.walkEntry.entry,
-                    ),
-                    message: "Invalid route annotation",
-                    data: { annotation: a.routeAnn },
-                    severity: "error",
-                });
-            }
+        for (const a of routeAnns.valid) {
+            await spryDistJsonStore.write(
+                join("route", a.routeAnn.path + ".auto.json"),
+                { ...a.routeAnn, ".source": a.ann.anns },
+            );
+            annotated.add({
+                root: a.we.origin.paths.identity,
+                relPath: a.routeAnn.path,
+                count: a.ann.found,
+            });
         }
 
-        const routes = new Routes(routeAnns);
+        const routes = new Routes(routeAnns.valid.map((ra) => ra.routeAnn));
         const { serializers, breadcrumbs } = await routes.populate();
         this.orchMD.h2("Routes Tree");
         this.orchMD.code("ascii", serializers.asciiTreeText());
@@ -1031,8 +1081,7 @@ export class Orchestrator {
         const stores = this.stores();
         if (init?.clean) await this.clean(stores);
 
-        const session = new OrchSession(this);
-        await session.init();
+        const session = await new OrchSession(this).init();
         await session.dropInAnnotations();
         await session.captureExecutables();
         await session.finalize();
@@ -1071,11 +1120,118 @@ export class Orchestrator {
 
     cli(init?: { name?: string }) {
         const roots = [this.es.projectModule.root];
+
+        const ls = async () => {
+            const session = await new OrchSession(this).init();
+            const entries = await session.entryAnnotations();
+            const table = new Table({
+                head: ["", "Nature", "Path", "Ann Error"],
+            });
+            for (const ea of entries.issues) {
+                table.push([
+                    ea.ann.found ? "📝" : dim("❔"),
+                    dim("unknown"),
+                    ea.we.entry.path,
+                    ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
+                ]);
+            }
+            for (const ea of entries.valid) {
+                table.push([
+                    ea.ann.found ? "📝" : dim("❔"),
+                    ea.entryAnn.nature,
+                    ea.we.entry.path,
+                    ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
+                ]);
+            }
+            console.log(table.toString());
+        };
+
+        const routesTree = async () => {
+            const session = await new OrchSession(this).init();
+            const routes = await session.routeAnnotations();
+
+            const forest = await pathTree<SpryRouteAnnotation, string>(
+                routes.valid.map((ra) => ra.routeAnn),
+                {
+                    nodePath: (n) => n.path,
+                    pathDelim: "/",
+                    synthesizeContainers: true,
+                    folderFirst: false,
+                    indexBasenames: ["index.sql"],
+                },
+            );
+
+            const tree = forest.roots;
+            const nav = pathTreeNavigation(forest);
+            const serializers = {
+                ...pathTreeSerializers(forest),
+                crumbsJsonSchemaText: () =>
+                    JSON.stringify(
+                        nav.ancestorsJsonSchema({
+                            outerIsMap: true,
+                            payloadItemSchema: z.toJSONSchema(
+                                spryRouteAnnSchema,
+                            ),
+                        }),
+                        null,
+                        2,
+                    ),
+            };
+
+            const breadcrumbs: Record<
+                string,
+                ReturnType<typeof nav.ancestors>
+            > = {};
+            for (const node of forest.treeByPath.values()) {
+                if (node.payloads) {
+                    for (const p of node.payloads) {
+                        breadcrumbs[p.path] = nav.ancestors(p);
+                    }
+                }
+            }
+
+            return { forest, tree, breadcrumbs, serializers };
+        };
+
+        async function routes(opts?: { json?: boolean }) {
+            const { serializers } = await routesTree();
+
+            if (opts?.json) {
+                console.log(serializers.jsonText({ space: 2 }));
+            } else {
+                console.log(
+                    serializers.asciiTreeText({
+                        showPath: true,
+                        includeCounts: true,
+                    }),
+                );
+            }
+        }
+
+        async function crumbs(opts: { json?: boolean }) {
+            const { breadcrumbs } = await routesTree();
+
+            if (opts.json) {
+                console.dir(breadcrumbs);
+                return;
+            }
+
+            const table = new Table({ head: ["Path", "Breadcrumbs"] });
+            for (const [path, node] of Object.entries(breadcrumbs)) {
+                table.push([
+                    path,
+                    node.map((bc) => bc.hrefs.index ?? bc.hrefs.trailingSlash)
+                        .join("\n"),
+                ]);
+            }
+            console.log(table.toString());
+        }
+
         return new Command()
-            .name(init?.name ?? "package.sql.ts")
+            .name(init?.name ?? "e2ectl.ts")
             .version("0.1.0")
             .description(
-                "Generate the SQL which will be supplied to SQLPage target database.",
+                "Orchestrate the content which will be supplied to SQLPage target database.",
             )
             .command("init")
             .description("Setup local dev environment")
@@ -1096,7 +1252,67 @@ export class Orchestrator {
             .action(async () => {
                 await this.orchestrate({ clean: true });
             })
-            .command("watch")
+            .action(ls)
+            .command("help", new HelpCommand().global())
+            .command(
+                "ls",
+                new Command()
+                    .description(
+                        "List SQLPage .sql files excluding migrations.",
+                    )
+                    .action(ls)
+                    .command(
+                        "routes",
+                        new Command()
+                            .description(
+                                "List SQLPage .sql files that include route annotations.",
+                            )
+                            .option(
+                                "-j, --json",
+                                "Emit as JSON instead of tree",
+                            )
+                            .action(routes),
+                    )
+                    .command(
+                        "breadcrumbs",
+                        new Command()
+                            .description(
+                                "List SQLPage .sql files that include route annotations and their breadcrumbs.",
+                            )
+                            .option(
+                                "-j, --json",
+                                "dump the entire breadcrumbs object as JSON",
+                            )
+                            .action(crumbs),
+                    ),
+            )
+            .command(
+                "sql",
+                new Command()
+                    .description("TODO: Process files and emit SQL."),
+                // .command(
+                //     "head",
+                //     new Command()
+                //         .description(
+                //             "Emit initialization (header) SQL (DDL, DML).",
+                //         )
+                //         .action(async () => await head()),
+                // )
+                // .command(
+                //     "tail",
+                //     new Command()
+                //         .description(
+                //             "Emit finalization (tail) SQL (DDL, DML).",
+                //         )
+                //         .action(async () => await tail()),
+                // )
+                // .command(
+                //     "sqlpage-files",
+                //     new Command()
+                //         .description("Emit sqlplage_files content SQL.")
+                //         .action(emitSqlPageFiles),
+                // ),
+            ).command("watch")
             .description(
                 // deno-fmt-ignore
                 `Rebuild ${roots.join(", ")} on change (edge-triggered; basic).`,
