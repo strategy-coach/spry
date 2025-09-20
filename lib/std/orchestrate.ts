@@ -1306,6 +1306,31 @@ export class CLI {
         console.log(table.toString());
     }
 
+    async lsAnnotations(_opts: { json?: boolean }) {
+        const anns = new Annotations(
+            this.plan.pp.projectFsPaths,
+            this.plan.pp.webPaths,
+        );
+        const table = new Table({
+            head: ["E", "R", "Path", "Entry Error", "Route Error"],
+        });
+        for await (const a of anns.catalog()) {
+            if (a.entryAnn.found == 0 && a.routeAnn.found == 0) continue;
+            table.push([
+                a.entryAnn?.error
+                    ? ""
+                    : (a.entryAnn.found ? String(a.entryAnn.found) : ""),
+                a.routeAnn?.error
+                    ? ""
+                    : (a.routeAnn.found ? String(a.routeAnn.found) : ""),
+                relative(Deno.cwd(), a.walkEntry.entry.path),
+                a.entryAnn?.error ? z.prettifyError(a.entryAnn.error) : "",
+                a.routeAnn?.error ? z.prettifyError(a.routeAnn.error) : "",
+            ]);
+        }
+        console.log(table.toString());
+    }
+
     async lsSqlSources(opts: { target: "head" | "tail" }) {
         switch (opts.target) {
             case "head":
@@ -1478,46 +1503,30 @@ export class CLI {
                         "List SQLPage .sql files excluding migrations.",
                     )
                     .action(async () => await this.ls())
+                    .command("ann", "List annotations discovered")
+                    .option("-j, --json", "Emit as JSON instead of table")
+                    .action(async (opts) => await this.lsAnnotations(opts))
                     .command(
                         "cap-execs",
-                        new Command()
-                            .description(
-                                "List capturable executable candidates",
-                            )
-                            .option(
-                                "-j, --json",
-                                "Emit as JSON instead of tree",
-                            )
-                            .action(async (opts) =>
-                                await this.lsCapExecs(opts)
-                            ),
+                        "List capturable executable candidates",
                     )
+                    .option("-j, --json", "Emit as JSON instead of tree")
+                    .action(async (opts) => await this.lsCapExecs(opts))
                     .command(
                         "routes",
-                        new Command()
-                            .description(
-                                "List SQLPage .sql files that include route annotations.",
-                            )
-                            .option(
-                                "-j, --json",
-                                "Emit as JSON instead of tree",
-                            )
-                            .action(async (opts) => await this.lsRoutes(opts)),
+                        "List SQLPage .sql files that include route annotations.",
                     )
+                    .option("-j, --json", "Emit as JSON instead of tree")
+                    .action(async (opts) => await this.lsRoutes(opts))
                     .command(
                         "breadcrumbs",
-                        new Command()
-                            .description(
-                                "List SQLPage .sql files that include route annotations and their breadcrumbs.",
-                            )
-                            .option(
-                                "-j, --json",
-                                "dump the entire breadcrumbs object as JSON",
-                            )
-                            .action(async (opts) =>
-                                await this.lsBreadcrumbs(opts)
-                            ),
+                        "List SQLPage .sql files that include route annotations and their breadcrumbs.",
                     )
+                    .option(
+                        "-j, --json",
+                        "dump the entire breadcrumbs object as JSON",
+                    )
+                    .action(async (opts) => await this.lsBreadcrumbs(opts))
                     .command("head")
                     .action(async () =>
                         await this.lsSqlSources({ target: "head" })
@@ -1530,7 +1539,9 @@ export class CLI {
             .command(
                 "sql",
                 new Command()
-                    .description("TODO: Process files and emit SQL.")
+                    .description(
+                        "Emit SQL (without reprocessing any files, use 'build' first)",
+                    )
                     .globalOption(
                         "--db-name <file>",
                         "name of SQLite database",
