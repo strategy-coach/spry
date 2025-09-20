@@ -79,7 +79,11 @@ entry_files AS (
 ),
 route_ann AS (
   SELECT
-    rf.path                         AS path,
+    rf.path                         AS path_spf,
+    CASE
+      WHEN substr(rf.path,1,1)='/' THEN rf.path
+      ELSE '/' || rf.path
+    END                             AS path_href,
     'route'                         AS namespace,
     a.key                           AS annotation,
     a.value ->> '$.id'              AS id,
@@ -94,6 +98,10 @@ route_ann AS (
 entry_ann AS (
   SELECT
     ef.path                         AS path,
+    CASE
+      WHEN substr(ef.path,1,1)='/' THEN ef.path
+      ELSE '/' || ef.path
+    END                             AS path_href,
     'entry'                         AS namespace,
     a.key                           AS annotation,
     a.value ->> '$.id'              AS id,
@@ -145,13 +153,23 @@ WITH f AS (
   SELECT
     path          AS spf_path,
     last_modified AS spf_last_modified,
-    contents
+    contents,
+    substr(
+      path,
+      length('spry.d/route/') + 1,
+      length(path) - length('spry.d/route/') - length('.auto.json')
+    )             AS path_spf_target
   FROM sqlpage_files
   WHERE path GLOB 'spry.d/route/**/*.auto.json'
     AND json_valid(contents)
 )
 SELECT
-  contents ->> '$.path'                AS "path",
+  contents ->> '$.path'                AS "path_spf",
+  path_spf_target                      AS "path_spf_target",
+  CASE
+    WHEN substr(path_spf_target,1,1)='/' THEN path_spf_target
+    ELSE '/' || path_spf_target
+  END                                  AS path_href,  
   contents ->> '$.pathBasename'        AS "path_basename",
   contents ->> '$.pathBasenameNoExtn'  AS "path_basename_no_extn",
   contents ->> '$.pathDirname'         AS "path_dirname",
@@ -208,7 +226,7 @@ WITH files AS (
       f.path,
       length('spry.d/breadcrumbs/') + 1,
       length(f.path) - length('spry.d/breadcrumbs/') - length('.auto.json')
-    ) AS rel_path
+    ) AS path_spf_target
   FROM sqlpage_files AS f
   WHERE f.path GLOB 'spry.d/breadcrumbs/**/*.auto.json'
     AND json_valid(f.contents)
@@ -218,7 +236,7 @@ raw AS (
   SELECT
     files.src_path,
     files.src_last_modified,
-    files.rel_path,                     -- qualified to avoid json_each.path name
+    files.path_spf_target,                     -- qualified to avoid json_each.path name
     CAST(c.key AS INTEGER) AS crumb_index,
     c.value                AS crumb
   FROM files
@@ -226,7 +244,11 @@ raw AS (
 )
 SELECT
   -- logical path derived from the filename
-  rel_path AS path,
+  path_spf_target AS path_spf,
+  CASE
+    WHEN substr(path_spf_target,1,1)='/' THEN path_spf_target
+    ELSE '/' || path_spf_target
+  END                               AS path_href,
   crumb_index,
 
   -- hrefs.* (top-level)
@@ -276,27 +298,35 @@ edges_raw AS (
   SELECT
     src_path,
     src_last_modified,
-    json_extract(e.value, '$.parent') AS parent,
-    json_extract(e.value, '$.child')  AS child
+    json_extract(e.value, '$.parent') AS parent_path_spf,
+    json_extract(e.value, '$.child')  AS child_path_spf
   FROM files, json_each(files.contents) AS e
   WHERE json_type(e.value, '$.parent') = 'text'
     AND json_type(e.value, '$.child')  = 'text'
 ),
 ranked AS (
   SELECT
-    parent,
-    child,
+    parent_path_spf,
+    child_path_spf,
     src_path,
     src_last_modified,
     ROW_NUMBER() OVER (
-      PARTITION BY parent, child
+      PARTITION BY parent_path_spf, child_path_spf
       ORDER BY src_last_modified DESC, src_path DESC
     ) AS rn
   FROM edges_raw
 )
 SELECT
-  parent,
-  child,
+  parent_path_spf,
+  child_path_spf,
+  CASE
+    WHEN substr(parent_path_spf,1,1)='/' THEN parent_path_spf
+    ELSE '/' || parent_path_spf
+  END               AS parent_path_href,
+  CASE
+    WHEN substr(child_path_spf,1,1)='/' THEN child_path_spf
+    ELSE '/' || child_path_spf
+  END               AS child_path_href,
   src_path          AS edges_source_path,
   src_last_modified AS edges_source_last_modified
 FROM ranked
@@ -320,14 +350,15 @@ CREATE INDEX IF NOT EXISTS idx_route_edges_json
 DROP VIEW IF EXISTS spry_route_child;
 CREATE VIEW spry_route_child AS
 SELECT
-  e.parent,
+  e.parent_path_spf,
+  e.parent_path_href,
   c.*,
   e.edges_source_path,
   e.edges_source_last_modified
 FROM spry_route_edge AS e
 JOIN spry_route     AS c
-  ON c."path" = e.child
-ORDER BY e.parent, c."path";
+  ON c."path_spf" = e.child_path_spf
+ORDER BY e.parent_path_spf, c."path_spf";
 
 -- Speed extraction of the raw ".source" annotations in entry files
 CREATE INDEX IF NOT EXISTS idx_entry_source_json
@@ -356,13 +387,22 @@ WITH files AS (
   SELECT
     f.path          AS src_path,
     f.last_modified AS src_last_modified,
-    f.contents
+    f.contents,
+    substr(
+      f.path,
+      length('spry.d/entry/') + 1,
+      length(f.path) - length('spry.d/entry/') - length('.auto.json')
+    ) AS path_spf_target
   FROM sqlpage_files AS f
   WHERE f.path GLOB 'spry.d/entry/**/*.auto.json'
     AND json_valid(f.contents)
 )
 SELECT
-  files.contents ->> '$.webPath'   AS path,
+  files.contents ->> '$.webPath'   AS path_spf,
+  CASE
+    WHEN substr(path_spf_target,1,1)='/' THEN path_spf_target
+    ELSE '/' || path_spf_target
+  END                              AS path_href,
   files.contents ->> '$.nature'    AS nature,
   files.contents ->> '$.relFsPath' AS rel_fs_path,
   files.src_path            AS entry_source_path,

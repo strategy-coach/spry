@@ -45,10 +45,10 @@ SELECT 'shell' AS component,
                   FROM (
                       SELECT
                           COALESCE(abbreviated_caption, caption) as title,
-                          COALESCE(url, path) as link,
+                          COALESCE(url, path_href) as link,
                           description
-                      FROM spry_route_path
-                      WHERE parent_path = '/spry/docs'
+                      FROM spry_route
+                      WHERE path_href = '/spry/docs'
                       ORDER BY sibling_order
                   )
               )
@@ -67,12 +67,14 @@ SELECT 'shell' AS component,
                   FROM (
                       SELECT
                           COALESCE(abbreviated_caption, caption) as title,
-                          COALESCE(url, path) as link,
+                          COALESCE(url, path_href) as link,
                           description
-                      FROM spry_route_path
-                      WHERE parent_path = '/spry/console'
+                      FROM spry_route
+                      WHERE path_href = '/spry/console'
                       ORDER BY sibling_order
                   )
               )
           ) as menu_item,       
        'Spry BaaS v0.0.1 Web UI ([SQLPage v' || sqlpage.version() || '](https://sql-page.com/documentation.sql)) ' || '📄 [' || substr(sqlpage.path(), 2) || '](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/console/sqlpage-files/sqlpage-file.sql?path=' || substr(sqlpage.path(), LENGTH(COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) + 2 ) || ')' as footer;
+
+SELECT 'text' AS component, sqlpage.path() as contents;

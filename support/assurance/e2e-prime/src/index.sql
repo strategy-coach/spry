@@ -5,16 +5,9 @@ SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 SELECT 'text' AS component, sqlpage.path() as contents;
 
 SELECT 'list' AS component;
-SELECT caption as title, COALESCE(url, path) as link, description
-  FROM spry_route_path
- WHERE path = substr(
-        sqlpage.path(),
-        1,
-        length(sqlpage.path()) - instr(
-            replace(sqlpage.path(), '/', char(1)) || char(1),
-            char(1)
-        )
-    );
+SELECT caption as title, COALESCE(url, path_href) as link, description
+  FROM spry_route
+ WHERE path_href = sqlpage.path();
 
 select 
     'text' as component,
