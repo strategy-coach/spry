@@ -1074,6 +1074,7 @@ export class Workflow {
 export class SQL {
     constructor(readonly plan: Plan) {
     }
+
     get provenanceHint() {
         return provenanceText({
             importMetaURL: import.meta.url,
@@ -1081,15 +1082,26 @@ export class SQL {
         });
     }
 
-    async *headSQL() {
-        // deno-fmt-ignore
-        yield `-- tail SQL defined in ${this.provenanceHint}`;
-        yield Deno.readTextFile(this.plan.pp.projectSrcFsPaths.absolute(
+    async *headSqlSources() {
+        const relativeToCWD = (path: string) => relative(Deno.cwd(), path);
+        yield relativeToCWD(this.plan.pp.projectSrcFsPaths.absolute(
             join("spry", "lib", "sqlpage-files.ddl.sql"),
         ));
-        yield Deno.readTextFile(this.plan.pp.projectSrcFsPaths.absolute(
+        yield relativeToCWD(this.plan.pp.projectSrcFsPaths.absolute(
             join("spry", "lib", "schema-info.dml.sql"),
         ));
+    }
+
+    async *tailSqlSources() {
+        /** none so far */
+    }
+
+    async *headSQL() {
+        yield `-- head SQL defined in ${this.provenanceHint} (begin)`;
+        for await (const hss of this.headSqlSources()) {
+            yield Deno.readTextFile(hss);
+        }
+        yield `-- head SQL defined in ${this.provenanceHint} (end)`;
     }
 
     async *seedInserts() {
@@ -1116,31 +1128,26 @@ export class SQL {
     }
 
     async *tailSQL() {
-        // deno-fmt-ignore
-        yield `-- no tail SQL defined in ${this.provenanceHint}`;
+        yield `-- tail SQL defined in ${this.provenanceHint} (begin)`;
+        for await (const tss of this.tailSqlSources()) {
+            yield Deno.readTextFile(tss);
+        }
+        yield `-- tail SQL defined in ${this.provenanceHint} (end)`;
     }
 
-    async *emit() {
+    async *deploy() {
         const { sqlpageFiles } = sqliteModels();
 
-        yield `-- head SQL --`;
-        for await (const sql of this.headSQL()) {
-            yield sql;
-        }
+        yield* this.headSQL();
 
         yield `-- ${getTableName(sqlpageFiles)} rows --`;
-        for await (const insert of this.seedInserts()) {
-            yield insert;
-        }
+        yield* this.seedInserts();
 
-        yield `-- tail SQL --`;
-        for await (const sql of this.tailSQL()) {
-            yield sql;
-        }
+        yield* this.tailSQL();
     }
 
     async toStdOut() {
-        for await (const sql of this.emit()) {
+        for await (const sql of this.deploy()) {
             console.log(sql);
         }
     }
@@ -1299,6 +1306,21 @@ export class CLI {
         console.log(table.toString());
     }
 
+    async lsSqlSources(opts: { target: "head" | "tail" }) {
+        switch (opts.target) {
+            case "head":
+                console.log(
+                    await Array.fromAsync(new SQL(this.plan).headSqlSources()),
+                );
+                break;
+            case "tail":
+                console.log(
+                    await Array.fromAsync(new SQL(this.plan).tailSqlSources()),
+                );
+                break;
+        }
+    }
+
     async lsCapExecs(_opts: { json?: true }) {
         const workflow = await this.plan.workflow();
         const ceEntries = await workflow.capExecEntryAnnotations();
@@ -1363,7 +1385,7 @@ export class CLI {
                 const workflow = await this.plan.workflow(opts);
                 await workflow.orchestrate({ clean: true });
                 return await Array.fromAsync(
-                    new SQL(this.plan).emit(),
+                    new SQL(this.plan).deploy(),
                 );
             }, {
                 onInit: true,
@@ -1495,6 +1517,14 @@ export class CLI {
                             .action(async (opts) =>
                                 await this.lsBreadcrumbs(opts)
                             ),
+                    )
+                    .command("head")
+                    .action(async () =>
+                        await this.lsSqlSources({ target: "head" })
+                    )
+                    .command("tail")
+                    .action(async () =>
+                        await this.lsSqlSources({ target: "tail" })
                     ),
             )
             .command(
