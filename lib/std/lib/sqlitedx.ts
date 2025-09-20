@@ -1,10 +1,51 @@
-#!/usr/bin/env -S deno run -A
 /**
- * DevExperience: single-class DX runner for sqlpage + sqlite reloader.
- * - Optional init SQL load (before sqlpage starts)
- * - Starts sqlpage, then a file watcher
- * - On changes: stops watcher -> stops sqlpage -> (re)loads SQLite -> gates -> restarts sqlpage -> restarts watcher
- * - Watcher is never running while SQL is being generated or SQLite is being refreshed.
+ * DevExperience — orchestrator for SQLPage + SQLite DX.
+ *
+ * Purpose
+ * - Run a local sqlpage process with automatic restart on file changes.
+ * - Optionally regenerate & reload a SQLite database before sqlpage restarts.
+ * - Ensure the file watcher is paused during reloads/restarts so events aren’t missed or duplicated.
+ *
+ * Quick start
+ * ```ts
+ * import { DevExperience } from "./sqlitedx.ts";
+ *
+ * const dx = new DevExperience({
+ *   dbPath: "dev.db",
+ *   watch: ["pages", "sql"],
+ *   sqlTextFn: () => Deno.readTextFile("sql/all.sql"),
+ * })
+ * .withWatchedFsChangeDetected(({ added, modified }) => {
+ *   // Reload DB if any SQL file changed, otherwise just restart sqlpage
+ *   if ([...added, ...modified].some(p => p.endsWith(".sql"))) return "reload-sql";
+ *   return "restart-sqlpage";
+ * });
+ *
+ * await dx.start(); // never resolves
+ * ```
+ *
+ * Common builder functions
+ * - `withDb(path: string)` — set SQLite DB path.
+ * - `withEnv(env: Record<string,string>)` — add environment vars for child processes.
+ * - `withCWD(cwd: string)` — working directory for processes.
+ * - `withSqlText(fn: () => SqlSource, opts?)` — supply SQL text/iterator for SQLite, with init/reload policies.
+ * - `watch(...paths: string[])` — set filesystem paths to monitor.
+ * - `sqlpagePath(p: string)` / `sqlpageArgs(...args: string[])` — configure sqlpage command.
+ * - `sqlite3Path(p: string)` — configure sqlite3 command.
+ * - `restartSignal(sig: Deno.Signal)` — signal used to stop sqlpage.
+ * - `debounce(ms: number)` — debounce window for batching FS events.
+ * - `restartDelayMs(ms: number)` — delay before sqlpage restarts.
+ * - `beforeSqlpageRestart(fn: () => Promise<void>|void)` — async hook before sqlpage restarts.
+ * - `withWatchedFsChangeDetected(fn)` — decision hook:
+ *     • return `"reload-sql"` to reload DB + restart sqlpage
+ *     • return `"restart-sqlpage"` to just restart sqlpage
+ *     • return `false` to ignore the change
+ * - `on<T>(event, handler)` — subscribe to lifecycle/logging events (e.g., `"reload:start"`, `"reload:ok"`, `"sqlpage:stdout"`).
+ *
+ * Notes
+ * - `start()` never resolves; it keeps the orchestrator alive.
+ * - Default logging is enabled; disable via `{ defaultLogging: false }`.
+ * - File changes are debounced and batched before a decision is made.
  */
 
 import * as color from "jsr:@std/fmt@1/colors";
@@ -17,6 +58,18 @@ type SqlSource =
     | Promise<string | Iterable<string> | AsyncIterable<string>>;
 
 type ReloadPhase = "init" | "watch";
+
+/** Action decided by the onFsChange hook. */
+type FsChangeAction = "reload-sql" | "restart-sqlpage" | false;
+
+/** Structured, batched file-change info provided to onFsChange. */
+interface FsChangeInfo {
+    added: Set<string>;
+    modified: Set<string>;
+    removed: Set<string>;
+    raw: Deno.FsEvent[];
+    since: number; // epoch ms of first event in the batch
+}
 
 export interface DevExperienceOptions {
     dbPath?: string;
@@ -36,6 +89,21 @@ export interface DevExperienceOptions {
     /** Awaited before sqlpage restarts. Defaults to a no-op. */
     beforeSqlpageRestart?: () => Promise<void> | void;
     defaultLogging?: boolean;
+
+    /**
+     * Optional decision hook called on each debounced batch of filesystem events.
+     * Return:
+     *  - "reload-sql"      → reload SQLite & restart sqlpage
+     *  - "restart-sqlpage" → restart sqlpage only (no SQLite reload)
+     *  - false             → ignore the change
+     *
+     * If not supplied, falls back to policy.onReload:
+     *  - truthy → "reload-sql"
+     *  - falsy  → false
+     */
+    onFsChange?: (
+        info: FsChangeInfo,
+    ) => FsChangeAction | Promise<FsChangeAction>;
 }
 
 export class DevExperience extends EventTarget {
@@ -82,6 +150,11 @@ export class DevExperience extends EventTarget {
     }
     debounce(ms: number) {
         this.cfg.debounceMs = ms;
+        // Rebuild debouncer with new window
+        this.scheduleFsBatchFlush = debounce(
+            () => this.flushFsBatchAndAct(),
+            this.cfg.debounceMs,
+        );
         return this;
     }
     sqlpageStopGraceMs(ms: number) {
@@ -94,6 +167,13 @@ export class DevExperience extends EventTarget {
     }
     beforeSqlpageRestart(fn: () => Promise<void> | void) {
         this.cfg.beforeSqlpageRestart = fn;
+        return this;
+    }
+    /** Provide a decision hook for file-change batches. */
+    withWatchedFsChangeDetected(
+        fn: (info: FsChangeInfo) => FsChangeAction | Promise<FsChangeAction>,
+    ) {
+        this.cfg.onFsChange = fn;
         return this;
     }
     on<T = unknown>(type: string, handler: (detail: T) => void) {
@@ -139,15 +219,21 @@ export class DevExperience extends EventTarget {
     }
 
     /* ---------------- Construction ---------------- */
-    protected cfg: Required<DevExperienceOptions>;
+    protected cfg: Required<Omit<DevExperienceOptions, "onFsChange">> & {
+        onFsChange?: DevExperienceOptions["onFsChange"];
+    };
     protected sqlpage?: Deno.ChildProcess;
     protected watcher?: Deno.FsWatcher;
     protected watcherActive = false;
     protected reloading = false;
     #te = new TextEncoder();
 
-    // debounced scheduler bound to instance
-    protected scheduleReload: () => void;
+    // FS batch accumulation
+    protected pendingFsEvents: Deno.FsEvent[] = [];
+    protected firstFsEventTs = 0;
+
+    // debounced batch flusher bound to instance
+    protected scheduleFsBatchFlush: () => void;
 
     constructor(opts?: DevExperienceOptions) {
         super();
@@ -168,11 +254,12 @@ export class DevExperience extends EventTarget {
             beforeSqlpageRestart: opts?.beforeSqlpageRestart ??
                 (() => {/* no-op */}),
             defaultLogging: opts?.defaultLogging ?? true,
+            onFsChange: opts?.onFsChange,
         };
 
-        // Debounced reload task
-        this.scheduleReload = debounce(
-            () => this.performReload(),
+        // Debounced batch flusher (decision hook lives inside flush)
+        this.scheduleFsBatchFlush = debounce(
+            () => this.flushFsBatchAndAct(),
             this.cfg.debounceMs,
         );
 
@@ -194,9 +281,15 @@ export class DevExperience extends EventTarget {
                     if (
                         !ev.paths.length ||
                         !/modify|create|remove/.test(ev.kind)
-                    ) continue;
+                    ) {
+                        continue;
+                    }
+                    // accumulate
+                    if (!this.firstFsEventTs) this.firstFsEventTs = Date.now();
+                    this.pendingFsEvents.push(ev);
+
                     this.emit("fs:debounce", { ms: this.cfg.debounceMs });
-                    this.scheduleReload();
+                    this.scheduleFsBatchFlush();
                 }
             } catch (e) {
                 // watcher closed or errored
@@ -217,6 +310,74 @@ export class DevExperience extends EventTarget {
         }
         this.watcherActive = false;
         this.emit("watcher:stopped", {});
+    }
+
+    /* ---------------- FS batch → decision → action ---------------- */
+
+    /** Build FsChangeInfo from the pending batch and clear the buffers. */
+    protected drainFsBatch(): FsChangeInfo {
+        const added = new Set<string>();
+        const modified = new Set<string>();
+        const removed = new Set<string>();
+        for (const ev of this.pendingFsEvents) {
+            for (const p of ev.paths) {
+                if (ev.kind === "create") added.add(p);
+                else if (ev.kind === "modify") modified.add(p);
+                else if (ev.kind === "remove") removed.add(p);
+            }
+        }
+        const info: FsChangeInfo = {
+            added,
+            modified,
+            removed,
+            raw: this.pendingFsEvents.slice(),
+            since: this.firstFsEventTs || Date.now(),
+        };
+        // reset
+        this.pendingFsEvents = [];
+        this.firstFsEventTs = 0;
+        return info;
+    }
+
+    /** Debounced flush: decide and route to reload / restart / ignore. */
+    protected async flushFsBatchAndAct() {
+        const info = this.drainFsBatch();
+
+        // Decide
+        let decision: FsChangeAction;
+        if (this.cfg.onFsChange) {
+            try {
+                decision = await this.cfg.onFsChange(info);
+            } catch (e) {
+                this.emit("watcher:error", {
+                    error: `onFsChange threw: ${String(e)}`,
+                });
+                // fall back to reload-sql on hook error
+                decision = "reload-sql";
+            }
+        } else {
+            const p = this.cfg.policy.onReload;
+            const ok = typeof p === "function" ? !!p() : p !== false;
+            decision = ok ? "reload-sql" : false;
+        }
+
+        this.emit("fs:decision", { decision });
+
+        if (decision === false) {
+            this.emit("reload:skipped", {
+                reason: "onFsChange returned false",
+            });
+            return; // watcher remains running, do nothing
+        }
+
+        if (decision === "restart-sqlpage") {
+            // Restart sqlpage only (stop watcher during restart)
+            await this.restartSqlpageOnlyFlow();
+            return;
+        }
+
+        // "reload-sql" → Use the full reload pipeline (which stops/restarts watcher internally)
+        await this.performReload();
     }
 
     /* ---------------- Reload pipeline ---------------- */
@@ -275,6 +436,36 @@ export class DevExperience extends EventTarget {
         } finally {
             this.reloading = false;
         }
+    }
+
+    /** sqlpage-only restart flow (no SQLite reload). Watcher is paused during restart. */
+    protected async restartSqlpageOnlyFlow() {
+        // Avoid overlapping with performReload, but don't block future ones
+        if (this.reloading) return;
+        // Stop watcher to ensure no events during restart
+        if (this.watcherActive) this.stopWatcher();
+
+        this.emit("reload:start", {
+            phase: "watch" as ReloadPhase,
+            db: this.cfg.dbPath,
+        });
+        // Stop sqlpage
+        await this.stopSqlpage(this.cfg.sqlpageStopGraceMs);
+
+        // Apply gates (delay/hook)
+        await this.applyRestartGates();
+
+        // Start sqlpage again
+        this.sqlpage = this.spawnSqlpage();
+
+        // Mark as "ok" even though we didn't touch SQLite
+        this.emit("reload:ok", {
+            phase: "watch" as ReloadPhase,
+            db: this.cfg.dbPath,
+        });
+
+        // Resume watching
+        this.startWatcher();
     }
 
     /* ---------------- Processes & helpers ---------------- */
@@ -503,6 +694,11 @@ export class DevExperience extends EventTarget {
         this.on<{ ms: number }>(
             "fs:debounce",
             ({ ms }) => console.log(color.gray(`debounce ${ms}ms`)),
+        );
+        this.on<{ decision: FsChangeAction }>(
+            "fs:decision",
+            ({ decision }) =>
+                console.log(color.gray(`fs decision → ${String(decision)}`)),
         );
         this.on<{ phase: ReloadPhase; db: string }>(
             "reload:start",
