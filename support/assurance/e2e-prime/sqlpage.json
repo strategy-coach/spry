@@ -1,5 +1,0 @@
-{
-    "allow_exec": true,
-    "port": 9219,
-    "database_url": "sqlite://./sqlpage.db?mode=rwc"
-}
