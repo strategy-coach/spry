@@ -205,12 +205,26 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
     };
 
     const absPathToSpryLocal = join(moduleHome, SRC, "spry");
+
+    // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
+    // so we watch the physical Spry because the symlink won't be watched
+    // even though it's under the "src".
+    const devWatchRoots = [
+        relative(
+            Deno.cwd(),
+            projectSrcFsPaths.root,
+        ),
+        relative(
+            Deno.cwd(),
+            import.meta.dirname!,
+        ),
+    ];
     return {
         projectFsPaths,
         projectSrcFsPaths,
         webPaths,
         spryStd: {
-            home: relative(
+            homeFromSymlink: relative(
                 dirname(absPathToSpryLocal),
                 import.meta.dirname!,
             ),
@@ -220,6 +234,7 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
         sqlPage: {
             absPathToConfDir: join(moduleHome, "sqlpage"),
         },
+        devWatchRoots,
     };
 }
 
@@ -1249,8 +1264,11 @@ export class CLI {
         }
 
         if (!(await exists(spryStd.relPathToHome))) {
-            await Deno.symlink(spryStd.home, spryStd.relPathToHome);
-            linked.push({ from: spryStd.relPathToHome, to: spryStd.home });
+            await Deno.symlink(spryStd.homeFromSymlink, spryStd.relPathToHome);
+            linked.push({
+                from: spryStd.relPathToHome,
+                to: spryStd.homeFromSymlink,
+            });
         }
 
         return { spryStd, sqlPage, created, removed, linked };
@@ -1342,7 +1360,7 @@ export class CLI {
                         console.warn(`Creating: ${opts.dbName}`)
                     ).then(() => console.warn(`Removed ${opts.dbName}`));
                 }
-                const workflow = await this.plan.workflow();
+                const workflow = await this.plan.workflow(opts);
                 await workflow.orchestrate({ clean: true });
                 return await Array.fromAsync(
                     new SQL(this.plan).emit(),
@@ -1351,13 +1369,48 @@ export class CLI {
                 onInit: true,
                 onReload: () => true,
             })
-            .watch(this.plan.pp.projectSrcFsPaths.root)
+            .watch(...this.plan.pp.devWatchRoots)
             .restartDelayMs(250) // fixed delay after SQLite closes
             .beforeSqlpageRestart(async () => {
                 // do any OS/filesystem synchronization checks you need
                 // e.g., fs.stat, retry loops, etc.
             })
             .start();
+    }
+
+    async SQL(
+        opts: {
+            target: "head" | "tail" | "sqlpage-files" | "deploy";
+            dbName: string;
+        },
+    ) {
+        switch (opts.target) {
+            case "head":
+                console.log(
+                    (await Array.fromAsync(new SQL(this.plan).headSQL())).join(
+                        "\n",
+                    ),
+                );
+                break;
+            case "tail":
+                console.log(
+                    (await Array.fromAsync(new SQL(this.plan).tailSQL())).join(
+                        "\n",
+                    ),
+                );
+                break;
+            case "sqlpage-files":
+                console.log(
+                    (await Array.fromAsync(new SQL(this.plan).seedInserts()))
+                        .join("\n"),
+                );
+                break;
+            case "deploy":
+                await new SQL(this.plan).toStdOut();
+                break;
+            default:
+                console.warn(`Unknown target '${opts.target}'`);
+        }
     }
 
     cli(init?: { name?: string }) {
@@ -1367,13 +1420,13 @@ export class CLI {
             .description(
                 "Orchestrate the content which will be supplied to SQLPage target database.",
             )
+            .globalOption("--db-name <file>", "name of SQLite database", {
+                default: "sqlpage.db",
+            })
             .command("init")
             .description("Setup local dev environment")
             .option("--clean", "Remove existing and recreate", {
                 default: false,
-            })
-            .option("--db-name <file>", "name of SQLite database", {
-                default: "sqlpage.db",
             })
             .action(async (opts) => {
                 const { created, removed, linked } = await this.init(opts);
@@ -1390,9 +1443,6 @@ export class CLI {
             })
             .command("build")
             .description("Perform orchestration (annotations, routes, capexes)")
-            .option("--db-name <file>", "name of SQLite database", {
-                default: "sqlpage.db",
-            })
             .action(async (opts) => {
                 await (await this.plan.workflow(opts)).orchestrate({
                     clean: true,
@@ -1450,35 +1500,36 @@ export class CLI {
             .command(
                 "sql",
                 new Command()
-                    .description("TODO: Process files and emit SQL."),
-                // .command(
-                //     "head",
-                //     new Command()
-                //         .description(
-                //             "Emit initialization (header) SQL (DDL, DML).",
-                //         )
-                //         .action(async () => await head()),
-                // )
-                // .command(
-                //     "tail",
-                //     new Command()
-                //         .description(
-                //             "Emit finalization (tail) SQL (DDL, DML).",
-                //         )
-                //         .action(async () => await tail()),
-                // )
-                // .command(
-                //     "sqlpage-files",
-                //     new Command()
-                //         .description("Emit sqlplage_files content SQL.")
-                //         .action(emitSqlPageFiles),
-                // ),
+                    .description("TODO: Process files and emit SQL.")
+                    .globalOption(
+                        "--db-name <file>",
+                        "name of SQLite database",
+                        {
+                            default: "sqlpage.db",
+                        },
+                    )
+                    .command("head")
+                    .action(async (opts) =>
+                        await this.SQL({ target: "head", ...opts })
+                    )
+                    .command("tail")
+                    .action(async (opts) =>
+                        await this.SQL({ target: "tail", ...opts })
+                    )
+                    .command("sqlpage-files")
+                    .action(async (opts) =>
+                        await this.SQL({ target: "sqlpage-files", ...opts })
+                    )
+                    .command("deploy")
+                    .action(async (opts) =>
+                        await this.SQL({ target: "deploy", ...opts })
+                    ),
+            )
+            .action(async (opts) =>
+                await this.SQL({ target: "deploy", ...opts })
             )
             .command("dev")
             .description(`Rebuild src on change and restart SQLPage.`)
-            .option("--db-name <file>", "name of SQLite database", {
-                default: "sqlpage.db",
-            })
             .option("--clean-db", "Delete the database each time (dangerous)", {
                 default: false,
             })

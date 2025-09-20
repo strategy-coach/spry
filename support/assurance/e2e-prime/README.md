@@ -3,11 +3,11 @@
 deno install
 
 # setup symlink to Spry stdlib
-./spryctl.ts init          # only required once
+./spryctl.ts init               # only required once, creates `sqlpage/sqlpage.json` and `src/spry` symlink
 
-# orchestrate.ts lets you perform different functions
+# spryctl.ts lets you perform different functions
 ./spryctl.ts help
-./spryctl.ts watch              # TODO: not well tested yet
+./spryctl.ts dev                # launch SQLpage binary and reload SQLite content on file changes
 
 # informational
 ./spryctl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
@@ -22,9 +22,10 @@ deno install
 ./spryctl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # emit SQL
-./spryctl.ts sql head           # TODO: generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./spryctl.ts sql tail           # TODO: generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./spryctl.ts sql sqlpage-files  # TODO: generate the INSERT SQL DML for sqlpage_files contents
+./spryctl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./spryctl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./spryctl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
+./spryctl.ts sql deploy         # generate the full deployment package (all the above)
 
 # deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
