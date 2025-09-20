@@ -2,7 +2,6 @@
 
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
-import * as colors from "jsr:@std/fmt@1/colors";
 import { dim } from "jsr:@std/fmt@1/colors";
 import { walk, WalkEntry, WalkOptions } from "jsr:@std/fs@1/walk";
 import { ensureDir } from "jsr:@std/fs@^1/ensure-dir";
@@ -42,6 +41,7 @@ import {
 } from "../universal/path-tree.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
 import { inlinedSQL } from "../universal/sql-text.ts";
+import * as sqldx from "./lib/sqlitedx.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -204,29 +204,22 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
     };
 
     const absPathToSpryLocal = join(moduleHome, SRC, "spry");
-    const spryHome = relative(
-        dirname(absPathToSpryLocal),
-        import.meta.dirname!,
-    );
-    const relPathToSpryHome = relative(Deno.cwd(), absPathToSpryLocal);
-
-    const initLocalDev = async () => {
-        let removedExisting = false;
-        try {
-            await Deno.remove(relPathToSpryHome);
-            removedExisting = true;
-        } catch {
-            /** ignore */
-        }
-        await Deno.symlink(spryHome, relPathToSpryHome);
-        return {
-            spryPaths: { spryHome, relPathToSpryHome, absPathToSpryLocal },
-            removedExisting,
-            linked: { from: relPathToSpryHome, to: spryHome },
-        };
+    return {
+        projectFsPaths,
+        projectSrcFsPaths,
+        webPaths,
+        spryStd: {
+            home: relative(
+                dirname(absPathToSpryLocal),
+                import.meta.dirname!,
+            ),
+            absPathToLocal: absPathToSpryLocal,
+            relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),
+        },
+        sqlPage: {
+            absPathToConfDir: join(moduleHome, "sqlpage"),
+        },
     };
-
-    return { projectFsPaths, projectSrcFsPaths, webPaths, initLocalDev };
 }
 
 export type WalkSpec = {
@@ -1031,19 +1024,27 @@ export class SQL {
         yield `-- no tail SQL defined in ${this.provenanceHint}`;
     }
 
-    async toStdOut() {
+    async *emit() {
         const { sqlpageFiles } = sqliteModels();
 
+        yield `-- head SQL --`;
         for await (const sql of this.headSQL()) {
-            console.log(sql);
+            yield sql;
         }
 
-        console.log(`-- ${getTableName(sqlpageFiles)} rows --`);
+        yield `-- ${getTableName(sqlpageFiles)} rows --`;
         for await (const insert of this.seedInserts()) {
-            console.log(insert);
+            yield insert;
         }
 
+        yield `-- tail SQL --`;
         for await (const sql of this.tailSQL()) {
+            yield sql;
+        }
+    }
+
+    async toStdOut() {
+        for await (const sql of this.emit()) {
             console.log(sql);
         }
     }
@@ -1121,6 +1122,57 @@ export class CLI {
     constructor(readonly plan: Plan) {
     }
 
+    async init(init: { dbName: string; clean: boolean }) {
+        const { spryStd, sqlPage } = this.plan.pp;
+
+        const exists = async (path: string) =>
+            await Deno.stat(path).catch(() => false);
+        const relativeToCWD = (path: string) => relative(Deno.cwd(), path);
+
+        const defaultSqlpageConf = {
+            allow_exec: true,
+            port: 9219,
+            database_url: `sqlite://${init?.dbName}?mode=rwc`,
+            web_root: "src",
+        };
+
+        const removed: string[] = [];
+        if (init?.clean) {
+            if (await exists(spryStd.relPathToHome)) {
+                await Deno.remove(spryStd.relPathToHome);
+                removed.push(spryStd.relPathToHome);
+            }
+
+            if (await exists(sqlPage.absPathToConfDir)) {
+                await Deno.remove(sqlPage.absPathToConfDir, {
+                    recursive: true,
+                });
+                removed.push(relativeToCWD(sqlPage.absPathToConfDir));
+            }
+        }
+
+        const created: string[] = [];
+        const linked: { from: string; to: string }[] = [];
+
+        if (!(await exists(sqlPage.absPathToConfDir))) {
+            await Deno.mkdir(sqlPage.absPathToConfDir, { recursive: true });
+            created.push(relativeToCWD(sqlPage.absPathToConfDir));
+            const sqpConf = join(sqlPage.absPathToConfDir, "sqlpage.json");
+            await Deno.writeTextFile(
+                sqpConf,
+                JSON.stringify(defaultSqlpageConf, null, 2),
+            );
+            created.push(relativeToCWD(sqpConf));
+        }
+
+        if (!(await exists(spryStd.relPathToHome))) {
+            await Deno.symlink(spryStd.home, spryStd.relPathToHome);
+            linked.push({ from: spryStd.relPathToHome, to: spryStd.home });
+        }
+
+        return { spryStd, sqlPage, created, removed, linked };
+    }
+
     async ls() {
         const workflow = await this.plan.workflow();
         const entries = await workflow.entryAnnotations();
@@ -1182,9 +1234,34 @@ export class CLI {
         console.log(table.toString());
     }
 
-    cli(init?: { name?: string }) {
-        const roots = [this.plan.pp.projectFsPaths.root];
+    async dev(opts: { dbName: string; cleanDb: boolean }) {
+        await new sqldx.DevExperience()
+            .withDb(opts.dbName)
+            .withSqlText(async () => {
+                if (opts.cleanDb) {
+                    await Deno.remove(opts.dbName).catch(() =>
+                        console.warn(`Creating: ${opts.dbName}`)
+                    ).then(() => console.warn(`Removed ${opts.dbName}`));
+                }
+                const workflow = await this.plan.workflow();
+                await workflow.orchestrate({ clean: true });
+                return await Array.fromAsync(
+                    new SQL(this.plan).emit(),
+                );
+            }, {
+                onInit: true,
+                onReload: () => true,
+            })
+            .watch(this.plan.pp.projectSrcFsPaths.root)
+            .restartDelayMs(250) // fixed delay after SQLite closes
+            .beforeSqlpageRestart(async () => {
+                // do any OS/filesystem synchronization checks you need
+                // e.g., fs.stat, retry loops, etc.
+            })
+            .start();
+    }
 
+    cli(init?: { name?: string }) {
         return new Command()
             .name(init?.name ?? "spryctl.ts")
             .version("0.1.0")
@@ -1193,12 +1270,19 @@ export class CLI {
             )
             .command("init")
             .description("Setup local dev environment")
-            .action(async () => {
-                const ldi = await this.plan.pp.initLocalDev();
-                if (ldi.removedExisting) {
-                    console.log("Removed", ldi.linked.from);
-                }
-                console.log("Linked", ldi.linked.from, "to", ldi.linked.to);
+            .option("--clean", "Remove existing and recreate", {
+                default: false,
+            })
+            .option("--db-name <file>", "name of SQLite database", {
+                default: "sqlpage.db",
+            })
+            .action(async (opts) => {
+                const { created, removed, linked } = await this.init(opts);
+                removed.forEach((r) => console.warn(`❌ Removed ${r}`));
+                created.forEach((c) => console.info(`📄 Created ${c}`));
+                linked.forEach((l) =>
+                    console.info("🔗 Linked", l.from, "to", l.to)
+                );
             })
             .command("clean")
             .description("Clean auto-generated directories or files")
@@ -1269,33 +1353,15 @@ export class CLI {
                 //         .description("Emit sqlplage_files content SQL.")
                 //         .action(emitSqlPageFiles),
                 // ),
-            ).command("watch")
-            .description(
-                // deno-fmt-ignore
-                `Rebuild ${roots.join(", ")} on change (edge-triggered; basic).`,
             )
-            .action(async () => {
-                const debounceMs = 150;
-                let timer: number | null = null;
-
-                await (await this.plan.workflow()).orchestrate({ clean: true });
-
-                // Basic FS watch (use your own watcher if you need cross-platform globs)
-                const watcher = Deno.watchFs(roots);
-                for await (const ev of watcher) {
-                    if (!["modify", "create", "remove"].includes(ev.kind)) {
-                        continue;
-                    }
-                    if (timer) clearTimeout(timer);
-                    timer = setTimeout(async () => {
-                        console.log(
-                            colors.cyan("⟳ change detected, rebuilding…"),
-                        );
-                        await (await this.plan.workflow()).orchestrate({
-                            clean: true,
-                        });
-                    }, debounceMs) as unknown as number;
-                }
-            });
+            .command("dev")
+            .description(`Rebuild src on change and restart SQLPage.`)
+            .option("--db-name <file>", "name of SQLite database", {
+                default: "sqlpage.db",
+            })
+            .option("--clean-db", "Delete the database each time (dangerous)", {
+                default: false,
+            })
+            .action(async (opts) => await this.dev(opts));
     }
 }
