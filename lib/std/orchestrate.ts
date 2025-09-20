@@ -13,6 +13,7 @@ import {
     join,
     normalize,
     relative,
+    resolve,
 } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import Table from "npm:cli-table3@0.6.5";
@@ -361,6 +362,16 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         ...spryEntryAnnCommon,
     }),
     z.object({
+        nature: z.literal("cap-exec").describe(
+            "A capturable executable",
+        ),
+        dependsOn: z.enum(["none", "db-after-build"])
+            .describe(
+                "Expresses dependencies: 'none' means it's idempotent, 'db-before-built' and 'db-after-build' means it needs the database before/after the build",
+            ),
+        ...spryEntryAnnCommon,
+    }),
+    z.object({
         nature: z.literal("page").describe(
             "A standard SQLPage server-side generated (SSG) page, this is the default.",
         ),
@@ -395,6 +406,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
    Possible values are:
    - 'action' for SQLPage code that executes and redirects back to a page
    - 'api' for SQLPage API endpoints
+   - 'cap-exec' for Capturable Executables
    - 'resource' for JSON or other types of data
    - 'page' for standard SQLPage SSG pages (default)
    - 'partial' for SQLPage SSG partials, usually imported into other pages
@@ -450,6 +462,12 @@ export const spryRouteAnnSchema = z.object({
 );
 
 export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
+
+export type SpryCapExecEntryAnnotation = Extract<
+    SpryEntryAnnotation,
+    { nature: "cap-exec" }
+>;
+
 export type SpryRouteAnnotation = z.infer<typeof spryRouteAnnSchema>;
 
 export class Annotations {
@@ -636,12 +654,19 @@ export class Routes {
     }
 }
 
+export type SafeCliArgs = {
+    dbName?: string;
+};
+
 export class CapExecs {
     readonly candidates: EncountersSupplier;
+    readonly contextForEnv: Record<string, unknown>;
+
     constructor(
         readonly projectModule: FsPathSupplier,
         readonly webPaths: PathSupplier,
         readonly init?: {
+            readonly cliOpts?: SafeCliArgs;
             readonly mergeCtx?: Record<string, unknown>; // overrides merged into schema defaults
         },
     ) {
@@ -656,12 +681,27 @@ export class CapExecs {
                 canonicalize: true, // important for "src/spry"
             })
             .build();
+
+        this.contextForEnv = {
+            cliOpts: init?.cliOpts ?? JSON.stringify(init?.cliOpts),
+            ...init?.mergeCtx,
+        };
     }
 
     env() {
-        return {
-            CAPEXEC_CONTEXT_JSON: JSON.stringify({ ...this.init?.mergeCtx }),
+        let ceEnv: Record<string, string> = {
+            CAPEXEC_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
         };
+        if (this.init?.cliOpts?.dbName) {
+            const dbName = this.init.cliOpts.dbName;
+            ceEnv = {
+                ...ceEnv,
+                CAPEXEC_TARGET_SQLITEDB: isAbsolute(dbName)
+                    ? dbName
+                    : resolve(Deno.cwd(), dbName),
+            };
+        }
+        return ceEnv;
     }
 
     async execute() {
@@ -688,6 +728,11 @@ export class Linter {
                     code: ["entry", "route"] as const,
                     data: { annotation: {} },
                     defaultSeverity: "error",
+                }),
+                "invalid-cap-exec": defineRule({
+                    code: ["not-executable"] as const,
+                    data: { annotation: {} },
+                    defaultSeverity: "warn",
                 }),
             } as const,
         );
@@ -720,18 +765,21 @@ export class Workflow {
     readonly mdStore = new MarkdownStore<"orchestrated.auto.md">();
     readonly orchMD = this.mdStore.markdown("orchestrated.auto.md");
 
-    protected constructor(readonly plan: Plan) {
+    protected constructor(
+        readonly plan: Plan,
+        readonly cliOpts?: SafeCliArgs,
+    ) {
         this.pp = plan.pp;
         this.linter = plan.linter();
         this.lintr = this.linter.lintResults();
         this.stores = plan.stores();
         this.spf = plan.sqlpageFiles();
         this.annotations = plan.annotations();
-        this.capExecs = plan.capExecs();
+        this.capExecs = plan.capExecs(cliOpts);
     }
 
-    static async build(plan: Plan) {
-        return await new Workflow(plan).init();
+    static async build(plan: Plan, cliOpts?: SafeCliArgs) {
+        return await new Workflow(plan, cliOpts).init();
     }
 
     get annsCatalog() {
@@ -763,6 +811,28 @@ export class Workflow {
     }
 
     // deno-lint-ignore require-await
+    async lintEntryAnn(
+        ea: SpryEntryAnnotation,
+        we: WalkEncounter<WalkSpec>,
+    ) {
+        switch (ea.nature) {
+            case "cap-exec":
+                if (!CapExec.isExecutable(we.entry.path)) {
+                    this.lintr.add({
+                        rule: "invalid-cap-exec",
+                        code: "not-executable",
+                        content: we.origin.paths.relative(we.entry),
+                        message:
+                            "Capturable executable does not appear to be executable",
+                        data: { annotation: ea },
+                        severity: "warn",
+                    });
+                }
+                break;
+        }
+    }
+
+    // deno-lint-ignore require-await
     async entryAnnotations(lint = false) {
         type base = {
             we: Workflow["annsCatalog"][number]["walkEntry"];
@@ -779,6 +849,7 @@ export class Workflow {
                     ann: a.entryAnn,
                     entryAnn: a.entryAnn.parsed,
                 });
+                if (lint) this.lintEntryAnn(a.entryAnn.parsed, a.walkEntry);
             } else if (a.entryAnn.found > 0) {
                 if (lint) {
                     this.lintr.add({
@@ -797,6 +868,16 @@ export class Workflow {
             }
         }
         return { valid: entryAnns, issues };
+    }
+
+    async capExecEntryAnnotations(lint = false) {
+        const entryAnns = await this.entryAnnotations(lint);
+        return entryAnns.valid.filter((ea) => ea.entryAnn.nature === "cap-exec")
+            .map((ea) => ({
+                capExec: ea.we,
+                ann: ea.entryAnn as SpryCapExecEntryAnnotation,
+                isExecutable: CapExec.isExecutable(ea.we.entry.path),
+            }));
     }
 
     protected async dropInEntryAnns(
@@ -1086,8 +1167,10 @@ export class Plan {
         return new Annotations(this.pp.projectFsPaths, this.pp.webPaths);
     }
 
-    capExecs() {
-        return new CapExecs(this.pp.projectFsPaths, this.pp.webPaths);
+    capExecs(cliOpts?: SafeCliArgs) {
+        return new CapExecs(this.pp.projectFsPaths, this.pp.webPaths, {
+            cliOpts,
+        });
     }
 
     stores() {
@@ -1113,8 +1196,8 @@ export class Plan {
         await rmDirRecursive(stores.spryDistStores.polyglot.destRoot);
     }
 
-    async workflow() {
-        return await Workflow.build(this);
+    async workflow(cliOpts?: SafeCliArgs) {
+        return await Workflow.build(this, cliOpts);
     }
 }
 
@@ -1198,7 +1281,23 @@ export class CLI {
         console.log(table.toString());
     }
 
-    async routes(opts?: { json?: boolean }) {
+    async lsCapExecs(_opts: { json?: true }) {
+        const workflow = await this.plan.workflow();
+        const ceEntries = await workflow.capExecEntryAnnotations();
+        const table = new Table({
+            head: ["Path", "Depends On", "Executable?"],
+        });
+        for (const ce of ceEntries) {
+            table.push([
+                this.plan.pp.projectFsPaths.relative(ce.capExec.entry),
+                ce.ann.dependsOn,
+                ce.isExecutable,
+            ]);
+        }
+        console.log(table.toString());
+    }
+
+    async lsRoutes(opts?: { json?: boolean }) {
         const workflow = await this.plan.workflow();
         const { serializers } = await workflow.routeAnnotations();
 
@@ -1214,7 +1313,7 @@ export class CLI {
         }
     }
 
-    async crumbs(opts: { json?: boolean }) {
+    async lsBreadcrumbs(opts: { json?: boolean }) {
         const workflow = await this.plan.workflow();
         const { breadcrumbs } = await workflow.routeAnnotations();
 
@@ -1291,8 +1390,13 @@ export class CLI {
             })
             .command("build")
             .description("Perform orchestration (annotations, routes, capexes)")
-            .action(async () => {
-                await (await this.plan.workflow()).orchestrate({ clean: true });
+            .option("--db-name <file>", "name of SQLite database", {
+                default: "sqlpage.db",
+            })
+            .action(async (opts) => {
+                await (await this.plan.workflow(opts)).orchestrate({
+                    clean: true,
+                });
             })
             .command("help", new HelpCommand().global())
             .command(
@@ -1303,6 +1407,20 @@ export class CLI {
                     )
                     .action(async () => await this.ls())
                     .command(
+                        "cap-execs",
+                        new Command()
+                            .description(
+                                "List capturable executable candidates",
+                            )
+                            .option(
+                                "-j, --json",
+                                "Emit as JSON instead of tree",
+                            )
+                            .action(async (opts) =>
+                                await this.lsCapExecs(opts)
+                            ),
+                    )
+                    .command(
                         "routes",
                         new Command()
                             .description(
@@ -1312,7 +1430,7 @@ export class CLI {
                                 "-j, --json",
                                 "Emit as JSON instead of tree",
                             )
-                            .action(async (opts) => await this.routes(opts)),
+                            .action(async (opts) => await this.lsRoutes(opts)),
                     )
                     .command(
                         "breadcrumbs",
@@ -1324,7 +1442,9 @@ export class CLI {
                                 "-j, --json",
                                 "dump the entire breadcrumbs object as JSON",
                             )
-                            .action(async (opts) => await this.crumbs(opts)),
+                            .action(async (opts) =>
+                                await this.lsBreadcrumbs(opts)
+                            ),
                     ),
             )
             .command(
