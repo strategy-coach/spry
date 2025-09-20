@@ -12,6 +12,7 @@ deno install
 # informational
 ./spryctl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
 ./spryctl.ts ls ann             # TODO: list all candidate sqlpage_files that have been annotated with `@spry.*`
+./spryctl.ts ls cap-execs       # list all capturable executables
 ./spryctl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
 ./spryctl.ts ls head            # TODO: list all SQL DDL for "init" operations that go before sqlpage_files inserts
 ./spryctl.ts ls tail            # TODO: list all SQL DDL for "finalization" operations that go after sqlpage_files inserts
