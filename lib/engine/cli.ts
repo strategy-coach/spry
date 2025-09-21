@@ -191,13 +191,23 @@ export class CLI {
         const workflow = await this.plan.workflow();
         const capExecs = await workflow.capExecs();
         const table = new Table({
-            head: ["Path", "Phase", "Depends On"],
+            head: [
+                "Path",
+                "Materialize",
+                "Before AC",
+                "After AC",
+                "Depends On",
+                "Cleanable",
+            ],
         });
         for (const ce of capExecs.ceSelected) {
             table.push([
                 this.plan.pp.projectFsPaths.relative(ce.we.entry),
-                ce.ann.materializePhase,
+                ce.pfn.materialize.auto,
+                ce.ann.runBeforeAnnCatalog,
+                ce.ann.runAfterAnnCatalog,
                 ce.ann.dependsOn,
+                ce.ann.isCleanable,
             ]);
         }
         console.log(table.toString());

@@ -88,6 +88,12 @@ export class SqlPageFiles {
 }
 
 export class Workflow {
+    #workflowStep:
+        | "INIT"
+        | "BEFORE_ANN_CATALOG"
+        | "AFTER_ANN_CATALOG"
+        | "DESTROY_CLEAN";
+
     readonly linter: Linter;
     readonly lintr: ReturnType<Linter["lintResults"]>;
     readonly stores: ReturnType<Plan["stores"]>;
@@ -106,6 +112,7 @@ export class Workflow {
         readonly plan: Plan,
         readonly cliOpts?: SafeCliArgs,
     ) {
+        this.#workflowStep = "INIT";
         this.pp = plan.pp;
         this.linter = plan.linter();
         this.lintr = this.linter.lintResults();
@@ -116,6 +123,10 @@ export class Workflow {
 
     static async build(plan: Plan, cliOpts?: SafeCliArgs) {
         return await new Workflow(plan, cliOpts).init();
+    }
+
+    get workflowStep() {
+        return this.#workflowStep;
     }
 
     get annsCatalog() {
@@ -160,7 +171,7 @@ export class Workflow {
                         content: we.origin.paths.relative(we.entry),
                         message:
                             "Capturable executable does not appear to be executable",
-                        data: { annotation: ea },
+                        data: { annotation: ea, error: null },
                         severity: "warn",
                     });
                 }
@@ -385,9 +396,9 @@ export class Workflow {
 
         const capExecs = await this.capExecs();
 
-        await capExecs.materialize("before-sqlpage-files");
+        await capExecs.materialize("BEFORE_ANN_CATALOG");
         await this.dropInAnnotations();
-        await capExecs.materialize("after-sqlpage-files");
+        await capExecs.materialize("AFTER_ANN_CATALOG");
         await this.finalize();
     }
 }
@@ -550,6 +561,29 @@ export class Plan {
 
         // we "own" the "spry.d/auto" directory so remove it
         await rmDirRecursive(stores.spryDistAutoStores.polyglot.destRoot);
+
+        // handle cleanable Cap Execs
+        const workflow = await this.workflow();
+        const capExecs = await workflow.capExecs();
+        for (
+            const ce of capExecs.ceSelected.filter((ce) =>
+                ce.pfn.materialize.auto && ce.ann.isCleanable &&
+                ce.pfn.materialize.path
+            )
+        ) {
+            try {
+                // if ce.pfn.materialize.auto is true then .path! must be set
+                await Deno.remove(ce.pfn.materialize.path!);
+            } catch (error) {
+                if (error instanceof Deno.errors.NotFound) continue;
+                console.info(
+                    "Error cleaning isCleanable auto-materialized CapExec",
+                    ce.we.entry.path,
+                );
+                console.info(ce.pfn.materialize.path!);
+                console.error(error);
+            }
+        }
 
         // if `auto` was the only directory in `spry.d`, remove that too
         rmDirIfEmpty(stores.spryDropInStores.polyglot.destRoot);

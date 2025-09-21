@@ -92,8 +92,6 @@ WIP
 
 - [ ] Add an optional SQLite state database for CapExecs to use all the
       annotations and other stateful information during a build.
-- [ ] Add a `CAPEXEC_PHASE` = `clean` to allow each CapExec to clean its own
-      build artifacts when `spryctl.ts clean` command is run.
 - [ ] Create `spry.d/mod.auto.sql` which is a partial that is included in
       SQLPage for constants; that file will be in `sqlpage_files` so create a
       wrapper view for its contents / availability.

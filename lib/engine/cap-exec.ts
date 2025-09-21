@@ -14,7 +14,7 @@ import { detectLanguageByPath } from "../universal/content/code.ts";
 import { Annotations } from "./annotations.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
-import { Plan } from "./orchestrate.ts";
+import { Plan, Workflow } from "./orchestrate.ts";
 import {
     EncountersSupplier,
     WalkEncounter,
@@ -37,7 +37,7 @@ export class CapExecs {
         pfn: ReturnType<CapExecs["parseFileName"]>;
     }[] = [];
     readonly ceMaterialized: {
-        phase: SpryCapExecEntryAnnotation["materializePhase"];
+        workflowStep: Workflow["workflowStep"];
         we: WalkEncounter<WalkSpec>;
         ann: SpryCapExecEntryAnnotation;
     }[] = [];
@@ -67,10 +67,7 @@ export class CapExecs {
         };
     }
 
-    env(
-        phase: SpryCapExecEntryAnnotation["materializePhase"],
-        ce: CapExecs["ceSelected"][number],
-    ) {
+    env(step: Workflow["workflowStep"], ce: CapExecs["ceSelected"][number]) {
         let ceEnv: Record<string, string> = {
             CAPEXEC_PROJECT_HOME: this.plan.pp.projectFsPaths.root,
             CAPEXEC_PROJECT_ID: this.plan.pp.projectFsPaths.identity ?? "",
@@ -78,14 +75,21 @@ export class CapExecs {
             CAPEXEC_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.home,
             CAPEXEC_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.auto,
             CAPEXEC_SOURCE_JSON: JSON.stringify(ce),
-            CAPEXEC_AUTO_MATERIALIZE: ce.pfn.autoMaterialize ? "TRUE" : "FALSE",
-            CAPEXEC_MATERIALIZE_BASE_NAME:
-                typeof ce.pfn.autoMaterialize === "string"
-                    ? ce.pfn.autoMaterialize
-                    : "",
-            CAPEXEC_PHASE: phase ?? "unknown",
+            CAPEXEC_AUTO_MATERIALIZE: ce.pfn.materialize.auto
+                ? "TRUE"
+                : "FALSE",
+            CAPEXEC_MATERIALIZE_BASENAME: ce.pfn.materialize.auto
+                ? ce.pfn.materialize.basename ?? ""
+                : "",
+            CAPEXEC_MATERIALIZE_PATH: ce.pfn.materialize.auto
+                ? ce.pfn.materialize.path ?? ""
+                : "",
+            CAPEXEC_WORKFLOW_STEP: step ?? "unknown",
             CAPEXEC_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
         };
+        if (step === "DESTROY_CLEAN") {
+            ceEnv.CAPEXEC_WORKFLOW_STEP = "TRUE";
+        }
         if (this.init?.cliOpts?.dbName) {
             const dbName = this.init.cliOpts.dbName;
             ceEnv = {
@@ -98,7 +102,7 @@ export class CapExecs {
         return ceEnv;
     }
 
-    static async captureExecutable(
+    static async runCapExec(
         path: string,
         init?:
             & {
@@ -126,6 +130,9 @@ export class CapExecs {
                         stderr: string,
                     ) => unknown | Promise<unknown>;
                 }
+                | {
+                    ignoreOutput: true;
+                }
             ),
     ) {
         try {
@@ -149,7 +156,7 @@ export class CapExecs {
 
             if (init && "materialize" in init) {
                 await init.materialize(out.stdout, out.stderr);
-            } else {
+            } else if (init && "materializeText" in init) {
                 const dec = new TextDecoder();
                 await init?.materializeText(
                     dec.decode(out.stdout),
@@ -194,18 +201,50 @@ export class CapExecs {
         }
     }
 
+    async cleanMaterialized(ce: CapExecs["ceSelected"][number]) {
+        if (ce.ann.isCleanable && ce.pfn.materialize.auto) {
+            try {
+                // if ce.pfn.materialize.auto is true then .path! must be set
+                await Deno.remove(ce.pfn.materialize.path!);
+            } catch (error) {
+                console.info(
+                    "Error cleaning isCleanable auto-materialized CapExec",
+                    ce.we.entry.path,
+                );
+                console.info(ce.pfn.materialize.path!);
+                console.error(error);
+            }
+        }
+
+        if (ce.ann.isCleanable && !ce.pfn.materialize.auto) {
+            const { we } = ce;
+            await CapExecs.runCapExec(we.entry.path, {
+                env: this.env("DESTROY_CLEAN", ce),
+                cwd: Deno.cwd(),
+                ignoreOutput: true,
+            });
+        }
+    }
+
     parseFileName(supplied: string) {
         const fileName = basename(supplied);
         let extn = extname(fileName);
 
         const parts = fileName.split(".");
-        if (parts.length < 2) return { autoMaterialize: false, fileName, extn };
+        if (parts.length < 2) {
+            return { materialize: { auto: false }, fileName, extn };
+        }
 
         extn = parts.at(-1)!; // final extension
         const nature = parts.length > 2 ? parts.at(-2)! : ""; // second-to-last extension
         const base = parts.slice(0, -2).join(".") || parts[0]; // everything before .nature.ext
+        const autoMaterialize = `${base}.auto.${nature}`;
         return {
-            autoMaterialize: `${base}.auto.${nature}`,
+            materialize: {
+                auto: true,
+                basename: `${base}.auto.${nature}`,
+                path: resolve(dirname(supplied), autoMaterialize),
+            },
             fileName,
             base,
             nature,
@@ -253,7 +292,7 @@ export class CapExecs {
         }
     }
 
-    async materialize(phase: SpryCapExecEntryAnnotation["materializePhase"]) {
+    async materialize(step: Workflow["workflowStep"]) {
         const execute = async (
             ce: {
                 we: WalkEncounter<WalkSpec>;
@@ -262,19 +301,35 @@ export class CapExecs {
             },
         ) => {
             const { we, ann, pfn } = ce;
-            await CapExecs.captureExecutable(we.entry.path, {
-                env: this.env(phase, ce),
+            await CapExecs.runCapExec(we.entry.path, {
+                env: this.env(step, ce),
                 cwd: Deno.cwd(),
                 materializeText: async (stdout, _stderr) => {
-                    if (typeof pfn.autoMaterialize === "string") {
-                        await Deno.writeTextFile(
-                            resolve(
-                                dirname(we.entry.path),
-                                pfn.autoMaterialize,
-                            ),
-                            stdout,
-                        );
-                        this.ceMaterialized.push({ phase, we, ann });
+                    if (pfn.materialize.auto) {
+                        try {
+                            // if auto materializing, then .path must be defined
+                            await Deno.writeTextFile(
+                                pfn.materialize.path!,
+                                stdout,
+                            );
+                            this.ceMaterialized.push({
+                                workflowStep: step,
+                                we,
+                                ann,
+                            });
+                        } catch (error) {
+                            this.lintr.add({
+                                rule: "invalid-cap-exec",
+                                code: "unable-to-materialize",
+                                content: we.origin.paths.relative(we.entry),
+                                message:
+                                    `Capturable executable materialization failed: ${
+                                        JSON.stringify(pfn)
+                                    }`,
+                                data: { annotation: ann, error },
+                                severity: "error",
+                            });
+                        }
                     } else {
                         this.lintr.add({
                             rule: "invalid-cap-exec",
@@ -282,7 +337,7 @@ export class CapExecs {
                             content: we.origin.paths.relative(we.entry),
                             message:
                                 `Capturable executable filename pattern is not abc.<nature>.<exec>: ${pfn.fileName}`,
-                            data: { annotation: ann },
+                            data: { annotation: ann, error: null },
                             severity: "error",
                         });
                     }
@@ -290,22 +345,20 @@ export class CapExecs {
             });
         };
 
-        switch (phase) {
-            case "before-sqlpage-files":
+        switch (step) {
+            case "BEFORE_ANN_CATALOG":
                 for await (
                     const ce of this.ceSelected.filter((ce) =>
-                        ce.ann.materializePhase === "before-sqlpage-files" ||
-                        ce.ann.materializePhase === "both"
+                        ce.ann.runBeforeAnnCatalog
                     )
                 ) {
                     await execute(ce);
                 }
                 break;
-            case "after-sqlpage-files":
+            case "AFTER_ANN_CATALOG":
                 for await (
                     const ce of this.ceSelected.filter((ce) =>
-                        ce.ann.materializePhase === "after-sqlpage-files" ||
-                        ce.ann.materializePhase === "both"
+                        ce.ann.runAfterAnnCatalog
                     )
                 ) {
                     await execute(ce);

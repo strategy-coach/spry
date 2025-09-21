@@ -24,19 +24,14 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         nature: z.literal("cap-exec").describe(
             "A capturable executable",
         ),
-        materializePhase: z.enum([
-            "before-sqlpage-files",
-            "after-sqlpage-files",
-            "both",
-        ]).default("before-sqlpage-files").optional().describe(
-            "Express when the cap exec should run in the pipeline",
+        runBeforeAnnCatalog: z.boolean().default(true).optional().describe(
+            "Instruct engine to run this before catalogging SQLPage file annotations",
         ),
-        materializeStrategy: z.enum(["origin", "spry.d"]).default("origin")
-            .optional().describe(
-                "Express the destination of the cap-exec output (origin means same path as original)",
-            ),
-        materializePath: z.string().optional().describe(
-            "Where the output should be materialized, usually filled in by the engine (not for users)",
+        runAfterAnnCatalog: z.boolean().default(false).optional().describe(
+            "Instruct engine to run this after catalogging SQLPage file annotations",
+        ),
+        isCleanable: z.boolean().default(false).optional().describe(
+            "Instruct engine that when `clean` (delete generated artifacts) is called, call this cap ex too (CAPEXEC_DESTROY_CLEAN env var will be set)",
         ),
         dependsOn: z.enum(["none", "db-after-build"]).default("none").optional()
             .describe(

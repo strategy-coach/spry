@@ -13,8 +13,17 @@ export class Linter {
                     code: [
                         "not-executable",
                         "invalid-file-name-pattern",
+                        "unable-to-materialize",
                     ] as const,
-                    data: { annotation: {} },
+                    data: {
+                        annotation: {},
+                        error: {} as
+                            | string
+                            | Error
+                            | unknown
+                            | undefined
+                            | null,
+                    },
                     defaultSeverity: "warn",
                 }),
             } as const,

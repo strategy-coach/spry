@@ -303,14 +303,15 @@ can behave consistently and access orchestration context.
 
 | Variable                        | Purpose                                                               | Example Value                               |
 | ------------------------------- | --------------------------------------------------------------------- | ------------------------------------------- |
-| `CAPEXEC_PHASE`                 | The phase in which the CapExec is being invoked.                      | `before-sqlpage-files`                      |
-| `CAPEXEC_SOURCE_JSON`           | The complete object which idenfies the file system location of CapEx. | `before-sqlpage-files`                      |
+| `CAPEXEC_WORKFLOW_STEP`         | The step / phase in which the CapExec is being invoked.               | `before-sqlpage-files`                      |
+| `CAPEXEC_SOURCE_JSON`           | The complete object which idenfies the file system location of CapEx. | `{TODO: ...}`                               |
 | `CAPEXEC_CONTEXT_JSON`          | Full orchestration context in JSON (CLI args, workflow phase, paths). | `{"phase":"after-sqlpage-files","args":[]}` |
 | `CAPEXEC_TARGET_SQLITEDB`       | Path to the SQLite DB file Spry is operating on (if specified).       | `/home/user/project/dev.sqlite`             |
 | `CAPEXEC_MATERIALIZE_BASE_NAME` | If auto-materialized, the path where Spry will write the artifact.    | `spry.d/auto/my-exec.auto.sql`              |
+| `CAPEXEC_DESTROY_CLEAN`         | If isCleanable annotation is set and `clean` command is being called  | `TRUE` or `FALSE`                           |
 
 💡 Not all variables are always set. At minimum, you can rely on
-`CAPEXEC_CONTEXT_JSON`, `CAPEXEC_PHASE`, and `CAPEXEC_TARGET_SQLITEDB`.
+`CAPEXEC_CONTEXT_JSON`, `CAPEXEC_WORKFLOW_STEP`, and `CAPEXEC_TARGET_SQLITEDB`.
 Auto-materialized executables will also receive `CAPEXEC_OUTPUT_PATH` so you
 know exactly where your output will land.
 

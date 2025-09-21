@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @spry.nature cap-exec
+# @spry.nature cap-exec @spry.isCleanable
 #
 # 👆 Two things make Spry notice this file:
 #   1. The file has its "executable bit" set (`chmod +x`), so the OS can run it.
@@ -19,6 +19,11 @@
 #     write the output into a file named <basename>.auto.<nature>
 #     (for example: `debug-cap-exec.auto.env`).
 #   - This is the simplest way to produce build artifacts from a CapExec.
+#   - If the file is auto-materialized and spry.isCleanable is set, it can be
+#     deleted during a `clean` operation.
+#   - If the file is not auto-materialized and spry.isCleanable is set, then
+#     CAPEXEC_DESTROY_CLEAN env var will be set to 'TRUE' and the cap exec
+#     can decide what to do.
 #
 # 🗂️ Custom file outputs:
 #   - You are not limited to auto-materialization. CapExecs can also write
