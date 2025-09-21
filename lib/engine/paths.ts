@@ -1,5 +1,5 @@
 import { WalkEntry } from "jsr:@std/fs@1/walk";
-import { dirname, fromFileUrl, join, relative } from "jsr:@std/path@1";
+import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
 
 export type PathSupplier = {
     readonly absolute: (path: string | WalkEntry) => string;
@@ -65,6 +65,10 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
         projectFsPaths,
         projectSrcFsPaths,
         webPaths,
+        spryDropIn: {
+            home: resolve(projectSrcFsPaths.root, "spry.d"),
+            auto: resolve(projectSrcFsPaths.root, "spry.d", "auto"),
+        },
         spryStd: {
             homeFromSymlink: relative(
                 dirname(absPathToSpryLocal),

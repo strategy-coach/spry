@@ -14,7 +14,7 @@ import { detectLanguageByPath } from "../universal/content/code.ts";
 import { Annotations, SpryEntryAnnotation } from "./annotations.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
-import { FsPathSupplier } from "./paths.ts";
+import { Plan } from "./orchestrate.ts";
 import {
     EncountersSupplier,
     WalkEncounter,
@@ -42,7 +42,7 @@ export class CapExecs {
     }[] = [];
 
     constructor(
-        readonly projectModule: FsPathSupplier,
+        readonly plan: Plan,
         readonly lintr: ReturnType<Linter["lintResults"]>,
         readonly init?: {
             readonly cliOpts?: SafeCliArgs;
@@ -52,7 +52,7 @@ export class CapExecs {
         // any executable files in our path(s) can be capexec candidates
         // TODO: restrict it a bit more, though?
         this.candidates = Walkers.builder()
-            .addRoot(projectModule, {
+            .addRoot(plan.pp.projectFsPaths, {
                 includeDirs: false,
                 includeFiles: true,
                 includeSymlinks: false,
@@ -71,11 +71,17 @@ export class CapExecs {
         ce: CapExecs["ceSelected"][number],
     ) {
         let ceEnv: Record<string, string> = {
+            CAPEXEC_PROJECT_HOME: this.plan.pp.projectFsPaths.root,
+            CAPEXEC_PROJECT_ID: this.plan.pp.projectFsPaths.identity ?? "",
+            CAPEXEC_PROJECT_SRC_HOME: this.plan.pp.projectSrcFsPaths.root,
+            CAPEXEC_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.home,
+            CAPEXEC_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.auto,
             CAPEXEC_SOURCE_JSON: JSON.stringify(ce),
             CAPEXEC_AUTO_MATERIALIZE: ce.pfn.autoMaterialize ? "TRUE" : "FALSE",
-            CAPEXEC_MATERIALIZE_BASE_NAME: ce.pfn.autoMaterialize
-                ? JSON.stringify(ce.pfn.autoMaterialize)
-                : "",
+            CAPEXEC_MATERIALIZE_BASE_NAME:
+                typeof ce.pfn.autoMaterialize === "string"
+                    ? ce.pfn.autoMaterialize
+                    : "",
             CAPEXEC_PHASE: phase ?? "unknown",
             CAPEXEC_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
         };

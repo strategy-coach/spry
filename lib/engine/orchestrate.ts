@@ -381,7 +381,7 @@ export class Workflow {
     }
 
     async capExecs() {
-        const result = new CapExecs(this.pp.projectFsPaths, this.lintr, {
+        const result = new CapExecs(this.plan, this.lintr, {
             cliOpts: this.cliOpts,
             mergeCtx: { cwd: Deno.cwd(), projectPaths: this.pp },
         });
@@ -503,9 +503,7 @@ export class Plan {
     }
 
     spryDropInStores<Path extends string>() {
-        const polyglot = new Store<Path>(
-            normalize(join(this.pp.projectSrcFsPaths.root, "spry.d")),
-        );
+        const polyglot = new Store<Path>(this.pp.spryDropIn.home);
         return {
             polyglot,
             json: new JsonStore(polyglot, undefined, { pretty: true }),
@@ -513,9 +511,7 @@ export class Plan {
     }
 
     spryDistAutoStores<Path extends string>() {
-        const polyglot = new Store<Path>(
-            normalize(join(this.pp.projectSrcFsPaths.root, "spry.d", "auto")),
-        );
+        const polyglot = new Store<Path>(this.pp.spryDropIn.auto);
         return {
             polyglot,
             json: new JsonStore(polyglot, undefined, { pretty: true }),

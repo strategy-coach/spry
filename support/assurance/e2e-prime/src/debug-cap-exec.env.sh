@@ -11,6 +11,27 @@
 # That module knows how to parse annotations from many types of files, not
 # just Bash scripts. Check the README in that library if you need details on
 # how annotation scanning works.
+#
+# 🔄 Auto-materialization:
+#   - When Spry runs this file, anything it prints to STDOUT is captured.
+#   - If the file name follows the pattern <basename>.<nature>.<runner>
+#     (for example: `debug-cap-exec.env.sh`), Spry will automatically
+#     write the output into a file named <basename>.auto.<nature>
+#     (for example: `debug-cap-exec.auto.env`).
+#   - This is the simplest way to produce build artifacts from a CapExec.
+#
+# 🗂️ Custom file outputs:
+#   - You are not limited to auto-materialization. CapExecs can also write
+#     their own single or multiple files wherever they need to.
+#   - Spry passes a set of `CAPEXEC_*` environment variables that tell you
+#     the proper destinations (for example, the SQLite database file path
+#     or the auto-materialize path).
+#   - Your script can choose to ignore auto-materialization and instead
+#     create files in those locations manually.
+#
+# In short: this file demonstrates the auto-materialization convention,
+# but CapExecs are free to manage their own outputs too. Either way, Spry
+# integrates the results into the build pipeline.
 # -----------------------------------------------------------------------------
 # This debug-cap-exec.env.sh CapExec script exists only as a teaching tool.
 # -----------------------------------------------------------------------------
