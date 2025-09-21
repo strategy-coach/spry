@@ -1,4 +1,4 @@
-// env.ts
+// Env helpers for Deno TypeScript-based capturable executables.
 // EnvAide: convenient wrapper around ALL env vars
 // CapExecEnvAide: composition wrapper around EnvAide for CAPEXEC_ vars
 

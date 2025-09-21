@@ -1,8 +1,7 @@
-// cap-exec.ts
 import { CapExecEnvAide } from "./env.ts";
 
 /**
- * SqliteAide
+ * SqliteAide for Deno TypeScript-based capturable executables.
  *
  * Run SQLite via the `sqlite3` CLI using `Deno.Command`.
  * - `run()` → raw stdout string from sqlite.

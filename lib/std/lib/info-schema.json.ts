@@ -2,7 +2,7 @@
 
 // @spry.nature cap-exec @spry.dependsOn db-after-build
 
-import { SqliteAide } from "./cap-exec/mod.ts";
+import { SqliteAide } from "../../engine/cap-exec/mod.ts";
 
 const SQL = `
 .mode list
