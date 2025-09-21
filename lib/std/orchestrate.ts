@@ -1204,6 +1204,7 @@ export class Plan {
     capExecs(cliOpts?: SafeCliArgs) {
         return new CapExecs(this.pp.projectFsPaths, this.pp.webPaths, {
             cliOpts,
+            mergeCtx: { cwd: Deno.cwd(), projectPaths: this.pp },
         });
     }
 
