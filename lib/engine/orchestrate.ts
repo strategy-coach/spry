@@ -12,7 +12,7 @@ import { MarkdownStore } from "../universal/markdown.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
 import { inlinedSQL } from "../universal/sql-text.ts";
 import { Annotations } from "./annotations.ts";
-import { CapExecs, SpryCapExecEntryAnnotation } from "./cap-exec.ts";
+import { CapExecs } from "./cap-exec.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
@@ -204,16 +204,6 @@ export class Workflow {
             }
         }
         return { valid: entryAnns, issues };
-    }
-
-    async capExecEntryAnnotations(lint = false) {
-        const entryAnns = await this.entryAnnotations(lint);
-        return entryAnns.valid.filter((ea) => ea.entryAnn.nature === "cap-exec")
-            .map((ea) => ({
-                capExec: ea.we,
-                ann: ea.entryAnn as SpryCapExecEntryAnnotation,
-                isExecutable: CapExecs.isExecutable(ea.we.entry.path),
-            }));
     }
 
     protected async dropInEntryAnns(

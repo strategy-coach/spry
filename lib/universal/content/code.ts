@@ -46,27 +46,27 @@ export type LanguageSpec = {
   readonly comment: CommentStyle;
 };
 
-const _registry = new Map<string, LanguageSpec>();
-const _extIndex = new Map<string, LanguageSpec>();
+export const languageRegistry = new Map<string, LanguageSpec>();
+export const languageExtnIndex = new Map<string, LanguageSpec>();
 
 export function registerLanguage(spec: LanguageSpec): void {
-  _registry.set(spec.id, spec);
+  languageRegistry.set(spec.id, spec);
   for (const ext of spec.extensions ?? []) {
-    _extIndex.set(ext.toLowerCase(), spec);
+    languageExtnIndex.set(ext.toLowerCase(), spec);
   }
-  for (const alias of spec.aliases ?? []) _registry.set(alias, spec);
+  for (const alias of spec.aliases ?? []) languageRegistry.set(alias, spec);
 }
 
 export function getLanguageByIdOrAlias(
   idOrAlias: string,
 ): LanguageSpec | undefined {
-  return _registry.get(idOrAlias);
+  return languageRegistry.get(idOrAlias);
 }
 
 export function detectLanguageByPath(path: string): LanguageSpec | undefined {
   const ext = extname(path).toLowerCase();
   if (!ext) return undefined;
-  return _extIndex.get(ext);
+  return languageExtnIndex.get(ext);
 }
 
 export function detectLanguageByShebang(
@@ -74,7 +74,7 @@ export function detectLanguageByShebang(
 ): LanguageSpec | undefined {
   if (!firstLine.startsWith("#!")) return undefined;
   const rest = firstLine.slice(2).trim();
-  for (const spec of _registry.values()) {
+  for (const spec of languageRegistry.values()) {
     for (const s of spec.shebangs ?? []) {
       if (rest.includes(s)) return spec;
     }

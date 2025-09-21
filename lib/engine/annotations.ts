@@ -4,7 +4,10 @@ import {
     type AnnotationItem,
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
-import { detectLanguageByPath } from "../universal/content/code.ts";
+import {
+    detectLanguageByPath,
+    languageExtnIndex,
+} from "../universal/content/code.ts";
 import {
     SpryEntryAnnotation,
     spryEntryAnnSchema,
@@ -39,7 +42,9 @@ export class Annotations {
     ) {
         this.annotatable = Walkers.builder()
             .addRoot(projectModule, {
-                exts: [".sql", ".ts"],
+                exts: [
+                    ...new Set([".sql", ".ts", ...languageExtnIndex.keys()]),
+                ],
                 includeDirs: false,
                 includeFiles: true,
                 includeSymlinks: false,

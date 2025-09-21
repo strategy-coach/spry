@@ -11,7 +11,7 @@ import {
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
 import { detectLanguageByPath } from "../universal/content/code.ts";
-import { Annotations, SpryEntryAnnotation } from "./annotations.ts";
+import { Annotations } from "./annotations.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
 import { Plan } from "./orchestrate.ts";
@@ -21,6 +21,7 @@ import {
     Walkers,
     WalkSpec,
 } from "./walk.ts";
+import { SpryEntryAnnotation } from "./anno/mod.ts";
 
 export type SpryCapExecEntryAnnotation = Extract<
     SpryEntryAnnotation,

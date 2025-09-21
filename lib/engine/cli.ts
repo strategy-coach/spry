@@ -137,15 +137,15 @@ export class CLI {
 
     async lsCapExecs(_opts: { json?: true }) {
         const workflow = await this.plan.workflow();
-        const ceEntries = await workflow.capExecEntryAnnotations();
+        const capExecs = await workflow.capExecs();
         const table = new Table({
-            head: ["Path", "Depends On", "Executable?"],
+            head: ["Path", "Phase", "Depends On"],
         });
-        for (const ce of ceEntries) {
+        for (const ce of capExecs.ceSelected) {
             table.push([
-                this.plan.pp.projectFsPaths.relative(ce.capExec.entry),
+                this.plan.pp.projectFsPaths.relative(ce.we.entry),
+                ce.ann.materializePhase,
                 ce.ann.dependsOn,
-                ce.isExecutable,
             ]);
         }
         console.log(table.toString());
