@@ -46,19 +46,21 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         nature: z.literal("cap-exec").describe(
             "A capturable executable",
         ),
-        materialize: z.enum([
+        materializePhase: z.enum([
             "before-sqlpage-files",
             "after-sqlpage-files",
             "both",
-        ]).default("before-sqlpage-files").optional()
-            .describe(
-                "Express when the cap exec should run in the pipeline",
-            ),
-        destDir: z.enum(["origin", "spry.d"]).default("origin").optional()
-            .describe(
+        ]).default("before-sqlpage-files").optional().describe(
+            "Express when the cap exec should run in the pipeline",
+        ),
+        materializeStrategy: z.enum(["origin", "spry.d"]).default("origin")
+            .optional().describe(
                 "Express the destination of the cap-exec output (origin means same path as original)",
             ),
-        dependsOn: z.enum(["none", "db-after-build"])
+        materializePath: z.string().optional().describe(
+            "Where the output should be materialized, usually filled in by the engine (not for users)",
+        ),
+        dependsOn: z.enum(["none", "db-after-build"]).default("none").optional()
             .describe(
                 "Expresses dependencies: 'none' means it's idempotent, 'db-after-build' means it needs the database before/after the build",
             ),
@@ -155,7 +157,6 @@ export const spryRouteAnnSchema = z.object({
 );
 
 export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
-
 export type SpryRouteAnnotation = z.infer<typeof spryRouteAnnSchema>;
 
 export class Annotations {

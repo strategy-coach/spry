@@ -9,6 +9,16 @@ emits a consolidated markdown report. It also exposes a CLI to list routes,
 print breadcrumbs, generate SQL DDL/inserts, and watch the filesystem to
 re-orchestrate on change with a `dev` mode.
 
+## TypeScript Engine vs Polyglot Plugins
+
+Spry itself (the engine) is written in Deno and TypeScript. But the pipeline is
+intentionally polyglot. Any step of the workflow can invoke capturable
+executables (CapExecs), which are just programs annotated for Spry to discover
+and run. These plugins can be written in any language — Bash, Python, Rust, Go,
+Java, Node.js, etc. — as long as they follow Spry’s simple conventions and use
+environment variables to emit predictable SQL, JSON, or Markdown. Spry is not
+opinionated about languages: you use the right tool for each job.
+
 ## What Spry gives you
 
 Spry organizes a SQLPage project into a simple pipeline:
@@ -238,13 +248,91 @@ CLI. To learn more about the CLI use:
 
 ### Cap-execs in brief
 
-- Files named like `abc.<nature>.<exec>` are candidates.
+Cap-execs are where you bring in other languages. Write a script in Python,
+Rust, Bash, or anything else, mark it with a @spry annotation, and Spry will
+treat it as part of the pipeline. This makes it easy to reuse existing tools or
+bring in language-specific strengths without locking you into TypeScript/Deno
+everywhere.
+
+- All executable files in the `src` tree are are CapExec candidates.
+- Files named like `abc.<nature>.<exec>` are auto-materialization candidates.
 - Each cap-exec’s annotation declares when it runs (`before-sqlpage-files`,
   `after-sqlpage-files`, or `both`) and where its outputs go.
-- Environment provided:
 
+- Environment provided:
   - `CAPEXEC_CONTEXT_JSON` includes CLI options and other context.
   - `CAPEXEC_TARGET_SQLITEDB` points to the SQLite DB, if specified.
+
+CapExecs are discovered by a single, simple rule: they are just executable files
+as your operating system sees them. If a file has execute permissions
+(`chmod +x`) and carries a `@spry.*` entry annotation, Spry will treat it as
+part of the orchestration pipeline. This makes CapExecs easy to author in any
+language and avoids special registries or configs — the filesystem itself is the
+source of truth.
+
+Once discovered, Spry has two ways of handling their outputs:
+
+- Auto-materialization pattern: If your file follows the naming convention
+  `<basename>.<nature>.<runner>` (e.g. `my-exec.json.py` or `report.sql.ts`),
+  Spry automatically materializes the output into `<basename>.auto.<nature>`
+  (e.g. `my-exec.auto.json` or `report.auto.sql`). This ensures predictable file
+  placement in `spry.d/auto/` and makes it easy to version or check artifacts
+  into your repo.
+
+- Custom materialization: If the file doesn’t follow the auto-materialization
+  pattern, Spry simply executes it and trusts the binary to write to its own
+  destinations. This is useful for advanced workflows where executables need to
+  manage multiple files, or outputs don’t fit the simple one-to-one mapping.
+
+During execution, Spry provides a set of `CAPEXEC_*` environment variables so
+your scripts can adapt to project state. For example, `CAPEXEC_CONTEXT_JSON`
+includes CLI options and orchestration context, while `CAPEXEC_TARGET_SQLITEDB`
+points to the SQLite database when one is in play. These environment variables
+let CapExecs plug into the orchestration in a reproducible way, regardless of
+language or runtime.
+
+Perfect — here’s a table you can append to the section so CapExec authors have a
+quick reference:
+
+---
+
+### Common `CAPEXEC_*` Environment Variables
+
+When Spry runs a CapExec, it sets standard environment variables so your script
+can behave consistently and access orchestration context.
+
+| Variable                        | Purpose                                                               | Example Value                               |
+| ------------------------------- | --------------------------------------------------------------------- | ------------------------------------------- |
+| `CAPEXEC_PHASE`                 | The phase in which the CapExec is being invoked.                      | `before-sqlpage-files`                      |
+| `CAPEXEC_SOURCE_JSON`           | The complete object which idenfies the file system location of CapEx. | `before-sqlpage-files`                      |
+| `CAPEXEC_CONTEXT_JSON`          | Full orchestration context in JSON (CLI args, workflow phase, paths). | `{"phase":"after-sqlpage-files","args":[]}` |
+| `CAPEXEC_TARGET_SQLITEDB`       | Path to the SQLite DB file Spry is operating on (if specified).       | `/home/user/project/dev.sqlite`             |
+| `CAPEXEC_MATERIALIZE_BASE_NAME` | If auto-materialized, the path where Spry will write the artifact.    | `spry.d/auto/my-exec.auto.sql`              |
+
+💡 Not all variables are always set. At minimum, you can rely on
+`CAPEXEC_CONTEXT_JSON`, `CAPEXEC_PHASE`, and `CAPEXEC_TARGET_SQLITEDB`.
+Auto-materialized executables will also receive `CAPEXEC_OUTPUT_PATH` so you
+know exactly where your output will land.
+
+#### Debug template: Inspecting `CAPEXEC_*`
+
+Save this as `debug-cap-exec.env.sh` somehwere in your project and make it
+executable:
+
+```bash
+#!/usr/bin/env bash
+
+# @spry.nature cap-exec
+# Debug script to show CAPEXEC_* environment variables
+
+echo "# Debugging CapExec environment"
+for var in $(env | grep '^CAPEXEC_'); do
+  echo $var
+done
+```
+
+Run `spryctl.ts build` to confirm which variables are set in your environment
+before writing a more complex CapExec.
 
 ### Tips
 

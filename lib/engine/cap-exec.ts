@@ -1,3 +1,4 @@
+import { brightRed, dim } from "jsr:@std/fmt@1/colors";
 import {
     basename,
     dirname,
@@ -5,6 +6,7 @@ import {
     isAbsolute,
     resolve,
 } from "jsr:@std/path@1";
+import z from "jsr:@zod/zod@4";
 import {
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
@@ -31,9 +33,10 @@ export class CapExecs {
     readonly ceSelected: {
         we: WalkEncounter<WalkSpec>;
         ann: SpryCapExecEntryAnnotation;
+        pfn: ReturnType<CapExecs["parseFileName"]>;
     }[] = [];
     readonly ceMaterialized: {
-        phase: SpryCapExecEntryAnnotation["materialize"];
+        phase: SpryCapExecEntryAnnotation["materializePhase"];
         we: WalkEncounter<WalkSpec>;
         ann: SpryCapExecEntryAnnotation;
     }[] = [];
@@ -63,8 +66,17 @@ export class CapExecs {
         };
     }
 
-    env() {
+    env(
+        phase: SpryCapExecEntryAnnotation["materializePhase"],
+        ce: CapExecs["ceSelected"][number],
+    ) {
         let ceEnv: Record<string, string> = {
+            CAPEXEC_SOURCE_JSON: JSON.stringify(ce),
+            CAPEXEC_AUTO_MATERIALIZE: ce.pfn.autoMaterialize ? "TRUE" : "FALSE",
+            CAPEXEC_MATERIALIZE_BASE_NAME: ce.pfn.autoMaterialize
+                ? JSON.stringify(ce.pfn.autoMaterialize)
+                : "",
+            CAPEXEC_PHASE: phase ?? "unknown",
             CAPEXEC_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
         };
         if (this.init?.cliOpts?.dbName) {
@@ -175,6 +187,25 @@ export class CapExecs {
         }
     }
 
+    parseFileName(supplied: string) {
+        const fileName = basename(supplied);
+        let extn = extname(fileName);
+
+        const parts = fileName.split(".");
+        if (parts.length < 2) return { autoMaterialize: false, fileName, extn };
+
+        extn = parts.at(-1)!; // final extension
+        const nature = parts.length > 2 ? parts.at(-2)! : ""; // second-to-last extension
+        const base = parts.slice(0, -2).join(".") || parts[0]; // everything before .nature.ext
+        return {
+            autoMaterialize: `${base}.auto.${nature}`,
+            fileName,
+            base,
+            nature,
+            extn,
+        };
+    }
+
     async catalog() {
         for await (const cec of this.candidates.encountered()) {
             if (CapExecs.isExecutable(cec.entry.path)) {
@@ -196,7 +227,17 @@ export class CapExecs {
                     if (
                         entryAnn.parsed && entryAnn.parsed.nature === "cap-exec"
                     ) {
-                        this.ceSelected.push({ we: cec, ann: entryAnn.parsed });
+                        this.ceSelected.push({
+                            we: cec,
+                            ann: entryAnn.parsed,
+                            pfn: this.parseFileName(cec.entry.path),
+                        });
+                    }
+                    if (entryAnn.error) {
+                        console.info(dim(cec.origin.paths.relative(cec.entry)));
+                        console.error(
+                            brightRed(z.prettifyError(entryAnn.error)),
+                        );
                     }
                 } catch (err) {
                     console.error(cec.origin.paths.relative(cec.entry), err);
@@ -205,34 +246,24 @@ export class CapExecs {
         }
     }
 
-    parseFileName(supplied: string) {
-        const fileName = basename(supplied);
-        let extn = extname(fileName);
-
-        const parts = fileName.split(".");
-        if (parts.length < 2) return { valid: false, fileName, extn };
-
-        extn = parts.at(-1)!; // final extension
-        const nature = parts.length > 2 ? parts.at(-2)! : ""; // second-to-last extension
-        const base = parts.slice(0, -2).join(".") || parts[0]; // everything before .nature.ext
-        return { valid: true, fileName, base, nature, extn };
-    }
-
-    async materialize(phase: SpryCapExecEntryAnnotation["materialize"]) {
-        const execute = async ({ we, ann }: {
-            we: WalkEncounter<WalkSpec>;
-            ann: SpryCapExecEntryAnnotation;
-        }) => {
+    async materialize(phase: SpryCapExecEntryAnnotation["materializePhase"]) {
+        const execute = async (
+            ce: {
+                we: WalkEncounter<WalkSpec>;
+                ann: SpryCapExecEntryAnnotation;
+                pfn: ReturnType<CapExecs["parseFileName"]>;
+            },
+        ) => {
+            const { we, ann, pfn } = ce;
             await CapExecs.captureExecutable(we.entry.path, {
-                env: this.env(),
+                env: this.env(phase, ce),
                 cwd: Deno.cwd(),
                 materializeText: async (stdout, _stderr) => {
-                    const pfn = this.parseFileName(we.entry.path);
-                    if (pfn.valid) {
+                    if (typeof pfn.autoMaterialize === "string") {
                         await Deno.writeTextFile(
                             resolve(
                                 dirname(we.entry.path),
-                                `${pfn.base}.auto.${pfn.nature}`,
+                                pfn.autoMaterialize,
                             ),
                             stdout,
                         );
@@ -256,8 +287,8 @@ export class CapExecs {
             case "before-sqlpage-files":
                 for await (
                     const ce of this.ceSelected.filter((ce) =>
-                        ce.ann.materialize === "before-sqlpage-files" ||
-                        ce.ann.materialize === "both"
+                        ce.ann.materializePhase === "before-sqlpage-files" ||
+                        ce.ann.materializePhase === "both"
                     )
                 ) {
                     await execute(ce);
@@ -266,8 +297,8 @@ export class CapExecs {
             case "after-sqlpage-files":
                 for await (
                     const ce of this.ceSelected.filter((ce) =>
-                        ce.ann.materialize === "after-sqlpage-files" ||
-                        ce.ann.materialize === "both"
+                        ce.ann.materializePhase === "after-sqlpage-files" ||
+                        ce.ann.materializePhase === "both"
                     )
                 ) {
                     await execute(ce);
