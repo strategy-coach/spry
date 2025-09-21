@@ -3,4 +3,3 @@ sqlpage.db
 node_modules
 deno.lock
 .DS_Store
-spry.d

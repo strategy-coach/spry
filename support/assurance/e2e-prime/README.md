@@ -33,6 +33,17 @@ deno install
 ./spryctl.ts | sqlite3 sqlpage.db
 ```
 
+## TODO: explain Build vs. Deploy
+
+- The build process `spryctl.ts build` generates files
+- The deploy process puts together generated files into `sqlpage_files` SQL
+  `INSERT` DML statements
+
+### TODO: explain `*.auto.*` convention
+
+Filenames that have `*.auto.*` in their name or `/auto/` in the path are
+auto-generated and should not be modified. Spry manages those directly.
+
 ### TODO: explain how `spry.d` fits in
 
 - Purpose: `spry.d` acts as a drop-in _distribution_ directory for modular,
@@ -49,12 +60,13 @@ easy to extend — exactly in line with the `.d` convention elsewhere on Linux.
 When SQLPage starts up it sees `spry.d/` as just another directory where it can
 pick up web contents.
 
-- ⚠️ `spry.d` is not meant for _non_-spry content because it's deleted
+- ⚠️ `spry.d/auto` is not meant for _non_-spry content because it's deleted
   recursively and recreated each time the build occurs. It's basically a
   _distribution_ directory. It's not safe for project-level files, it's for
   `spry` only.
 - 👉 If you want to do something similar for your project you can create
-  `project.d` similarly and manage it on your own.
+  `project.d` or outside of `spry.d/auto` in `spry.d` similarly and manage it on
+  your own.
 
 ### Why this is useful for SQLPage
 
@@ -71,12 +83,18 @@ pick up web contents.
 goes in there (SQL, JSON, or other generated artifacts from Spry) becomes part
 of the runtime environment for SQLPage under the web path `/spry.d/**`. It’s the
 same modular, extendable configuration approach you see with `conf.d`, just
-applied to SQLPage’s distribution.
+applied to SQLPage’s distribution. Just be careful about putting things into
+`spry.d/auto` because that directory is removed and recreated during builds.
 
 ---
 
 WIP
 
+- [ ] Create `spry.d/mod.auto.sql` which is a partial that is included in
+      SQLPage for constants; that file will be in `sqlpage_files` so create a
+      wrapper view for its contents / availability.
+- [ ] Add `lint` CLI command to check if `page` types have typical includes
+      (shell, etc.)
 - [ ] Convert `auto.json` or any other file generators to their `*.json.ts`
       counterparts to remove dependencies. for example,
       `spry/lib/forest.d/spry.auto.json` would come from
@@ -85,6 +103,8 @@ WIP
       built. for example, `spry/templates/abc.handlebars.ts` would generate
       `spry/templates/abc.handlebars` during build `orchestrate.ts build` and
       then get picked up by package.json. Same for `*.sql.ts`, etc.
+- [ ] Explain working with SQLPage "live reload" (symlink `std` to CWD/`spry`
+      and start sqlpage); use watchexec
 - [ ] Support mix of SQLite and PostgreSQL in the same `app` (annotations, file
       extensions, file names, etc.)
 - [ ] Use `on_connect.sql` to initialize the `app` (add annotations for truly
@@ -92,15 +112,9 @@ WIP
 - [ ] Add experiment to generate and insert a new page in `sqlpage_files` and
       then redirect to it
 - [ ] Consider how to integrate RUNME.md (as replacement for package.sql.ts?)
-- [ ] Create `lib/route/mod.auto.sql` which is a partial that is included in
-      SQLPage for constants
-- [ ] Build a FUSE layer for browsing sqlpage_files and any RSSD
-- [ ] Explain working with SQLPage "live reload" (symlink `std` to CWD/`spry`
-      and start sqlpage); use watchexec
-- [ ] Add `lint` CLI command to check if `page` types have typical includes
-      (shell, etc.)
 - [ ] [Introduce Middleware into Spry](https://github.com/sqlpage/SQLPage/discussions/584)
 - [ ] [Introduce Custom Layout](https://github.com/sqlpage/SQLPage/blob/main/sqlpage/templates/shell.handlebars)
       [(discussion)](https://github.com/sqlpage/SQLPage/discussions/731)
 - [ ] [HTMLx integration](https://github.com/sqlpage/SQLPage/discussions/628)
 - [ ] [Consider dynamic search pages through codegen](https://github.com/sqlpage/SQLPage/discussions/699)
+- [ ] Build a FUSE layer for browsing sqlpage_files and any RSSD

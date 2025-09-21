@@ -17,7 +17,7 @@ Why it exists
 
 How it’s used
   • SQLPage: maps path → contents to render pages.
-  • Spry: reads JSON files under spry.d/* for routes/breadcrumbs/entries, etc.
+  • Spry: reads JSON files under spry.d/auto/* for routes/breadcrumbs/entries, etc.
 
 Columns
   path          PK “filename” (e.g. spry/console/index.sql.auto.json)
@@ -40,8 +40,8 @@ CREATE INDEX IF NOT EXISTS idx_sqlpage_files_last_modified
 -- View: spry_annotation
 -- Purpose:
 --   Flatten annotations from `.source` objects found in:
---     - spry.d/route/**/*.auto.json   (path = $.path)
---     - spry.d/entry/**/*.auto.json   (path = $.webPath)
+--     - spry.d/auto/route/**/*.auto.json   (path = $.path)
+--     - spry.d/auto/entry/**/*.auto.json   (path = $.webPath)
 --   One row per annotation key (e.g., "title", "caption", "description").
 --
 -- Columns:
@@ -62,7 +62,7 @@ WITH route_files AS (
     contents,
     contents ->> '$.path' AS path
   FROM sqlpage_files
-  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json'
     AND json_valid(contents)
     AND json_type(contents, '$.path') = 'text'
     AND json_type(contents, '$.".source"') = 'object'
@@ -72,7 +72,7 @@ entry_files AS (
     contents,
     contents ->> '$.webPath' AS path
   FROM sqlpage_files
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json'
+  WHERE path GLOB 'spry.d/auto/entry/**/*.auto.json'
     AND json_valid(contents)
     AND json_type(contents, '$.webPath') = 'text'
     AND json_type(contents, '$.".source"') = 'object'
@@ -119,25 +119,25 @@ SELECT * FROM entry_ann;
 
 CREATE INDEX IF NOT EXISTS idx_route_source_json
   ON sqlpage_files (json_extract(contents, '$.".source"'))
-  WHERE path GLOB 'spry.d/route/**/*.auto.json' AND json_valid(contents);
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json' AND json_valid(contents);
 
 CREATE INDEX IF NOT EXISTS idx_entry_source_json
   ON sqlpage_files (json_extract(contents, '$.".source"'))
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json' AND json_valid(contents);
+  WHERE path GLOB 'spry.d/auto/entry/**/*.auto.json' AND json_valid(contents);
 
 CREATE INDEX IF NOT EXISTS idx_route_path
   ON sqlpage_files (contents ->> '$.path')
-  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json';
 
 CREATE INDEX IF NOT EXISTS idx_entry_webpath
   ON sqlpage_files (contents ->> '$.webPath')
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/entry/**/*.auto.json';
 
 /*------------------------------------------------------------------------------
 View: spry_route
 
 Purpose
-  Projects one row per route from files under spry.d/route/**\/*.auto.json.
+  Projects one row per route from files under spry.d/auto/route/**\/*.auto.json.
 
 Shape (selected)
   path, title, caption, url, description, elaboration, plus provenance:
@@ -156,11 +156,11 @@ WITH f AS (
     contents,
     substr(
       path,
-      length('spry.d/route/') + 1,
-      length(path) - length('spry.d/route/') - length('.auto.json')
+      length('spry.d/auto/route/') + 1,
+      length(path) - length('spry.d/auto/route/') - length('.auto.json')
     )             AS path_spf_target
   FROM sqlpage_files
-  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json'
     AND json_valid(contents)
 )
 SELECT
@@ -192,19 +192,19 @@ WHERE json_type(contents, '$.path') = 'text';
 -- fast lookups by route path
 CREATE INDEX IF NOT EXISTS idx_route_json_path_flat
   ON sqlpage_files (contents ->> '$.path')
-  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json';
 
 -- help queries that scan JSON content
 CREATE INDEX IF NOT EXISTS idx_route_json_scan
   ON sqlpage_files (json(contents))  -- or (contents -> '$') if you prefer
-  WHERE path GLOB 'spry.d/route/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json';
 
 /*------------------------------------------------------------------------------
 View: spry_route_crumb
 
 Purpose
   Emits one row per breadcrumb “crumb” from files under
-  spry.d/breadcrumbs/**\/*.auto.json (each file is an array of objects).
+  spry.d/auto/breadcrumbs/**\/*.auto.json (each file is an array of objects).
 
 Shape (selected)
   path (derived from filename), crumb_index, href_* (canonical/index/trailingSlash),
@@ -224,11 +224,11 @@ WITH files AS (
     -- filename-derived logical path (strip prefix/suffix)
     substr(
       f.path,
-      length('spry.d/breadcrumbs/') + 1,
-      length(f.path) - length('spry.d/breadcrumbs/') - length('.auto.json')
+      length('spry.d/auto/breadcrumbs/') + 1,
+      length(f.path) - length('spry.d/auto/breadcrumbs/') - length('.auto.json')
     ) AS path_spf_target
   FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry.d/breadcrumbs/**/*.auto.json'
+  WHERE f.path GLOB 'spry.d/auto/breadcrumbs/**/*.auto.json'
     AND json_valid(f.contents)
 ),
 -- One row per crumb (array element)
@@ -271,16 +271,16 @@ ORDER BY src_path, crumb_index;
 -- Breadcrumb discovery + JSON scan accelerators
 CREATE INDEX IF NOT EXISTS idx_breadcrumbs_dir
   ON sqlpage_files (path)
-  WHERE path GLOB 'spry.d/breadcrumbs/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/breadcrumbs/**/*.auto.json';
 
 CREATE INDEX IF NOT EXISTS idx_breadcrumbs_json
   ON sqlpage_files (json_extract(contents))
-  WHERE path GLOB 'spry.d/breadcrumbs/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/breadcrumbs/**/*.auto.json';
 
 -- ---------------------------------------------------------------------------
 -- View: spry_route_edge
 -- Purpose: Flatten prebuilt edges (parent → child) into rows, newest-wins.
--- Inputs:  sqlpage_files where path GLOB 'spry.d/route/*edges*.auto.json'
+-- Inputs:  sqlpage_files where path GLOB 'spry.d/auto/route/*edges*.auto.json'
 -- Columns: parent, child, edges_source_path, edges_source_last_modified
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS spry_route_edge;
@@ -291,7 +291,7 @@ WITH files AS (
     f.last_modified AS src_last_modified,
     f.contents
   FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry.d/route/*edges*.auto.json'
+  WHERE f.path GLOB 'spry.d/auto/route/*edges*.auto.json'
     AND json_valid(f.contents)
 ),
 edges_raw AS (
@@ -335,11 +335,11 @@ WHERE rn = 1;
 -- Edges discovery + JSON scan accelerators on base table
 CREATE INDEX IF NOT EXISTS idx_route_edges_dir
   ON sqlpage_files (path)
-  WHERE path GLOB 'spry.d/route/*edges*.auto.json';
+  WHERE path GLOB 'spry.d/auto/route/*edges*.auto.json';
 
 CREATE INDEX IF NOT EXISTS idx_route_edges_json
   ON sqlpage_files (json_extract(contents))
-  WHERE path GLOB 'spry.d/route/*edges*.auto.json';
+  WHERE path GLOB 'spry.d/auto/route/*edges*.auto.json';
 
 -- ---------------------------------------------------------------------------
 -- View: spry_route_child
@@ -363,18 +363,18 @@ ORDER BY e.parent_path_spf, c."path_spf";
 -- Speed extraction of the raw ".source" annotations in entry files
 CREATE INDEX IF NOT EXISTS idx_entry_source_json
   ON sqlpage_files (json_extract(contents, '$.".source"'))
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json'
+  WHERE path GLOB 'spry.d/auto/entry/**/*.auto.json'
     AND json_valid(contents);
 
 -- Speed extraction of the raw ".source" annotations in route files
 CREATE INDEX IF NOT EXISTS idx_route_source_json
   ON sqlpage_files (json_extract(contents, '$.".source"'))
-  WHERE path GLOB 'spry.d/route/**/*.auto.json'
+  WHERE path GLOB 'spry.d/auto/route/**/*.auto.json'
     AND json_valid(contents);
 
 -- ---------------------------------------------------------------------------
 -- View: spry_entry
--- Purpose: Surface entry metadata + annotations for files under spry.d/entry/**
+-- Purpose: Surface entry metadata + annotations for files under spry.d/auto/entry/**
 -- Columns:
 --   path           ← contents.webPath
 --   nature         ← contents.nature
@@ -390,11 +390,11 @@ WITH files AS (
     f.contents,
     substr(
       f.path,
-      length('spry.d/entry/') + 1,
-      length(f.path) - length('spry.d/entry/') - length('.auto.json')
+      length('spry.d/auto/entry/') + 1,
+      length(f.path) - length('spry.d/auto/entry/') - length('.auto.json')
     ) AS path_spf_target
   FROM sqlpage_files AS f
-  WHERE f.path GLOB 'spry.d/entry/**/*.auto.json'
+  WHERE f.path GLOB 'spry.d/auto/entry/**/*.auto.json'
     AND json_valid(f.contents)
 )
 SELECT
@@ -413,4 +413,4 @@ WHERE json_type(files.contents, '$.webPath') = 'text';
 -- Fast lookups by relFsPath
 CREATE INDEX IF NOT EXISTS idx_entry_relfs
   ON sqlpage_files (json_extract(contents, '$.webPath'))
-  WHERE path GLOB 'spry.d/entry/**/*.auto.json';
+  WHERE path GLOB 'spry.d/auto/entry/**/*.auto.json';

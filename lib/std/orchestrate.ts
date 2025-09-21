@@ -898,11 +898,12 @@ export class Workflow {
     protected async dropInEntryAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
-        const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
+        const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
+            this.stores;
         const entryAnns = await this.entryAnnotations(true);
         for (const a of entryAnns.valid) {
             const webPath = this.pp.webPaths.absolute(a.we.entry);
-            await spryDistJsonStore.write(
+            await spryDistAutoJsonStore.write(
                 join("entry", webPath + ".auto.json"),
                 { ...a.entryAnn, webPath, ".source": a.ann.anns },
                 // don't store absFsPath because it will be different across systems
@@ -972,9 +973,10 @@ export class Workflow {
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
         const routeAnns = await this.routeAnnotations(true);
-        const { spryDistStores: { json: spryDistJsonStore } } = this.stores;
+        const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
+            this.stores;
         for (const a of routeAnns.valid) {
-            await spryDistJsonStore.write(
+            await spryDistAutoJsonStore.write(
                 join("route", a.routeAnn.path + ".auto.json"),
                 { ...a.routeAnn, ".source": a.ann.anns },
             );
@@ -989,11 +991,11 @@ export class Workflow {
         const { serializers, breadcrumbs, forest, edges } = await routes
             .populate();
 
-        await spryDistJsonStore.write(
+        await spryDistAutoJsonStore.write(
             join("route", "forest.auto.json"),
             forest,
         );
-        await spryDistJsonStore.write(
+        await spryDistAutoJsonStore.write(
             join("route", "edges.auto.json"),
             edges,
         );
@@ -1003,7 +1005,7 @@ export class Workflow {
 
         this.orchMD.h2("Breadcrumbs");
         for (const [path, node] of Object.entries(breadcrumbs)) {
-            await spryDistJsonStore.write(
+            await spryDistAutoJsonStore.write(
                 join("breadcrumbs", path + ".auto.json"),
                 node,
             );
@@ -1055,15 +1057,15 @@ export class Workflow {
                 md.code("json", JSON.stringify(lr.data, null, 2));
             });
         }
-        this.stores.spryDistStores.polyglot.writeText(
+        this.stores.spryDistAutoStores.polyglot.writeText(
             "orchestrated.auto.md",
             this.orchMD.write(),
         );
     }
 
-    async orchestrate(init?: { clean?: boolean }) {
+    async orchestrate(init?: { cleanAuto?: boolean }) {
         const stores = this.stores;
-        if (init?.clean) await this.plan.clean(stores);
+        if (init?.cleanAuto) await this.plan.clean(stores);
 
         await this.dropInAnnotations();
         await this.captureExecutables();
@@ -1171,9 +1173,19 @@ export class Plan {
         );
     }
 
-    spryDistStores<Path extends string>() {
+    spryDropInStores<Path extends string>() {
         const polyglot = new Store<Path>(
             normalize(join(this.pp.projectSrcFsPaths.root, "spry.d")),
+        );
+        return {
+            polyglot,
+            json: new JsonStore(polyglot, undefined, { pretty: true }),
+        };
+    }
+
+    spryDistAutoStores<Path extends string>() {
+        const polyglot = new Store<Path>(
+            normalize(join(this.pp.projectSrcFsPaths.root, "spry.d", "auto")),
         );
         return {
             polyglot,
@@ -1198,15 +1210,27 @@ export class Plan {
     stores() {
         const orchStore = this.orchStore();
         const srcStore = this.srcStore();
-        const spryDistStores = this.spryDistStores();
+        const spryDropInStores = this.spryDropInStores();
+        const spryDistAutoStores = this.spryDistAutoStores();
         return {
-            spryDistStores,
+            spryDropInStores,
+            spryDistAutoStores,
             orchStore,
             srcStore,
         };
     }
 
     async clean(stores = this.stores()) {
+        const rmDirIfEmpty = async (path: string) => {
+            try {
+                if ((await Array.fromAsync(Deno.readDir(path))).length === 0) {
+                    await Deno.remove(path);
+                }
+            } catch (error) {
+                if (error instanceof Deno.errors.NotFound) { /**ignore */ }
+            }
+        };
+
         const rmDirRecursive = async (path: string) => {
             try {
                 await Deno.remove(path, { recursive: true });
@@ -1215,7 +1239,11 @@ export class Plan {
             }
         };
 
-        await rmDirRecursive(stores.spryDistStores.polyglot.destRoot);
+        // we "own" the "spry.d/auto" directory so remove it
+        await rmDirRecursive(stores.spryDistAutoStores.polyglot.destRoot);
+
+        // if `auto` was the only directory in `spry.d`, remove that too
+        rmDirIfEmpty(stores.spryDropInStores.polyglot.destRoot);
     }
 
     async workflow(cliOpts?: SafeCliArgs) {
@@ -1408,7 +1436,7 @@ export class CLI {
                     ).then(() => console.warn(`Removed ${opts.dbName}`));
                 }
                 const workflow = await this.plan.workflow(opts);
-                await workflow.orchestrate({ clean: true });
+                await workflow.orchestrate({ cleanAuto: true });
                 return await Array.fromAsync(
                     new SQL(this.plan).deploy(),
                 );
@@ -1492,7 +1520,7 @@ export class CLI {
             .description("Perform orchestration (annotations, routes, capexes)")
             .action(async (opts) => {
                 await (await this.plan.workflow(opts)).orchestrate({
-                    clean: true,
+                    cleanAuto: true,
                 });
             })
             .command("help", new HelpCommand().global())
