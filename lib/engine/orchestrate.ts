@@ -11,12 +11,7 @@ import { omitPathsReplacer } from "../universal/json.ts";
 import { MarkdownStore } from "../universal/markdown.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
 import { inlinedSQL } from "../universal/sql-text.ts";
-import {
-    Annotations,
-    Routes,
-    SpryEntryAnnotation,
-    SpryRouteAnnotation,
-} from "./annotations.ts";
+import { Annotations } from "./annotations.ts";
 import { CapExecs, SpryCapExecEntryAnnotation } from "./cap-exec.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
@@ -28,6 +23,11 @@ import {
     Walkers,
     WalkSpec,
 } from "./walk.ts";
+import {
+    Routes,
+    SpryEntryAnnotation,
+    SpryRouteAnnotation,
+} from "./anno/mod.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
