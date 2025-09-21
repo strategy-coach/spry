@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run -A 
 
 import { fromFileUrl } from "jsr:@std/path@1";
-import * as o from "../../../lib/std/orchestrate.ts";
+import * as o from "../../../lib/engine/mod.ts";
 
 export class EndToEndTestPrime extends o.Plan {
   constructor() {
