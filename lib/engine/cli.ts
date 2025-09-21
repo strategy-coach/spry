@@ -1,12 +1,22 @@
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
-import { dim } from "jsr:@std/fmt@1/colors";
+import {
+    bold,
+    brightYellow,
+    cyan,
+    gray,
+    green,
+    red,
+    yellow,
+} from "jsr:@std/fmt@1/colors";
 import { join, relative } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import Table from "npm:cli-table3@0.6.5";
 import { Annotations } from "./annotations.ts";
 import { Plan, SQL } from "./orchestrate.ts";
 import * as sqldx from "./sqlitedx.ts";
+import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
+import { SpryEntryAnnotation, SpryRouteAnnotation } from "./anno/mod.ts";
 
 export type SafeCliArgs = {
     dbName?: string;
@@ -70,29 +80,71 @@ export class CLI {
         return { spryStd, sqlPage, created, removed, linked };
     }
 
+    lsNatureField<
+        Row extends { nature: SpryEntryAnnotation["nature"] },
+    >(): Partial<ColumnDef<Row, SpryEntryAnnotation["nature"]>> {
+        return {
+            header: "Nature",
+            format: (v) =>
+                v === "action"
+                    ? green(v)
+                    : v === "sql"
+                    ? yellow(v)
+                    : v === "cap-exec"
+                    ? brightYellow(v)
+                    : cyan(v),
+        };
+    }
+
+    lsPathField<
+        Row extends { nature: SpryEntryAnnotation["nature"]; error?: string },
+    >(): Partial<ColumnDef<Row, string>> {
+        return {
+            header: "Path",
+            format: (supplied) => {
+                const p = relative(Deno.cwd(), supplied);
+                const i = p.lastIndexOf("/");
+                return i < 0
+                    ? bold(p)
+                    : gray(p.slice(0, i + 1)) + bold(p.slice(i + 1));
+            },
+            rules: [{
+                when: (_v, r) => (r.error?.trim().length ?? 0) > 0,
+                color: red,
+            }, {
+                when: (_v, r) => r.nature === "cap-exec",
+                color: brightYellow,
+            }],
+        };
+    }
+
+    lsLintField<Row extends { error: string }>():
+        | Partial<ColumnDef<Row, string>>
+        | undefined {
+        return {
+            header: "Lint Message",
+            defaultColor: gray,
+            format: (v) => v.length > 0 ? `⛔ ${v}` : "✓",
+            rules: [{ when: (v) => v.trim().length > 0, color: red }],
+        };
+    }
+
     async ls() {
         const workflow = await this.plan.workflow();
-        const entries = await workflow.entryAnnotations();
-        const table = new Table({
-            head: ["", "Nature", "Path", "Ann Error"],
-        });
-        for (const ea of entries.issues) {
-            table.push([
-                ea.ann.found ? "📝" : dim("❔"),
-                dim("unknown"),
-                ea.we.entry.path,
-                ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
-            ]);
-        }
-        for (const ea of entries.valid) {
-            table.push([
-                ea.ann.found ? "📝" : dim("❔"),
-                ea.entryAnn.nature,
-                ea.we.entry.path,
-                ea.ann.error ? z.prettifyError(ea.ann.error) : "?",
-            ]);
-        }
-        console.log(table.toString());
+        const list = (await workflow.entryAnnotations()).valid.map((ea) => ({
+            nature: ea.entryAnn.nature,
+            path: ea.we.entry.path,
+            error: ea.ann.error ? z.prettifyError(ea.ann.error) : "",
+        }));
+        await new ListerBuilder<typeof list[number]>()
+            .declareColumns("nature", "path", "error")
+            .from(list)
+            .field("nature", "nature", this.lsNatureField())
+            .field("path", "path", this.lsPathField())
+            .field("error", "error", this.lsLintField())
+            .sortBy("path").sortDir("asc")
+            .build()
+            .ls(true);
     }
 
     async lsAnnotations(_opts: { json?: boolean }) {

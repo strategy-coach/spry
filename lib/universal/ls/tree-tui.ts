@@ -21,8 +21,7 @@ import {
     type Iterish,
     ListerBuilder,
     ObjectLister,
-    SmartListerBuilder,
-} from "./lister-tui.ts";
+} from "./tabular-tui.ts";
 
 /* ------------------------------------------------------------------------------------------------
  * Types & helpers
@@ -497,17 +496,6 @@ if (import.meta.main) {
             .sortDir("asc");
 
         await base.build().ls(true);
-    }
-
-    // -------------------- 2) SmartListerBuilder --------------------
-    console.log(
-        "\n" + "—".repeat(6) + " SmartListerBuilder (auto) " + "—".repeat(6),
-    );
-    {
-        const smart = SmartListerBuilder.fromRows(docsData);
-        const b = await smart.toBuilder();
-        // refine: put 'title' (auto-id "title") first, and show a few cols
-        await b.select("title", "bytes", "updatedAt", "path").build().ls(true);
     }
 
     // -------------------- 3) TreeLister (by path, glyphs at NAME) --------------------
