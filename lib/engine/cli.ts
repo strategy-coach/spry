@@ -16,7 +16,7 @@ import { Annotations } from "./annotations.ts";
 import { Plan, SQL } from "./orchestrate.ts";
 import * as sqldx from "./sqlitedx.ts";
 import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
-import { SpryEntryAnnotation, SpryRouteAnnotation } from "./anno/mod.ts";
+import { SpryEntryAnnotation } from "./anno/mod.ts";
 
 export type SafeCliArgs = {
     dbName?: string;
