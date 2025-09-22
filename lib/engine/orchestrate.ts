@@ -7,7 +7,6 @@ import {
     sqliteTable,
     text,
 } from "npm:drizzle-orm@0.44.5/sqlite-core";
-import { omitPathsReplacer } from "../universal/json.ts";
 import { MarkdownStore } from "../universal/markdown.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
 import { inlinedSQL } from "../universal/sql-text.ts";
@@ -184,17 +183,20 @@ export class Workflow {
         type base = {
             we: Workflow["annsCatalog"][number]["walkEntry"];
             ann: Workflow["annsCatalog"][number]["entryAnn"];
+            webPath: string;
         };
         const entryAnns: (base & {
             entryAnn: SpryEntryAnnotation;
         })[] = [];
         const issues: base[] = [];
         for (const a of this.annsCatalog) {
+            const webPath = this.pp.webPaths.absolute(a.walkEntry.entry);
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
                 entryAnns.push({
                     we: a.walkEntry,
                     ann: a.entryAnn,
                     entryAnn: a.entryAnn.parsed,
+                    webPath,
                 });
                 if (lint) this.lintEntryAnn(a.entryAnn.parsed, a.walkEntry);
             } else if (a.entryAnn.found > 0) {
@@ -210,7 +212,7 @@ export class Workflow {
                         severity: "error",
                     });
                 } else {
-                    issues.push({ we: a.walkEntry, ann: a.entryAnn });
+                    issues.push({ we: a.walkEntry, ann: a.entryAnn, webPath });
                 }
             }
         }
@@ -220,17 +222,23 @@ export class Workflow {
     protected async dropInEntryAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
+        // don't store absFsPath because it will be different across systems
+        // making it harder to store in Git (because it will show diffs)
+        const omitNonIdempotent = (k: unknown, v: unknown) =>
+            k === "absFsPath" || k === "origin" ? undefined : v;
+
         const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
             this.stores;
         const entryAnns = await this.entryAnnotations(true);
         for (const a of entryAnns.valid) {
-            const webPath = this.pp.webPaths.absolute(a.we.entry);
             await spryDistAutoJsonStore.write(
-                join("entry", webPath + ".auto.json"),
-                { ...a.entryAnn, webPath, ".source": a.ann.anns },
-                // don't store absFsPath because it will be different across systems
-                // making it harder to store in Git (because it will show diffs)
-                omitPathsReplacer(a.entryAnn, [["absFsPath"]]),
+                join("entry", a.webPath + ".auto.json"),
+                {
+                    ...a.entryAnn,
+                    webPath: a.webPath,
+                    ".provenance": a.ann.anns,
+                },
+                omitNonIdempotent,
             );
             annotated.add({
                 root: a.we.origin.paths.identity,
@@ -240,10 +248,20 @@ export class Workflow {
         }
         await spryDistAutoJsonStore.write(
             join("entry", "entries.auto.json"),
-            entryAnns.valid,
-            // don't store absFsPath because it will be different across systems
-            // making it harder to store in Git (because it will show diffs)
-            (k, v) => k === "absFsPath" || k === "origin" ? undefined : v,
+            entryAnns.valid.map((ea) => ({
+                ...ea.entryAnn,
+                webPath: ea.webPath,
+                ".provenance": {
+                    path: relative(Deno.cwd(), ea.we.entry.path),
+                    src: ea.ann.anns,
+                },
+            })),
+            omitNonIdempotent,
+        );
+        await spryDistAutoJsonStore.write(
+            join("entry", "issues.auto.json"),
+            entryAnns.issues,
+            omitNonIdempotent,
         );
     }
 
@@ -307,7 +325,7 @@ export class Workflow {
         for (const a of routeAnns.valid) {
             await spryDistAutoJsonStore.write(
                 join("route", a.routeAnn.path + ".auto.json"),
-                { ...a.routeAnn, ".source": a.ann.anns },
+                { ...a.routeAnn, ".provenance": a.ann.anns },
             );
             annotated.add({
                 root: a.we.origin.paths.identity,
@@ -612,10 +630,11 @@ const spryDistDocs = new MarkdownStore<"README.md">();
 const spryDistAutoReadme = (_plan: Plan) => {
     const md = spryDistDocs.markdown("README.md");
     md.h1("Spry Dropin Annotations and Routes");
-    md.pTag`After Route annotations are parsed and validated, the following are created:`;
+    md.pTag`After annotations are parsed and validated, Spry generates the following in \`spry.d/auto\`:`;
     md.li("`breadcrumbs/` directory contains computed \"breadcrumbs\" for each node in `forest.auto.json`.")
-    md.li("`entry/` directory contains parsed @spry.* annotation for each route / endpoint individually.")
-    md.li("[`entry/entries.auto.md`](orchestrated.auto.md) is a single JSON array of all annotated @spry.* entries")
+    md.li("`entry/` directory contains parsed `@spry.*` annotation for each route / endpoint individually.")
+    md.li("[`entry/entries.auto.json`](entry/entries.auto.json) is a single JSON array of all annotated `@spry.*` entries")
+    md.li("[`entry/issues.auto.md`](entry/issues.auto.json) is a single JSON array of all errors found in annotated `@spry.*` entries (will be an empty array if no issues found)")
     md.li("[`orchestrated.auto.md`](orchestrated.auto.md) is a human-readable summary of orchestration (`build`) results.")
     md.li("`route/` directory contains route annotations JSON for each route / endpoint individually.")
     md.li("[`route/edges.auto.json`](route/edges.auto.json) contains route edges to conveniently build graph with `forest.auto.json`.")
