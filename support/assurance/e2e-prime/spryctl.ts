@@ -17,6 +17,6 @@ if (import.meta.main) {
   if (Deno.args.length > 0) {
     await new o.CLI(e2e).cli().parse(Deno.args);
   } else {
-    await new o.SQL(e2e).toStdOut();
+    await new o.DeploySQL(e2e).toStdOut();
   }
 }

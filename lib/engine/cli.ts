@@ -13,7 +13,7 @@ import { join, relative } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import Table from "npm:cli-table3@0.6.5";
 import { Annotations } from "./annotations.ts";
-import { Plan, SQL } from "./orchestrate.ts";
+import { DeploySQL, Plan } from "./orchestrate.ts";
 import * as sqldx from "./sqlitedx.ts";
 import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
 import { SpryEntryAnnotation } from "./anno/mod.ts";
@@ -176,12 +176,16 @@ export class CLI {
         switch (opts.target) {
             case "head":
                 console.log(
-                    await Array.fromAsync(new SQL(this.plan).headSqlSources()),
+                    await Array.fromAsync(
+                        new DeploySQL(this.plan).headSqlSources(),
+                    ),
                 );
                 break;
             case "tail":
                 console.log(
-                    await Array.fromAsync(new SQL(this.plan).tailSqlSources()),
+                    await Array.fromAsync(
+                        new DeploySQL(this.plan).tailSqlSources(),
+                    ),
                 );
                 break;
         }
@@ -261,7 +265,7 @@ export class CLI {
                 const workflow = await this.plan.workflow(opts);
                 await workflow.orchestrate({ cleanAuto: true });
                 return await Array.fromAsync(
-                    new SQL(this.plan).deploy(),
+                    new DeploySQL(this.plan).deploy(),
                 );
             }, {
                 onInit: true,
@@ -285,26 +289,25 @@ export class CLI {
         switch (opts.target) {
             case "head":
                 console.log(
-                    (await Array.fromAsync(new SQL(this.plan).headSQL())).join(
-                        "\n",
-                    ),
+                    (await Array.fromAsync(new DeploySQL(this.plan).headSQL()))
+                        .join("\n"),
                 );
                 break;
             case "tail":
                 console.log(
-                    (await Array.fromAsync(new SQL(this.plan).tailSQL())).join(
-                        "\n",
-                    ),
+                    (await Array.fromAsync(new DeploySQL(this.plan).tailSQL()))
+                        .join("\n"),
                 );
                 break;
             case "sqlpage-files":
                 console.log(
-                    (await Array.fromAsync(new SQL(this.plan).seedInserts()))
-                        .join("\n"),
+                    (await Array.fromAsync(
+                        new DeploySQL(this.plan).seedInserts(),
+                    )).join("\n"),
                 );
                 break;
             case "deploy":
-                await new SQL(this.plan).toStdOut();
+                await new DeploySQL(this.plan).toStdOut();
                 break;
             default:
                 console.warn(`Unknown target '${opts.target}'`);

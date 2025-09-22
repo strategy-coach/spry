@@ -403,7 +403,7 @@ export class Workflow {
     }
 }
 
-export class SQL {
+export class DeploySQL {
     constructor(readonly plan: Plan) {
     }
 
