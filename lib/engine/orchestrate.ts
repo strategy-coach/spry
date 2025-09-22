@@ -238,6 +238,13 @@ export class Workflow {
                 count: a.ann.found,
             });
         }
+        await spryDistAutoJsonStore.write(
+            join("entry", "entries.auto.json"),
+            entryAnns.valid,
+            // don't store absFsPath because it will be different across systems
+            // making it harder to store in Git (because it will show diffs)
+            (k, v) => k === "absFsPath" || k === "origin" ? undefined : v,
+        );
     }
 
     async routeAnnotations(lint = false) {
@@ -340,6 +347,11 @@ export class Workflow {
                     "\n",
                 ),
             ]),
+        );
+
+        await this.stores.spryDistAutoStores.polyglot.writeText(
+            "README.md",
+            spryDistAutoReadme(this.plan).write(),
         );
 
         return routeAnns;
@@ -593,3 +605,23 @@ export class Plan {
         return await Workflow.build(this, cliOpts);
     }
 }
+
+const spryDistDocs = new MarkdownStore<"README.md">();
+
+// deno-fmt-ignore
+const spryDistAutoReadme = (_plan: Plan) => {
+    const md = spryDistDocs.markdown("README.md");
+    md.h1("Spry Dropin Annotations and Routes");
+    md.pTag`After Route annotations are parsed and validated, the following are created:`;
+    md.li("`breadcrumbs/` directory contains computed \"breadcrumbs\" for each node in `forest.auto.json`.")
+    md.li("`entry/` directory contains parsed @spry.* annotation for each route / endpoint individually.")
+    md.li("[`entry/entries.auto.md`](orchestrated.auto.md) is a single JSON array of all annotated @spry.* entries")
+    md.li("[`orchestrated.auto.md`](orchestrated.auto.md) is a human-readable summary of orchestration (`build`) results.")
+    md.li("`route/` directory contains route annotations JSON for each route / endpoint individually.")
+    md.li("[`route/edges.auto.json`](route/edges.auto.json) contains route edges to conveniently build graph with `forest.auto.json`.")
+    md.li("[`route/forest.auto.json`](route/forest.auto.json) contains complete route roots and descendants in a single JSON object.")
+    md.p("");
+    md.p("TODO:")
+    md.li("need to store the JSON Schemas for each of the above as well (the code is written already)")
+    return md;
+};

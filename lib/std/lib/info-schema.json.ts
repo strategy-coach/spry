@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run -A 
 
-// @spry.nature cap-exec @spry.dependsOn db-after-build
+// @spry.nature cap-exec @spry.dependsOn db-after-build @spry.isCleanable
 
 import { SqliteAide } from "../../engine/cap-exec/mod.ts";
 
