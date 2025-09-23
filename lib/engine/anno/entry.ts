@@ -3,6 +3,10 @@ import { z } from "jsr:@zod/zod@4";
 const spryEntryAnnCommon = {
     absFsPath: z.string(),
     relFsPath: z.string(),
+    webPath: z.string(),
+    isSystemGenerated: z.boolean().describe(
+        "Virtual entries are not annotated by a user but created by the system",
+    ),
     documentation: z.json().optional(),
 };
 

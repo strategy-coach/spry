@@ -66,8 +66,10 @@ export function projectPaths(moduleHome: string, sprySymlinkDest: string) {
         projectSrcFsPaths,
         webPaths,
         spryDropIn: {
-            home: resolve(projectSrcFsPaths.root, "spry.d"),
-            auto: resolve(projectSrcFsPaths.root, "spry.d", "auto"),
+            fsHome: resolve(projectSrcFsPaths.root, "spry.d"),
+            fsAuto: resolve(projectSrcFsPaths.root, "spry.d", "auto"),
+            webHome: join("spry.d"),
+            webAuto: join("spry.d", "auto"),
         },
         spryStd: {
             homeFromSymlink: relative(

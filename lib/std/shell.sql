@@ -33,48 +33,49 @@ SELECT 'shell' AS component,
        'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/json.min.js' AS javascript,
        json_object(
               'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/docs/index.sql',
-              'title', 'Docs',
-              'submenu', (
-                  SELECT json_group_array(
-                      json_object(
-                          'title', title,
-                          'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || link,
-                          'description', description
-                      )
-                  )
-                  FROM (
-                      SELECT
-                          COALESCE(abbreviated_caption, caption) as title,
-                          COALESCE(url, path_href) as link,
-                          description
-                      FROM spry_route
-                      WHERE path_href = '/spry/docs'
-                      ORDER BY sibling_order
-                  )
-              )
+              'title', 'Docs'
+            --   'submenu', (
+            --       SELECT json_group_array(
+            --           json_object(
+            --               'title', title,
+            --               'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || link,
+            --               'description', description
+            --           )
+            --       )
+            --       FROM (
+            --           SELECT
+            --               COALESCE(abbreviated_caption, caption) as title,
+            --               COALESCE(url, path_href) as link,
+            --               description
+            --           FROM spry_route
+            --           WHERE path_href = '/spry/docs'
+            --           ORDER BY sibling_order
+            --       )
+            --   )
           ) as menu_item,       
        json_object(
               'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') ||'/console',
-              'title', 'Console',
-              'submenu', (
-                  SELECT json_group_array(
-                      json_object(
-                          'title', title,
-                          'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || link,
-                          'description', description
-                      )
-                  )
-                  FROM (
-                      SELECT
-                          COALESCE(abbreviated_caption, caption) as title,
-                          COALESCE(url, path_href) as link,
-                          description
-                      FROM spry_route
-                      WHERE path_href = '/spry/console'
-                      ORDER BY sibling_order
-                  )
-              )
+              'title', 'Console'
+            --   'submenu', (
+            --       SELECT json_group_array(
+            --           json_object(
+            --               'title', title,
+            --               'link', COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || link,
+            --               'description', description
+            --           )
+            --       )
+            --       FROM (
+            --           SELECT
+            --               COALESCE(abbreviated_caption, caption) as title,
+            --               COALESCE(url, path_href) as link,
+            --               description
+            --           FROM spry_route
+            --           WHERE path_href = '/spry/console'
+            --           ORDER BY sibling_order
+            --       )
+            --   )
           ) as menu_item,       
-       'Spry BaaS v0.0.1 Web UI ([SQLPage v' || sqlpage.version() || '](https://sql-page.com/documentation.sql)) ' || '📄 [' || substr(sqlpage.path(), 2) || '](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/console/sqlpage-files/sqlpage-file.sql?path=' || substr(sqlpage.path(), LENGTH(COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) + 2 ) || ')' as footer;
+       'Spry BaaS v0.0.1 Web UI ([SQLPage v' || sqlpage.version() || '](https://sql-page.com/documentation.sql)) ' || '📄 [' || substr(sqlpage.path(), 2) || '](' || COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '') || '/spry/console/sqlpage-files/sqlpage-file.sql?path=' || substr(sqlpage.path(), LENGTH(COALESCE(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX'), '')) + 2 ) || ')' as footer;
 
 SELECT 'text' AS component, sqlpage.path() as contents;
+

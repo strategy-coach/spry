@@ -16,6 +16,9 @@ import {
 } from "./anno/mod.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
 import { EncountersSupplier, Walkers } from "./walk.ts";
+import { CapExecs } from "./cap-exec.ts";
+import { Linter } from "./lint.ts";
+import { Workflow } from "./orchestrate.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -32,12 +35,22 @@ export class Annotations {
         readonly projectModule: FsPathSupplier,
         readonly webPaths: PathSupplier,
         readonly init?: {
-            readonly transformEntryAnn?: (
-                enc: SpryEntryAnnotation,
-            ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
-            readonly transformRouteAnn?: (
-                enc: SpryRouteAnnotation,
-            ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>;
+            readonly transformEntryAnn?: {
+                onNotFound?: () =>
+                    | SpryEntryAnnotation
+                    | Promise<SpryEntryAnnotation>;
+                onFound?: (
+                    supplied: SpryEntryAnnotation,
+                ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
+            };
+            readonly transformRouteAnn?: {
+                onNotFound?: () =>
+                    | SpryRouteAnnotation
+                    | Promise<SpryRouteAnnotation>;
+                onFound?: (
+                    supplied: SpryRouteAnnotation,
+                ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>;
+            };
         },
     ) {
         this.annotatable = Walkers.builder()
@@ -64,7 +77,21 @@ export class Annotations {
         catalog: Awaited<
             ReturnType<typeof extractAnnotationsFromText<Payload>>
         >,
-        transform?: (supplied: z.input<S>) => z.input<S> | Promise<z.input<S>>,
+        transform?: {
+            onNotFound?: () =>
+                | z.input<S>
+                | Promise<z.input<S>>
+                | undefined
+                | Promise<undefined>;
+            beforeParse?: (
+                supplied: z.input<S>,
+            ) => z.input<S> | Promise<z.input<S>>;
+            onError?: (supplied: z.core.input<S>) =>
+                | z.input<S>
+                | Promise<z.input<S>>
+                | undefined
+                | Promise<undefined>;
+        },
         defaults?: Partial<z.input<S>>,
     ) {
         const prefixedItems = catalog.items
@@ -74,7 +101,13 @@ export class Annotations {
         );
         const found = entries.length;
         if (found == 0) {
-            return { parsed: undefined, error: undefined, found };
+            return {
+                parsed: transform?.onNotFound
+                    ? await transform.onNotFound()
+                    : undefined,
+                error: undefined,
+                found,
+            };
         }
 
         const anns = Object.fromEntries(
@@ -88,31 +121,63 @@ export class Annotations {
             ...Object.fromEntries(entries),
         } as z.input<S>;
         const result = schema.safeParse(
-            transform ? await transform(grouped) : grouped,
+            transform?.beforeParse
+                ? await transform.beforeParse(grouped)
+                : grouped,
         );
 
         return result.success
             ? { parsed: result.data, error: undefined, found, anns }
-            : { parsed: undefined, error: result.error, found, anns };
+            : {
+                parsed: transform?.onError
+                    ? await transform.onError(grouped)
+                    : undefined,
+                error: result.error,
+                found,
+                anns,
+            };
+    }
+
+    static defaultPageEntryAnn(
+        we: YieldOf<Annotations["sources"]>,
+        webPaths: PathSupplier,
+        isSystem: boolean,
+    ) {
+        return {
+            nature: "page",
+            absFsPath: we.entry.path,
+            relFsPath: we.origin.paths.relative(we.entry),
+            webPath: webPaths.absolute(we.entry),
+            isSystemGenerated: isSystem,
+        } as SpryEntryAnnotation;
     }
 
     static async entryAnnFromCatalog(
         we: YieldOf<Annotations["sources"]>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
-        transformEntryAnn?: (
-            enc: SpryEntryAnnotation,
-        ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>,
+        webPaths: PathSupplier,
+        transform?: {
+            onNotFound?: () =>
+                | SpryEntryAnnotation
+                | Promise<SpryEntryAnnotation>
+                | undefined
+                | Promise<undefined>;
+            onFound?: (
+                supplied: SpryEntryAnnotation,
+            ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
+            onError?: () =>
+                | SpryEntryAnnotation
+                | Promise<SpryEntryAnnotation>
+                | undefined
+                | Promise<undefined>;
+        },
     ) {
         return await Annotations.safeAnnGroup(
             spryEntryAnnSchema,
             "spry.",
             anns,
-            transformEntryAnn,
-            {
-                "nature": "page",
-                "absFsPath": we.entry.path,
-                "relFsPath": we.origin.paths.relative(we.entry),
-            },
+            transform,
+            Annotations.defaultPageEntryAnn(we, webPaths, false),
         );
     }
 
@@ -120,9 +185,21 @@ export class Annotations {
         we: YieldOf<Annotations["sources"]>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
         webpaths: ReturnType<typeof projectPaths>["webPaths"],
-        transformRouteAnn?: (
-            enc: SpryRouteAnnotation,
-        ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>,
+        transform?: {
+            onNotFound?: () =>
+                | SpryRouteAnnotation
+                | undefined
+                | Promise<SpryRouteAnnotation>
+                | Promise<undefined>;
+            onFound?: (
+                supplied: SpryRouteAnnotation,
+            ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>;
+            onError?: () =>
+                | SpryRouteAnnotation
+                | undefined
+                | Promise<SpryRouteAnnotation>
+                | Promise<undefined>;
+        },
     ) {
         const pathBasename = basename(we.entry.path);
         const webPath = webpaths.absolute(we.entry);
@@ -130,7 +207,7 @@ export class Annotations {
             spryRouteAnnSchema,
             "route.",
             anns,
-            transformRouteAnn,
+            transform,
             {
                 "path": webPath,
                 "pathBasename": pathBasename,
@@ -159,23 +236,101 @@ export class Annotations {
                     },
                 );
 
+                const routeAnn = await Annotations.routeAnnFromCatalog(
+                    we,
+                    anns,
+                    this.webPaths,
+                    this.init?.transformRouteAnn,
+                );
+
+                const entryAnn = await Annotations.entryAnnFromCatalog(
+                    we,
+                    anns,
+                    this.webPaths,
+                    this.init?.transformEntryAnn
+                        ? this.init?.transformEntryAnn
+                        : {
+                            // if no entry was found or the entry has an error but we have a route then let's create
+                            // a default system entry of type "page"
+                            onNotFound: () =>
+                                routeAnn.found > 0
+                                    ? Annotations.defaultPageEntryAnn(
+                                        we,
+                                        this.webPaths,
+                                        true,
+                                    )
+                                    : undefined,
+                            onError: () =>
+                                routeAnn.found > 0
+                                    ? Annotations.defaultPageEntryAnn(
+                                        we,
+                                        this.webPaths,
+                                        true,
+                                    )
+                                    : undefined,
+                        },
+                );
+
                 yield {
                     walkEntry: we,
                     annotations: anns,
-                    entryAnn: await Annotations.entryAnnFromCatalog(
-                        we,
-                        anns,
-                        this.init?.transformEntryAnn,
-                    ),
-                    routeAnn: await Annotations.routeAnnFromCatalog(
-                        we,
-                        anns,
-                        this.webPaths,
-                        this.init?.transformRouteAnn,
-                    ),
+                    entryAnn,
+                    routeAnn,
                 };
             } catch (err) {
                 console.error(we.origin.paths.relative(we.entry), err);
+            }
+        }
+    }
+
+    async lint(
+        catalog: Workflow["annsCatalog"],
+        lintr: ReturnType<Linter["lintResults"]>,
+    ) {
+        for await (const a of catalog) {
+            const content = a.walkEntry.origin.paths.relative(
+                a.walkEntry.entry,
+            );
+            if (a.entryAnn.found > 0 && a.entryAnn.error) {
+                lintr.add({
+                    rule: "invalid-annotation",
+                    code: "entry",
+                    content,
+                    message: z.prettifyError(a.entryAnn.error),
+                    data: { annotation: a.entryAnn },
+                    severity: "error",
+                });
+            }
+
+            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
+                switch (a.entryAnn.parsed.nature) {
+                    case "cap-exec":
+                        if (!CapExecs.isExecutable(a.walkEntry.entry.path)) {
+                            lintr.add({
+                                rule: "invalid-cap-exec",
+                                code: "not-executable",
+                                content,
+                                message:
+                                    "Capturable executable does not appear to be executable",
+                                data: { annotation: a.entryAnn, error: null },
+                                severity: "warn",
+                            });
+                        }
+                        break;
+                }
+            }
+
+            if (a.routeAnn.found > 0 && a.routeAnn.error) {
+                lintr.add({
+                    rule: "invalid-annotation",
+                    code: "route",
+                    content: a.walkEntry.origin.paths.relative(
+                        a.walkEntry.entry,
+                    ),
+                    message: z.prettifyError(a.routeAnn.error),
+                    data: { annotation: a.routeAnn },
+                    severity: "error",
+                });
             }
         }
     }

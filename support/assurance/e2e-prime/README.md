@@ -90,6 +90,11 @@ applied to SQLPage’s distribution. Just be careful about putting things into
 
 WIP
 
+- [ ] Add flattened queries from Javascript as part of build process to allow
+      caching of content (use
+      [JMESPath](https://github.com/cloudydeno/jmespath)) or similar to allow
+      defining "tables" and JMESPath _searches_ which place files into
+      `spry.d/view/<table>.auto.json` and then this JSON can be used by SQLPage.
 - [ ] Add JSON Schema generator for each JSON passed through env to CapExecs and
       ensure that env has location of schema for validation, etc.
 - [ ] Add an optional SQLite state database for CapExecs to use all the

@@ -10,18 +10,29 @@ type Any = any;
  * No atomic temp/rename; just ensure dirs and write.
  */
 export class Store<I extends string> {
-    readonly destRoot: string;
+    readonly destFsRoot: string;
 
-    constructor(destRoot: string) {
-        this.destRoot = normalize(destRoot);
+    constructor(destRoot: string, readonly webPathRoot?: string) {
+        this.destFsRoot = normalize(destRoot);
+    }
+
+    webPath(relPath: string) {
+        return this.webPathRoot ? join(this.webPathRoot, relPath) : relPath;
     }
 
     /**
      * Write text content to a relative path (typed by I).
      * Returns the absolute path written.
      */
-    async writeText(relPath: I, text: string): Promise<string> {
-        const bytes = new TextEncoder().encode(text);
+    async writeText(
+        relPath: I,
+        text:
+            | string
+            | ((s: Store<I>) => string),
+    ): Promise<string> {
+        const bytes = new TextEncoder().encode(
+            typeof text === "string" ? text : text(this),
+        );
         return await this.writeBytes(relPath, bytes);
     }
 
@@ -48,7 +59,7 @@ export class Store<I extends string> {
         if (normRel.startsWith("../")) {
             throw new Error(`Path escapes store root: ${relPath}`);
         }
-        return normalize(join(this.destRoot, normRel));
+        return normalize(join(this.destFsRoot, normRel));
     }
 }
 

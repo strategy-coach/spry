@@ -72,8 +72,8 @@ export class CapExecs {
             CAPEXEC_PROJECT_HOME: this.plan.pp.projectFsPaths.root,
             CAPEXEC_PROJECT_ID: this.plan.pp.projectFsPaths.identity ?? "",
             CAPEXEC_PROJECT_SRC_HOME: this.plan.pp.projectSrcFsPaths.root,
-            CAPEXEC_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.home,
-            CAPEXEC_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.auto,
+            CAPEXEC_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.fsHome,
+            CAPEXEC_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.fsAuto,
             CAPEXEC_SOURCE_JSON: JSON.stringify(ce),
             CAPEXEC_AUTO_MATERIALIZE: ce.pfn.materialize.auto
                 ? "TRUE"
@@ -269,6 +269,7 @@ export class CapExecs {
                     const entryAnn = await Annotations.entryAnnFromCatalog(
                         cec,
                         anns,
+                        this.plan.pp.webPaths,
                     );
                     if (
                         entryAnn.parsed && entryAnn.parsed.nature === "cap-exec"

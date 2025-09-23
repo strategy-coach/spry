@@ -6,6 +6,6 @@ SELECT $path || ' Path' AS title, '#' AS link;
       SELECT 'title' AS component, $path AS contents;
       SELECT 'text' AS component,
              '```sql
-' || (select contents FROM sqlpage_files where path = $path) || '
+' || (select sqlpage.read_file_as_text('spry.d/auto/entry/entries.auto.json') as contents) || '
 ```' as contents_md;
             

@@ -16,17 +16,8 @@ import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
 import { JsonStore, Store } from "./storage.ts";
-import {
-    EncountersSupplier,
-    WalkEncounter,
-    Walkers,
-    WalkSpec,
-} from "./walk.ts";
-import {
-    Routes,
-    SpryEntryAnnotation,
-    SpryRouteAnnotation,
-} from "./anno/mod.ts";
+import { EncountersSupplier, Walkers } from "./walk.ts";
+import { Routes, SpryRouteAnnotation } from "./anno/mod.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -62,7 +53,7 @@ export function sqliteModels() {
     };
 }
 
-export class SqlPageFiles {
+export class SqlPageFilesTableInsertables {
     readonly candidates: EncountersSupplier;
 
     constructor(
@@ -156,72 +147,43 @@ export class Workflow {
         return this;
     }
 
-    // deno-lint-ignore require-await
-    async lintEntryAnn(
-        ea: SpryEntryAnnotation,
-        we: WalkEncounter<WalkSpec>,
+    protected async dropInEntryAnns(
+        annotated: Set<{ relPath: string; count: number }>,
     ) {
-        switch (ea.nature) {
-            case "cap-exec":
-                if (!CapExecs.isExecutable(we.entry.path)) {
-                    this.lintr.add({
-                        rule: "invalid-cap-exec",
-                        code: "not-executable",
-                        content: we.origin.paths.relative(we.entry),
-                        message:
-                            "Capturable executable does not appear to be executable",
-                        data: { annotation: ea, error: null },
-                        severity: "warn",
-                    });
-                }
-                break;
-        }
-    }
-
-    // deno-lint-ignore require-await
-    async entryAnnotations(lint = false) {
-        type base = {
-            we: Workflow["annsCatalog"][number]["walkEntry"];
-            ann: Workflow["annsCatalog"][number]["entryAnn"];
-            webPath: string;
-        };
-        const entryAnns: (base & {
-            entryAnn: SpryEntryAnnotation;
-        })[] = [];
-        const issues: base[] = [];
-        for (const a of this.annsCatalog) {
-            const webPath = this.pp.webPaths.absolute(a.walkEntry.entry);
-            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
-                entryAnns.push({
-                    we: a.walkEntry,
-                    ann: a.entryAnn,
-                    entryAnn: a.entryAnn.parsed,
-                    webPath,
-                });
-                if (lint) this.lintEntryAnn(a.entryAnn.parsed, a.walkEntry);
-            } else if (a.entryAnn.found > 0) {
-                if (lint) {
-                    this.lintr.add({
-                        rule: "invalid-annotation",
-                        code: "entry",
-                        content: a.walkEntry.origin.paths.relative(
-                            a.walkEntry.entry,
-                        ),
-                        message: "Invalid entry annotation",
-                        data: { annotation: a.entryAnn },
-                        severity: "error",
-                    });
-                } else {
-                    issues.push({ we: a.walkEntry, ann: a.entryAnn, webPath });
-                }
+        function* validEntryAnns(annsCatalog: YieldOf<
+            ReturnType<Plan["annotations"]>["catalog"]
+        >[]) {
+            for (const a of annsCatalog) {
+                if (
+                    a.entryAnn.parsed == undefined || a.entryAnn.parsed == null
+                ) continue;
+                yield {
+                    ...a.entryAnn.parsed,
+                    webPath: a.entryAnn.parsed.webPath,
+                    relFsPath: a.entryAnn.parsed.relFsPath,
+                    ...(a.routeAnn.found > 0 && a.routeAnn.parsed
+                        ? { route: a.routeAnn.parsed }
+                        : {}),
+                    ".provenance": {
+                        entry: {
+                            anns: a.entryAnn.anns,
+                            found: a.entryAnn.found,
+                            error: a.entryAnn.error,
+                        },
+                        ...(a.routeAnn.found > 0
+                            ? {
+                                route: {
+                                    anns: a.routeAnn.anns,
+                                    found: a.routeAnn.found,
+                                    error: a.routeAnn.error,
+                                },
+                            }
+                            : {}),
+                    },
+                };
             }
         }
-        return { valid: entryAnns, issues };
-    }
 
-    protected async dropInEntryAnns(
-        annotated: Set<{ root?: string; relPath: string; count: number }>,
-    ) {
         // don't store absFsPath because it will be different across systems
         // making it harder to store in Git (because it will show diffs)
         const omitNonIdempotent = (k: unknown, v: unknown) =>
@@ -229,38 +191,27 @@ export class Workflow {
 
         const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
             this.stores;
-        const entryAnns = await this.entryAnnotations(true);
-        for (const a of entryAnns.valid) {
-            await spryDistAutoJsonStore.write(
-                join("entry", a.webPath + ".auto.json"),
-                {
-                    ...a.entryAnn,
-                    webPath: a.webPath,
-                    ".provenance": a.ann.anns,
-                },
-                omitNonIdempotent,
-            );
-            annotated.add({
-                root: a.we.origin.paths.identity,
-                relPath: a.entryAnn.relFsPath,
-                count: a.ann.found,
-            });
+
+        const entryAnns = await Array.fromAsync(
+            validEntryAnns(this.annsCatalog),
+        );
+        for await (const a of entryAnns) {
+            if (a.webPath) {
+                await spryDistAutoJsonStore.write(
+                    join("entry", a.webPath + ".auto.json"),
+                    a,
+                    omitNonIdempotent,
+                );
+                annotated.add({
+                    relPath: a.relFsPath,
+                    count: a[".provenance"].entry.found,
+                });
+            }
         }
+
         await spryDistAutoJsonStore.write(
             join("entry", "entries.auto.json"),
-            entryAnns.valid.map((ea) => ({
-                ...ea.entryAnn,
-                webPath: ea.webPath,
-                ".provenance": {
-                    path: relative(Deno.cwd(), ea.we.entry.path),
-                    src: ea.ann.anns,
-                },
-            })),
-            omitNonIdempotent,
-        );
-        await spryDistAutoJsonStore.write(
-            join("entry", "issues.auto.json"),
-            entryAnns.issues,
+            entryAnns,
             omitNonIdempotent,
         );
     }
@@ -395,9 +346,10 @@ export class Workflow {
         );
     }
 
-    // deno-lint-ignore require-await
     async finalize() {
-        for (const lr of this.lintr.allFindings()) {
+        await this.annotations.lint(this.annsCatalog, this.lintr);
+        const lintResults = this.lintr.allFindings();
+        for (const lr of lintResults) {
             this.orchMD.section("Lint Results", (md) => {
                 md.p(
                     `[\`${lr.rule}\`] \`${lr.code}\`: ${lr.message} in ${lr.content}`,
@@ -405,7 +357,13 @@ export class Workflow {
                 md.code("json", JSON.stringify(lr.data, null, 2));
             });
         }
-        this.stores.spryDistAutoStores.polyglot.writeText(
+
+        await this.stores.spryDistAutoStores.json.write(
+            "lint-results.auto.json",
+            lintResults,
+        );
+
+        await this.stores.spryDistAutoStores.polyglot.writeText(
             "orchestrated.auto.md",
             this.orchMD.write(),
         );
@@ -534,7 +492,10 @@ export class Plan {
     }
 
     spryDropInStores<Path extends string>() {
-        const polyglot = new Store<Path>(this.pp.spryDropIn.home);
+        const polyglot = new Store<Path>(
+            this.pp.spryDropIn.fsHome,
+            this.pp.spryDropIn.webHome,
+        );
         return {
             polyglot,
             json: new JsonStore(polyglot, undefined, { pretty: true }),
@@ -542,7 +503,10 @@ export class Plan {
     }
 
     spryDistAutoStores<Path extends string>() {
-        const polyglot = new Store<Path>(this.pp.spryDropIn.auto);
+        const polyglot = new Store<Path>(
+            this.pp.spryDropIn.fsAuto,
+            this.pp.spryDropIn.webAuto,
+        );
         return {
             polyglot,
             json: new JsonStore(polyglot, undefined, { pretty: true }),
@@ -550,7 +514,10 @@ export class Plan {
     }
 
     sqlpageFiles() {
-        return new SqlPageFiles(this.pp.projectFsPaths, this.pp.webPaths);
+        return new SqlPageFilesTableInsertables(
+            this.pp.projectFsPaths,
+            this.pp.webPaths,
+        );
     }
 
     annotations() {
@@ -590,7 +557,7 @@ export class Plan {
         };
 
         // we "own" the "spry.d/auto" directory so remove it
-        await rmDirRecursive(stores.spryDistAutoStores.polyglot.destRoot);
+        await rmDirRecursive(stores.spryDistAutoStores.polyglot.destFsRoot);
 
         // handle cleanable Cap Execs
         const workflow = await this.workflow();
@@ -616,7 +583,7 @@ export class Plan {
         }
 
         // if `auto` was the only directory in `spry.d`, remove that too
-        rmDirIfEmpty(stores.spryDropInStores.polyglot.destRoot);
+        rmDirIfEmpty(stores.spryDropInStores.polyglot.destFsRoot);
     }
 
     async workflow(cliOpts?: SafeCliArgs) {
