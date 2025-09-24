@@ -9,7 +9,11 @@ import {
 } from "npm:drizzle-orm@0.44.5/sqlite-core";
 import { MarkdownStore } from "../universal/markdown.ts";
 import { provenanceText } from "../universal/reflect/provenance.ts";
-import { inlinedSQL } from "../universal/sql-text.ts";
+import {
+    inlinedSQL,
+    literal as literalSQL,
+    SQL,
+} from "../universal/sql-text.ts";
 import { Annotations } from "./annotations.ts";
 import { CapExecs } from "./cap-exec.ts";
 import { SafeCliArgs } from "./cli.ts";
@@ -77,6 +81,60 @@ export class SqlPageFilesTableInsertables {
     }
 }
 
+export const DEFAULT_VARS = {
+    spry_home: { descr: "Spry standard library content SQLPage web path" },
+    spryd_home: { descr: "Spry Drop-in content SQLPage home web path" },
+    spryd_auto_home: {
+        descr: "Spry Drop-in auto-generated content SQLPage home web path",
+    },
+    spryd_entries_home: {
+        descr:
+            "Spry Drop-in auto-generated entries annotation relaated SQLPage home web path",
+    },
+    spryd_entries_catalog_json_path: {
+        descr:
+            "Spry Drop-in auto-generated entries catalog JSON SQLPage web path",
+    },
+    spryd_entries_catalog_json: {
+        descr: "Spry Drop-in auto-generated entries catalog JSON content",
+    },
+    spryd_routes_home: {
+        descr:
+            "Spry Drop-in auto-generated routes, forests annotation relaated SQLPage home web path",
+    },
+} as const satisfies Record<string, { readonly descr: string }>;
+
+export class SqlPageGovernance<
+    V extends Record<string, { readonly descr: string }>,
+    Name extends keyof V & string = keyof V & string,
+> {
+    readonly variables = new Map<Name, string>();
+
+    constructor(readonly varsDefn: V) {
+    }
+
+    assignSQL(name: Name, sql: string | SQL) {
+        this.variables.set(
+            name,
+            typeof sql === "string" ? sql : sql.toString(),
+        );
+
+        // chainable
+        return this;
+    }
+
+    assignLiteral(name: Name, text: string) {
+        return this.assignSQL(name, literalSQL(text));
+    }
+
+    async *sqlPageStatements() {
+        for (const [name, sql] of this.variables.entries()) {
+            yield `\n-- ${this.varsDefn[name].descr}`;
+            yield `SET ${name} = ${sql};`;
+        }
+    }
+}
+
 export class Workflow {
     #workflowStep:
         | "INIT"
@@ -90,6 +148,7 @@ export class Workflow {
     readonly pp: Plan["pp"];
     readonly spf: ReturnType<Plan["sqlpageFiles"]>;
     readonly annotations: ReturnType<Plan["annotations"]>;
+    readonly spGovn = new SqlPageGovernance(DEFAULT_VARS);
 
     #annsCatalog?: YieldOf<
         ReturnType<Plan["annotations"]>["catalog"]
@@ -109,6 +168,17 @@ export class Workflow {
         this.stores = plan.stores();
         this.spf = plan.sqlpageFiles();
         this.annotations = plan.annotations();
+
+        this.spGovn.assignLiteral(
+            "spry_home",
+            this.stores.srcStore.webPath("spry"),
+        ).assignLiteral(
+            "spryd_home",
+            this.stores.srcStore.webPath("spry.d"),
+        ).assignLiteral(
+            "spryd_auto_home",
+            this.stores.spryDropInStores.polyglot.webPath("auto"),
+        );
     }
 
     static async build(plan: Plan, cliOpts?: SafeCliArgs) {
@@ -209,14 +279,27 @@ export class Workflow {
             }
         }
 
-        await spryDistAutoJsonStore.write(
+        this.spGovn.assignLiteral(
+            "spryd_entries_home",
+            this.stores.spryDistAutoStores.polyglot.webPath("entry"),
+        );
+
+        const { webPath: entriesJsonPath } = await spryDistAutoJsonStore.write(
             join("entry", "entries.auto.json"),
             entryAnns,
             omitNonIdempotent,
         );
+        this.spGovn.assignLiteral(
+            "spryd_entries_catalog_json_path",
+            entriesJsonPath,
+        );
+        this.spGovn.assignSQL(
+            "spryd_entries_catalog_json",
+            `sqlpage.read_file_as_text('${entriesJsonPath}')`,
+        );
     }
 
-    async routeAnnotations(lint = false) {
+    async routeAnnotations() {
         type base = {
             we: Workflow["annsCatalog"][number]["walkEntry"];
             ann: Workflow["annsCatalog"][number]["routeAnn"];
@@ -242,20 +325,7 @@ export class Workflow {
                 routeAnns.push(store);
                 routeAnnsByPath.set(store.routeAnn.path, store);
             } else if (a.routeAnn.found > 0) {
-                if (lint) {
-                    this.lintr.add({
-                        rule: "invalid-annotation",
-                        code: "route",
-                        content: a.walkEntry.origin.paths.relative(
-                            a.walkEntry.entry,
-                        ),
-                        message: "Invalid route annotation",
-                        data: { annotation: a.routeAnn },
-                        severity: "error",
-                    });
-                } else {
-                    issues.push({ we: a.walkEntry, ann: a.routeAnn });
-                }
+                issues.push({ we: a.walkEntry, ann: a.routeAnn });
             }
         }
 
@@ -270,7 +340,7 @@ export class Workflow {
     protected async dropInRouteAnns(
         annotated: Set<{ root?: string; relPath: string; count: number }>,
     ) {
-        const routeAnns = await this.routeAnnotations(true);
+        const routeAnns = await this.routeAnnotations();
         const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
             this.stores;
         for (const a of routeAnns.valid) {
@@ -366,6 +436,11 @@ export class Workflow {
         await this.stores.spryDistAutoStores.polyglot.writeText(
             "orchestrated.auto.md",
             this.orchMD.write(),
+        );
+
+        await this.stores.spryDistAutoStores.polyglot.writeText(
+            "goverance.auto.sql",
+            (await Array.fromAsync(this.spGovn.sqlPageStatements())).join("\n"),
         );
     }
 

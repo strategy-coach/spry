@@ -9,6 +9,7 @@ import {
     languageExtnIndex,
 } from "../universal/content/code.ts";
 import {
+    includeTextRegions,
     SpryEntryAnnotation,
     spryEntryAnnSchema,
     SpryRouteAnnotation,
@@ -34,24 +35,6 @@ export class Annotations {
     constructor(
         readonly projectModule: FsPathSupplier,
         readonly webPaths: PathSupplier,
-        readonly init?: {
-            readonly transformEntryAnn?: {
-                onNotFound?: () =>
-                    | SpryEntryAnnotation
-                    | Promise<SpryEntryAnnotation>;
-                onFound?: (
-                    supplied: SpryEntryAnnotation,
-                ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
-            };
-            readonly transformRouteAnn?: {
-                onNotFound?: () =>
-                    | SpryRouteAnnotation
-                    | Promise<SpryRouteAnnotation>;
-                onFound?: (
-                    supplied: SpryRouteAnnotation,
-                ) => SpryRouteAnnotation | Promise<SpryRouteAnnotation>;
-            };
-        },
     ) {
         this.annotatable = Walkers.builder()
             .addRoot(projectModule, {
@@ -84,7 +67,8 @@ export class Annotations {
                 | undefined
                 | Promise<undefined>;
             beforeParse?: (
-                supplied: z.input<S>,
+                grouped: z.input<S>,
+                groupAnns: Partial<Record<keyof z.input<S>, AnnotationItem>>,
             ) => z.input<S> | Promise<z.input<S>>;
             onError?: (supplied: z.core.input<S>) =>
                 | z.input<S>
@@ -122,7 +106,7 @@ export class Annotations {
         } as z.input<S>;
         const result = schema.safeParse(
             transform?.beforeParse
-                ? await transform.beforeParse(grouped)
+                ? await transform.beforeParse(grouped, anns)
                 : grouped,
         );
 
@@ -150,6 +134,72 @@ export class Annotations {
             webPath: webPaths.absolute(we.entry),
             isSystemGenerated: isSystem,
         } as SpryEntryAnnotation;
+    }
+
+    // deno-lint-ignore require-await
+    static async regionAnnFromCatalog(
+        itr: ReturnType<typeof includeTextRegions>,
+        we: YieldOf<Annotations["sources"]>,
+        anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
+    ) {
+        const includes: {
+            directives: z.infer<typeof itr["schema"]>;
+            we: YieldOf<Annotations["sources"]>;
+        }[] = [];
+        let include: AnnotationItem | undefined = undefined;
+        const issues = [];
+        for (const a of anns.items) {
+            if (a.kind == "tag" && a.key && a.key == "region.include") {
+                if (!include) {
+                    include = a;
+                } else {
+                    issues.push({
+                        issue:
+                            `New include found before matching includeEnd encountered`,
+                        ann: a,
+                        we,
+                        inside: include,
+                    });
+                    include = undefined;
+                    break; // short circuit
+                }
+            }
+            if (a.kind == "tag" && a.key && a.key == "region.includeEnd") {
+                if (include) {
+                    const candidate = {
+                        include: include.value,
+                        includeEnd: a.value,
+                    };
+                    const parsed = itr.schema.safeParse(candidate);
+                    if (parsed.success && parsed.data) {
+                        parsed.data.include.lineNum =
+                            include.source.loc?.start.line ?? 0;
+                        parsed.data.includeEnd.lineNum =
+                            a.source.loc?.start.line ?? 0;
+                        includes.push({ directives: parsed.data, we });
+                    }
+                    include = undefined;
+                } else {
+                    issues.push({
+                        issue:
+                            "includeEnd found before matching include encountered",
+                        ann: a,
+                        we,
+                    });
+                    break; // short circuit
+                }
+            }
+        }
+        if (include) {
+            issues.push({
+                issue:
+                    `include found with no matching includeEnd (reached end of content)`,
+                ann: include,
+                we,
+            });
+        }
+
+        return { includes, issues };
     }
 
     static async entryAnnFromCatalog(
@@ -223,6 +273,14 @@ export class Annotations {
     }
 
     async *catalog() {
+        const regionSchema = includeTextRegions({
+            vars: (name) => name,
+            lineNums: () => ({
+                include: 0,
+                includeEnd: 0,
+            }),
+        });
+
         for await (const we of this.sources()) {
             try {
                 const anns = await extractAnnotationsFromText(
@@ -236,44 +294,48 @@ export class Annotations {
                     },
                 );
 
+                const regionsAnn = await Annotations.regionAnnFromCatalog(
+                    regionSchema,
+                    we,
+                    anns,
+                );
+
                 const routeAnn = await Annotations.routeAnnFromCatalog(
                     we,
                     anns,
                     this.webPaths,
-                    this.init?.transformRouteAnn,
                 );
 
                 const entryAnn = await Annotations.entryAnnFromCatalog(
                     we,
                     anns,
                     this.webPaths,
-                    this.init?.transformEntryAnn
-                        ? this.init?.transformEntryAnn
-                        : {
-                            // if no entry was found or the entry has an error but we have a route then let's create
-                            // a default system entry of type "page"
-                            onNotFound: () =>
-                                routeAnn.found > 0
-                                    ? Annotations.defaultPageEntryAnn(
-                                        we,
-                                        this.webPaths,
-                                        true,
-                                    )
-                                    : undefined,
-                            onError: () =>
-                                routeAnn.found > 0
-                                    ? Annotations.defaultPageEntryAnn(
-                                        we,
-                                        this.webPaths,
-                                        true,
-                                    )
-                                    : undefined,
-                        },
+                    {
+                        // if no entry was found or the entry has an error but we have a route then let's create
+                        // a default system entry of type "page"
+                        onNotFound: () =>
+                            routeAnn.found > 0
+                                ? Annotations.defaultPageEntryAnn(
+                                    we,
+                                    this.webPaths,
+                                    true,
+                                )
+                                : undefined,
+                        onError: () =>
+                            routeAnn.found > 0
+                                ? Annotations.defaultPageEntryAnn(
+                                    we,
+                                    this.webPaths,
+                                    true,
+                                )
+                                : undefined,
+                    },
                 );
 
                 yield {
                     walkEntry: we,
                     annotations: anns,
+                    regionsAnn,
                     entryAnn,
                     routeAnn,
                 };
@@ -291,6 +353,18 @@ export class Annotations {
             const content = a.walkEntry.origin.paths.relative(
                 a.walkEntry.entry,
             );
+
+            for (const i of a.regionsAnn.issues) {
+                lintr.add({
+                    rule: "invalid-annotation",
+                    code: "region",
+                    content,
+                    message: i.issue,
+                    data: { annotation: i.ann },
+                    severity: "error",
+                });
+            }
+
             if (a.entryAnn.found > 0 && a.entryAnn.error) {
                 lintr.add({
                     rule: "invalid-annotation",

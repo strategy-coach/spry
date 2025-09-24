@@ -90,6 +90,10 @@ applied to SQLPage’s distribution. Just be careful about putting things into
 
 WIP
 
+- [ ] Create `spry.d/goverance.auto.sql` which is a partial that is included in
+      SQLPage for constants; that file will be in `sqlpage_files` so create a
+      wrapper view for its contents / availability. - also generate env vars
+      that can be picked up by SQLPage
 - [ ] Add flattened queries from Javascript as part of build process to allow
       caching of content (use
       [JMESPath](https://github.com/cloudydeno/jmespath)) or similar to allow
@@ -99,9 +103,6 @@ WIP
       ensure that env has location of schema for validation, etc.
 - [ ] Add an optional SQLite state database for CapExecs to use all the
       annotations and other stateful information during a build.
-- [ ] Create `spry.d/mod.auto.sql` which is a partial that is included in
-      SQLPage for constants; that file will be in `sqlpage_files` so create a
-      wrapper view for its contents / availability.
 - [ ] Add `lint` CLI command to check if `page` types have typical includes
       (shell, etc.)
 - [ ] Convert `auto.json` or any other file generators to their `*.json.ts`

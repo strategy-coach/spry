@@ -29,7 +29,7 @@ export class Store<I extends string> {
         text:
             | string
             | ((s: Store<I>) => string),
-    ): Promise<string> {
+    ) {
         const bytes = new TextEncoder().encode(
             typeof text === "string" ? text : text(this),
         );
@@ -40,11 +40,11 @@ export class Store<I extends string> {
      * Write binary content to a relative path (typed by I).
      * Returns the absolute path written.
      */
-    async writeBytes(relPath: I, bytes: Uint8Array): Promise<string> {
-        const abs = this.resolveRel(relPath);
-        await ensureDir(dirname(abs));
-        await Deno.writeFile(abs, bytes);
-        return abs;
+    async writeBytes(relPath: I, bytes: Uint8Array) {
+        const absFsPathWritten = this.resolveRel(relPath);
+        await ensureDir(dirname(absFsPathWritten));
+        await Deno.writeFile(absFsPathWritten, bytes);
+        return { webPath: this.webPath(relPath), absFsPathWritten };
     }
 
     // ---------- overridables kept inside the class ----------
@@ -81,7 +81,7 @@ export class JsonStore<
         relPath: I,
         value: Z extends z.ZodTypeAny ? z.infer<NonNullable<Z>> : unknown,
         replacer?: (this: Any, key: string, value: Any) => Any,
-    ): Promise<string> {
+    ) {
         const validated = this.validate(value);
         const json = this.init?.pretty
             ? JSON.stringify(validated, replacer, 2)

@@ -1,3 +1,6 @@
+-- @region.include ./middleware/file.sql
+-- @region.includeEnd file.sql
+
 -- @route.title 'Spry Backend-as-a-Service (BaaS)' @route.caption "Spry BaaS"
 -- @route.description 'Welcome to Spry Backend-as-a-Service (BaaS) Database' 
 SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;

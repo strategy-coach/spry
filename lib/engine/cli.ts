@@ -96,9 +96,8 @@ export class CLI {
         };
     }
 
-    lsPathField<
-        Row extends { nature: SpryEntryAnnotation["nature"]; error?: string },
-    >(): Partial<ColumnDef<Row, string>> {
+    // deno-lint-ignore no-explicit-any
+    lsColorPathField(): Partial<ColumnDef<any, string>> {
         return {
             header: "Path",
             format: (supplied) => {
@@ -111,7 +110,17 @@ export class CLI {
             rules: [{
                 when: (_v, r) => (r.error?.trim().length ?? 0) > 0,
                 color: red,
-            }, {
+            }],
+        };
+    }
+
+    lsNaturePathField<
+        Row extends { nature: SpryEntryAnnotation["nature"]; error?: string },
+    >(): Partial<ColumnDef<Row, string>> {
+        const lscpf = this.lsColorPathField();
+        return {
+            ...lscpf,
+            rules: [...(lscpf.rules ? lscpf.rules : []), {
                 when: (_v, r) => r.nature === "cap-exec",
                 color: brightYellow,
             }],
@@ -131,20 +140,71 @@ export class CLI {
 
     async ls() {
         const workflow = await this.plan.workflow();
-        const list = (await workflow.entryAnnotations()).valid.map((ea) => ({
-            nature: ea.entryAnn.nature,
-            path: ea.we.entry.path,
-            error: ea.ann.error ? z.prettifyError(ea.ann.error) : "",
-        }));
+        const list = workflow.annsCatalog.filter((ea) => ea.entryAnn.found).map(
+            (ea) => ({
+                nature: ea.entryAnn.parsed?.nature ?? "unknown",
+                path: ea.walkEntry.entry.path,
+                error: ea.entryAnn.error
+                    ? z.prettifyError(ea.entryAnn.error)
+                    : "",
+            }),
+        );
         await new ListerBuilder<typeof list[number]>()
             .declareColumns("nature", "path", "error")
             .from(list)
             .field("nature", "nature", this.lsNatureField())
-            .field("path", "path", this.lsPathField())
+            .field("path", "path", this.lsNaturePathField())
             .field("error", "error", this.lsLintField())
             .sortBy("path").sortDir("asc")
             .build()
             .ls(true);
+    }
+
+    async lsRegions() {
+        const workflow = await this.plan.workflow();
+        const includes = workflow.annsCatalog.filter((ea) =>
+            ea.regionsAnn.includes.length
+        ).flatMap((ea) => (ea.regionsAnn.includes.map((i) => ({
+            path: i.we.entry.path,
+            include: i.directives.include.relPath,
+            region: i.directives.include.name,
+            start: i.directives.include.lineNum,
+            end: i.directives.includeEnd.lineNum,
+        }))));
+        if (includes.length) {
+            await new ListerBuilder<typeof includes[number]>()
+                .declareColumns("path", "region", "include", "start", "end")
+                .from(includes)
+                .field("path", "path", this.lsColorPathField())
+                .field("region", "region")
+                .field("include", "include")
+                .field("start", "start", { align: "right" })
+                .field("end", "end", { align: "right" })
+                .sortBy("path").sortDir("asc")
+                .build()
+                .ls(true);
+        }
+
+        const issues = workflow.annsCatalog.filter((ea) =>
+            ea.regionsAnn.issues.length
+        ).flatMap((ea) => (ea.regionsAnn.issues.map((i) => ({
+            path: i.we.entry.path,
+            issue: i.issue,
+            ann: i.ann.raw,
+            line: i.ann.source?.loc?.start?.line ?? 0,
+        }))));
+        if (issues.length) {
+            await new ListerBuilder<typeof issues[number]>()
+                .declareColumns("path", "issue", "ann", "line")
+                .from(issues)
+                .field("path", "path", this.lsColorPathField())
+                .field("issue", "issue")
+                .field("ann", "ann")
+                .field("line", "line", { align: "right" })
+                .sortBy("path").sortDir("asc")
+                .build()
+                .ls(true);
+        }
     }
 
     async lsAnnotations(_opts: { json?: boolean }) {
@@ -360,6 +420,11 @@ export class CLI {
                     .command("ann", "List annotations discovered")
                     .option("-j, --json", "Emit as JSON instead of table")
                     .action(async (opts) => await this.lsAnnotations(opts))
+                    .command(
+                        "regions",
+                        "List files that define text regions (includes, etc.)",
+                    )
+                    .action(async () => await this.lsRegions())
                     .command(
                         "cap-execs",
                         "List capturable executable candidates",

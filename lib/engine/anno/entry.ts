@@ -17,13 +17,13 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
             "Code that executes an action and redirects back to a page.",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal("api").describe(
             "An API endpoint exposed by the system.",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal("cap-exec").describe(
             "A capturable executable",
@@ -42,19 +42,19 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
                 "Expresses dependencies: 'none' means it's idempotent, 'db-after-build' means it needs the database before/after the build",
             ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal("page").describe(
             "A standard SQLPage server-side generated (SSG) page, this is the default.",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal("partial").describe(
             "Part of a standard SQLPage SSG page which is usually imported into other SQLPage pages using `run_sql`.",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal(spryResourceNature).describe(
             "A data resource",
@@ -63,7 +63,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
             "Specifies the type of resource.",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
     z.object({
         nature: z.literal("sql").describe(
             "A SQL stored procedure, requiring `sqlImpact` to specify whether it's DQL, DML, or DDL.",
@@ -72,7 +72,13 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
             "Specifies the type of SQL impact: DQL (read/query), DML (insert/update/delete), or DDL (schema changes).",
         ),
         ...spryEntryAnnCommon,
-    }),
+    }).strict(),
+    z.object({
+        nature: z.literal("unknown").describe(
+            "When the nature is indeterminate",
+        ),
+        ...spryEntryAnnCommon,
+    }).strict(),
 ]).describe(
     `The nature of this file influences how it's treated by the system. 
    Possible values are:
