@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# @spry.nature cap-exec @spry.isCleanable
+# @spry.nature foundry @spry.isCleanable
 #
 # 👆 Two things make Spry notice this file:
 #   1. The file has its "executable bit" set (`chmod +x`), so the OS can run it.
-#   2. The `spry.nature cap-exec` annotation above tells Spry this is a
-#      "capturable executable" (CapExec) that should be included in the build.
+#   2. The `spry.nature foundry` annotation above tells Spry this is a
+#      executable (Foundry) that should be included in the build.
 #
 # Spry will automatically scan source files for these annotations. It uses
 # the shared `/lib/universal/content` module to read and understand them.
@@ -15,57 +15,57 @@
 # 🔄 Auto-materialization:
 #   - When Spry runs this file, anything it prints to STDOUT is captured.
 #   - If the file name follows the pattern <basename>.<nature>.<runner>
-#     (for example: `debug-cap-exec.env.sh`), Spry will automatically
+#     (for example: `debug-foundry.env.sh`), Spry will automatically
 #     write the output into a file named <basename>.auto.<nature>
-#     (for example: `debug-cap-exec.auto.env`).
-#   - This is the simplest way to produce build artifacts from a CapExec.
+#     (for example: `debug-foundry.auto.env`).
+#   - This is the simplest way to produce build artifacts from a Foundry.
 #   - If the file is auto-materialized and spry.isCleanable is set, it can be
 #     deleted during a `clean` operation.
 #   - If the file is not auto-materialized and spry.isCleanable is set, then
-#     CAPEXEC_DESTROY_CLEAN env var will be set to 'TRUE' and the cap exec
+#     FOUNDRY_DESTROY_CLEAN env var will be set to 'TRUE' and the cap exec
 #     can decide what to do.
 #
 # 🗂️ Custom file outputs:
-#   - You are not limited to auto-materialization. CapExecs can also write
+#   - You are not limited to auto-materialization. Foundrys can also write
 #     their own single or multiple files wherever they need to.
-#   - Spry passes a set of `CAPEXEC_*` environment variables that tell you
+#   - Spry passes a set of `FOUNDRY_*` environment variables that tell you
 #     the proper destinations (for example, the SQLite database file path
 #     or the auto-materialize path).
 #   - Your script can choose to ignore auto-materialization and instead
 #     create files in those locations manually.
 #
 # In short: this file demonstrates the auto-materialization convention,
-# but CapExecs are free to manage their own outputs too. Either way, Spry
+# but Foundrys are free to manage their own outputs too. Either way, Spry
 # integrates the results into the build pipeline.
 # -----------------------------------------------------------------------------
-# This debug-cap-exec.env.sh CapExec script exists only as a teaching tool.
+# This debug-foundry.env.sh Foundry script exists only as a teaching tool.
 # -----------------------------------------------------------------------------
 # Purpose:
-#   - Show which CAPEXEC_* environment variables Spry injects into a CapExec.
-#   - Demonstrate how to flatten complex JSON env vars like CAPEXEC_SOURCE
-#     and CAPEXEC_CONTEXT_JSON into human-readable key=value lines.
+#   - Show which FOUNDRY_* environment variables Spry injects into a Foundry.
+#   - Demonstrate how to flatten complex JSON env vars like FOUNDRY_SOURCE
+#     and FOUNDRY_CONTEXT_JSON into human-readable key=value lines.
 #   - Confirm that Spry auto-materialization works: because this script follows
-#     the <basename>.<nature>.<runner> pattern (e.g. debug-cap-exec.env.sh),
+#     the <basename>.<nature>.<runner> pattern (e.g. debug-foundry.env.sh),
 #     its stdout is automatically captured into a generated
 #     <basename>.auto.<nature> file during the build.
 #
 # Key points:
 #   - The script does not mutate anything in your project; it only prints.
 #   - Output is dynamic (reflecting the current orchestration context).
-#   - This is a non-TypeScript CapExec, proving that any language/runtime
+#   - This is a non-TypeScript Foundry, proving that any language/runtime
 #     capable of running as an executable can participate in the Spry pipeline.
 #   - The resulting auto-materialized file becomes part of Spry’s reproducible
 #     build artifacts alongside SQLPage content.
 #
 # In short:
 #   This script is a simple "debug viewer" that lets you understand what
-#   environment variables and context Spry provides to CapExecs, while showing
+#   environment variables and context Spry provides to Foundrys, while showing
 #   how non-TypeScript sources integrate seamlessly into the orchestration flow.
 # -----------------------------------------------------------------------------
 
 # --- helpers ---
 has_jq() { command -v jq >/dev/null 2>&1; }
-flatten_json() { # $1=JSON_STRING  $2=PREFIX (e.g., CAPEXEC_SRC or CAPEXEC_CTX)
+flatten_json() { # $1=JSON_STRING  $2=PREFIX (e.g., FOUNDRY_SRC or FOUNDRY_CTX)
   local j="$1" pfx="$2"
   if [[ -z "$j" ]]; then echo "${pfx}_ERROR=no JSON provided"; return; fi
   echo "$j" | jq -e . >/dev/null 2>&1 || { echo "${pfx}_ERROR=invalid JSON"; return; }
@@ -87,13 +87,13 @@ cat <<EOF
 # -----------------------------------------------------------------------------
 # Generated by: $(basename "$0")
 #
-# This output was produced by a CapExec script that runs as part of the Spry
+# This output was produced by a Foundry script that runs as part of the Spry
 # orchestration pipeline. It demonstrates:
 #
-#   • Which CAPEXEC_* environment variables the Spry engine makes available.
-#   • How CAPEXEC_SOURCE and CAPEXEC_CONTEXT_JSON can be flattened into
+#   • Which FOUNDRY_* environment variables the Spry engine makes available.
+#   • How FOUNDRY_SOURCE and FOUNDRY_CONTEXT_JSON can be flattened into
 #     deterministic key=value pairs for inspection.
-#   • That even a non-TypeScript CapExec (here, a Bash script) can generate
+#   • That even a non-TypeScript Foundry (here, a Bash script) can generate
 #     dynamic, auto-materialized output fully integrated into the Spry build.
 #
 # The contents below are not static: each run reflects the current Spry
@@ -105,23 +105,23 @@ cat <<EOF
 EOF
 
 # --- exported env (sorted) ---
-echo "# CAPEXEC_* (exported env)"
-printenv | grep '^CAPEXEC_' | sort || true
+echo "# FOUNDRY_* (exported env)"
+printenv | grep '^FOUNDRY_' | sort || true
 echo
 
-# --- CAPEXEC_SOURCE_JSON flattened (sorted) ---
-echo "# CAPEXEC_SOURCE_JSON -> CAPEXEC_SRC_*"
+# --- FOUNDRY_SOURCE_JSON flattened (sorted) ---
+echo "# FOUNDRY_SOURCE_JSON -> FOUNDRY_SRC_*"
 if has_jq; then
-  flatten_json "${CAPEXEC_SOURCE_JSON:-}" CAPEXEC_SRC
+  flatten_json "${FOUNDRY_SOURCE_JSON:-}" FOUNDRY_SRC
 else
-  echo "CAPEXEC_SRC_ERROR=jq not available"
+  echo "FOUNDRY_SRC_ERROR=jq not available"
 fi
 echo
 
-# --- CAPEXEC_CONTEXT_JSON flattened (sorted) ---
-echo "# CAPEXEC_CONTEXT_JSON -> CAPEXEC_CTX_*"
+# --- FOUNDRY_CONTEXT_JSON flattened (sorted) ---
+echo "# FOUNDRY_CONTEXT_JSON -> FOUNDRY_CTX_*"
 if has_jq; then
-  flatten_json "${CAPEXEC_CONTEXT_JSON:-}" CAPEXEC_CTX
+  flatten_json "${FOUNDRY_CONTEXT_JSON:-}" FOUNDRY_CTX
 else
-  echo "CAPEXEC_CTX_ERROR=jq not available"
+  echo "FOUNDRY_CTX_ERROR=jq not available"
 fi

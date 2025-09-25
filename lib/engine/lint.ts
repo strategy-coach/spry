@@ -9,7 +9,7 @@ export class Linter {
                     data: { annotation: {} },
                     defaultSeverity: "error",
                 }),
-                "invalid-cap-exec": defineRule({
+                "invalid-foundry": defineRule({
                     code: [
                         "not-executable",
                         "invalid-file-name-pattern",

@@ -1,8 +1,8 @@
 #!/usr/bin/env -S deno run -A 
 
-// @spry.nature cap-exec @spry.dependsOn db-after-build @spry.isCleanable
+// @spry.nature foundry @spry.dependsOn db-after-build @spry.isCleanable
 
-import { SqliteAide } from "../../engine/cap-exec/mod.ts";
+import { SqliteAide } from "../../engine/foundry/mod.ts";
 
 const SQL = `
 .mode list

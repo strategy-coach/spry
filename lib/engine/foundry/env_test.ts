@@ -7,7 +7,7 @@ import {
     assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
-import { CapExecEnvAide, EnvAide } from "./env.ts";
+import { EnvAide, FoundryEnvAide } from "./env.ts";
 
 // ---------- Test utilities ----------
 
@@ -28,7 +28,7 @@ function restoreEnv(snapshot: Record<string, string>) {
 
 // ---------- Tests ----------
 
-Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
+Deno.test("EnvAide & FoundryEnvAide (composition)", async (t) => {
     const snap = snapshotEnv();
     try {
         // Arrange a clean, controlled environment
@@ -38,10 +38,10 @@ Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
         Deno.env.set("HOME", "/home/test");
         Deno.env.set("OTHER_URL", "https://example.com");
 
-        Deno.env.set("CAPEXEC_TARGET_SQLITE_DB", "/tmp/db.sqlite");
-        Deno.env.set("CAPEXEC_DB_URL", "sqlite:///tmp/db.sqlite");
+        Deno.env.set("FOUNDRY_TARGET_SQLITE_DB", "/tmp/db.sqlite");
+        Deno.env.set("FOUNDRY_DB_URL", "sqlite:///tmp/db.sqlite");
         Deno.env.set(
-            "CAPEXEC_CONTEXT",
+            "FOUNDRY_CONTEXT",
             JSON.stringify({ runId: "abc123", n: 2 }),
         );
 
@@ -67,64 +67,64 @@ Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
 
             const keys = env.keys();
             assert(keys.includes("PATH"));
-            assert(keys.includes("CAPEXEC_TARGET_SQLITE_DB"));
+            assert(keys.includes("FOUNDRY_TARGET_SQLITE_DB"));
 
             const all = env.toObject();
             assertEquals(all.PATH, "/usr/bin");
-            assertEquals(all.CAPEXEC_DB_URL, "sqlite:///tmp/db.sqlite");
+            assertEquals(all.FOUNDRY_DB_URL, "sqlite:///tmp/db.sqlite");
 
             const onlyHome = env.toObject((k) => k === "HOME");
             assertEquals(Object.keys(onlyHome), ["HOME"]);
             assertEquals(onlyHome.HOME, "/home/test");
         });
 
-        await t.step("CapExecEnvAide: dynamic lookup prefixes CAPEXEC_", () => {
-            const cap = new CapExecEnvAide(new EnvAide());
+        await t.step("FoundryEnvAide: dynamic lookup prefixes FOUNDRY_", () => {
+            const cap = new FoundryEnvAide(new EnvAide());
             // @ts-ignore dynamic trap
-            assertEquals(cap.targetSqliteDb(), "/tmp/db.sqlite"); // CAPEXEC_TARGET_SQLITE_DB
+            assertEquals(cap.targetSqliteDb(), "/tmp/db.sqlite"); // FOUNDRY_TARGET_SQLITE_DB
             // @ts-ignore dynamic trap (consecutive capitals)
-            assertEquals(cap.dbURL(), "sqlite:///tmp/db.sqlite"); // CAPEXEC_DB_URL
+            assertEquals(cap.dbURL(), "sqlite:///tmp/db.sqlite"); // FOUNDRY_DB_URL
         });
 
-        await t.step("CapExecEnvAide: get/require/has/keys", () => {
-            const cap = new CapExecEnvAide(new EnvAide());
+        await t.step("FoundryEnvAide: get/require/has/keys", () => {
+            const cap = new FoundryEnvAide(new EnvAide());
             // De-prefixed
             assertEquals(cap.get("TARGET_SQLITE_DB"), "/tmp/db.sqlite");
             // Prefixed
-            assertEquals(cap.get("CAPEXEC_DB_URL"), "sqlite:///tmp/db.sqlite");
+            assertEquals(cap.get("FOUNDRY_DB_URL"), "sqlite:///tmp/db.sqlite");
 
             assert(cap.has("TARGET_SQLITE_DB"));
-            assert(cap.has("CAPEXEC_DB_URL"));
+            assert(cap.has("FOUNDRY_DB_URL"));
 
             assertThrows(
                 () => cap.require("MISSING"),
-                "Missing CAPEXEC_MISSING",
+                "Missing FOUNDRY_MISSING",
             );
 
             const keys = cap.keys(); // de-prefixed
             assert(keys.includes("TARGET_SQLITE_DB"));
             assert(keys.includes("DB_URL"));
-            assert(!keys.includes("CAPEXEC_TARGET_SQLITE_DB"));
+            assert(!keys.includes("FOUNDRY_TARGET_SQLITE_DB"));
         });
 
-        await t.step("CapExecEnvAide: toObject default & filter", () => {
-            const cap = new CapExecEnvAide(new EnvAide());
+        await t.step("FoundryEnvAide: toObject default & filter", () => {
+            const cap = new FoundryEnvAide(new EnvAide());
             const obj = cap.toObject();
-            // Default: only CAPEXEC_* (prefixed)
-            assertEquals(obj.CAPEXEC_TARGET_SQLITE_DB, "/tmp/db.sqlite");
-            assertEquals(obj.CAPEXEC_DB_URL, "sqlite:///tmp/db.sqlite");
+            // Default: only FOUNDRY_* (prefixed)
+            assertEquals(obj.FOUNDRY_TARGET_SQLITE_DB, "/tmp/db.sqlite");
+            assertEquals(obj.FOUNDRY_DB_URL, "sqlite:///tmp/db.sqlite");
             // Not included by default
             assertEquals(Object.hasOwn(obj, "HOME"), false);
 
             const obj2 = cap.toObject((k) => k === "HOME");
             assertEquals(obj2.HOME, "/home/test"); // included by filter
-            assertEquals(obj2.CAPEXEC_TARGET_SQLITE_DB, "/tmp/db.sqlite"); // still present
+            assertEquals(obj2.FOUNDRY_TARGET_SQLITE_DB, "/tmp/db.sqlite"); // still present
         });
 
         await t.step(
-            "CapExecEnvAide: context() JSON parsing & schema validation",
+            "FoundryEnvAide: context() JSON parsing & schema validation",
             async (t2) => {
-                const cap = new CapExecEnvAide(new EnvAide());
+                const cap = new FoundryEnvAide(new EnvAide());
 
                 await t2.step("returns parsed JSON when no schema", () => {
                     const ctx = cap.context<{ runId: string; n: number }>();
@@ -151,11 +151,11 @@ Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
                 await t2.step("throws on invalid JSON", () => {
                     const snap2 = snapshotEnv();
                     try {
-                        Deno.env.set("CAPEXEC_CONTEXT", "{not json}");
-                        const cap2 = new CapExecEnvAide(new EnvAide());
+                        Deno.env.set("FOUNDRY_CONTEXT", "{not json}");
+                        const cap2 = new FoundryEnvAide(new EnvAide());
                         assertThrows(
                             () => cap2.context(),
-                            "Invalid JSON in CAPEXEC_CONTEXT",
+                            "Invalid JSON in FOUNDRY_CONTEXT",
                         );
                     } finally {
                         restoreEnv(snap2);
@@ -163,12 +163,12 @@ Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
                 });
 
                 await t2.step(
-                    "returns undefined when CAPEXEC_CONTEXT missing/empty",
+                    "returns undefined when FOUNDRY_CONTEXT missing/empty",
                     () => {
                         const snap2 = snapshotEnv();
                         try {
-                            Deno.env.delete("CAPEXEC_CONTEXT");
-                            const cap2 = new CapExecEnvAide(new EnvAide());
+                            Deno.env.delete("FOUNDRY_CONTEXT");
+                            const cap2 = new FoundryEnvAide(new EnvAide());
                             const ctx = cap2.context();
                             assertEquals(ctx, undefined);
                         } finally {
@@ -179,13 +179,13 @@ Deno.test("EnvAide & CapExecEnvAide (composition)", async (t) => {
             },
         );
 
-        await t.step("CapExecEnvAide: prefixedKeys()", () => {
-            const cap = new CapExecEnvAide(new EnvAide());
+        await t.step("FoundryEnvAide: prefixedKeys()", () => {
+            const cap = new FoundryEnvAide(new EnvAide());
             const pk = cap.prefixedKeys();
             // Should include the exact prefixed names
-            assert(pk.includes("CAPEXEC_TARGET_SQLITE_DB"));
-            assert(pk.includes("CAPEXEC_DB_URL"));
-            // And not include non-CAPEXEC envs
+            assert(pk.includes("FOUNDRY_TARGET_SQLITE_DB"));
+            assert(pk.includes("FOUNDRY_DB_URL"));
+            // And not include non-FOUNDRY envs
             assert(!pk.includes("HOME"));
         });
     } finally {

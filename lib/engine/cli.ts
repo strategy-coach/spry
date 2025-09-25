@@ -90,7 +90,7 @@ export class CLI {
                     ? green(v)
                     : v === "sql"
                     ? yellow(v)
-                    : v === "cap-exec"
+                    : v === "foundry"
                     ? brightYellow(v)
                     : cyan(v),
         };
@@ -121,7 +121,7 @@ export class CLI {
         return {
             ...lscpf,
             rules: [...(lscpf.rules ? lscpf.rules : []), {
-                when: (_v, r) => r.nature === "cap-exec",
+                when: (_v, r) => r.nature === "foundry",
                 color: brightYellow,
             }],
         };
@@ -160,9 +160,46 @@ export class CLI {
             .ls(true);
     }
 
-    async lsRegions() {
-        // const workflow = await this.plan.workflow();
-        // const includes = workflow.annsCatalog.filter((ea) =>
+    async lsDirectives() {
+        const workflow = await this.plan.workflow();
+        const directives = await workflow.directives.directives();
+
+        const included = directives.modified.map((i) => ({
+            path: i.walkEntry.entry.path,
+            args: i.directive.argsText,
+            beginLineNo: i.beginLineNo,
+            endLineNo: i.endLineNo,
+            directive: i.directive.directive,
+            name: i.directive.blockName,
+        }));
+
+        if (included.length) {
+            await new ListerBuilder<typeof included[number]>()
+                .declareColumns(
+                    "path",
+                    "directive",
+                    "args",
+                    "beginLineNo",
+                    "endLineNo",
+                )
+                .from(included)
+                .field("path", "path", this.lsColorPathField())
+                .field("directive", "directive")
+                .field("args", "args")
+                .field("beginLineNo", "beginLineNo", {
+                    align: "right",
+                    header: "Begin",
+                })
+                .field("endLineNo", "endLineNo", {
+                    align: "right",
+                    header: "End",
+                })
+                .sortBy("path").sortDir("asc")
+                .build()
+                .ls(true);
+        }
+
+        // .filter((ea) =>
         //     ea.regionsAnn.includes.length
         // ).flatMap((ea) => (ea.regionsAnn.includes.map((i) => ({
         //     path: i.we.entry.path,
@@ -251,9 +288,9 @@ export class CLI {
         }
     }
 
-    async lsCapExecs(_opts: { json?: true }) {
+    async lsFoundries(_opts: { json?: true }) {
         const workflow = await this.plan.workflow();
-        const capExecs = await workflow.capExecs();
+        const foundries = await workflow.foundries();
         const table = new Table({
             head: [
                 "Path",
@@ -264,7 +301,7 @@ export class CLI {
                 "Cleanable",
             ],
         });
-        for (const ce of capExecs.ceSelected) {
+        for (const ce of foundries.ceSelected) {
             table.push([
                 this.plan.pp.projectFsPaths.relative(ce.we.entry),
                 ce.pfn.materialize.auto,
@@ -403,7 +440,9 @@ export class CLI {
                 await this.plan.clean();
             })
             .command("build")
-            .description("Perform orchestration (annotations, routes, capexes)")
+            .description(
+                "Perform orchestration (annotations, routes, foundries)",
+            )
             .action(async (opts) => {
                 await (await this.plan.workflow(opts)).orchestrate({
                     cleanAuto: true,
@@ -421,16 +460,13 @@ export class CLI {
                     .option("-j, --json", "Emit as JSON instead of table")
                     .action(async (opts) => await this.lsAnnotations(opts))
                     .command(
-                        "regions",
-                        "List files that define text regions (includes, etc.)",
+                        "directives",
+                        "List files that use directives (includes, etc.)",
                     )
-                    .action(async () => await this.lsRegions())
-                    .command(
-                        "cap-execs",
-                        "List capturable executable candidates",
-                    )
+                    .action(async () => await this.lsDirectives())
+                    .command("foundries", "List foundry candidates")
                     .option("-j, --json", "Emit as JSON instead of tree")
-                    .action(async (opts) => await this.lsCapExecs(opts))
+                    .action(async (opts) => await this.lsFoundries(opts))
                     .command(
                         "routes",
                         "List SQLPage .sql files that include route annotations.",

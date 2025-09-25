@@ -16,7 +16,7 @@ import {
 } from "./anno/mod.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
 import { EncountersSupplier, Walkers } from "./walk.ts";
-import { CapExecs } from "./cap-exec.ts";
+import { Foundries } from "./foundries.ts";
 import { Linter } from "./lint.ts";
 import { Workflow } from "./orchestrate.ts";
 
@@ -285,14 +285,14 @@ export class Annotations {
 
             if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
                 switch (a.entryAnn.parsed.nature) {
-                    case "cap-exec":
-                        if (!CapExecs.isExecutable(a.walkEntry.entry.path)) {
+                    case "foundry":
+                        if (!Foundries.isExecutable(a.walkEntry.entry.path)) {
                             lintr.add({
-                                rule: "invalid-cap-exec",
+                                rule: "invalid-foundry",
                                 code: "not-executable",
                                 content,
                                 message:
-                                    "Capturable executable does not appear to be executable",
+                                    "Foundry candidate does not appear to be executable",
                                 data: { annotation: a.entryAnn, error: null },
                                 severity: "warn",
                             });

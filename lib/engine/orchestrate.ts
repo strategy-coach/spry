@@ -15,13 +15,13 @@ import {
     SQL,
 } from "../universal/sql-text.ts";
 import { Annotations } from "./annotations.ts";
-import { CapExecs } from "./cap-exec.ts";
+import { Foundries } from "./foundries.ts";
 import { SafeCliArgs } from "./cli.ts";
 import { Linter } from "./lint.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
 import { JsonStore, Store } from "./storage.ts";
 import { EncountersSupplier, Walkers } from "./walk.ts";
-import { Macros } from "./macros.ts";
+import { Directives } from "./directives.ts";
 import { Routes, SpryRouteAnnotation } from "./anno/mod.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -146,7 +146,7 @@ export class Workflow {
     readonly linter: Linter;
     readonly lintr: ReturnType<Linter["lintResults"]>;
     readonly stores: ReturnType<Plan["stores"]>;
-    readonly macros: ReturnType<Plan["macros"]>;
+    readonly directives: ReturnType<Plan["directives"]>;
     readonly pp: Plan["pp"];
     readonly spf: ReturnType<Plan["sqlpageFiles"]>;
     readonly annotations: ReturnType<Plan["annotations"]>;
@@ -168,7 +168,7 @@ export class Workflow {
         this.linter = plan.linter();
         this.lintr = this.linter.lintResults();
         this.stores = plan.stores();
-        this.macros = plan.macros();
+        this.directives = plan.directives();
         this.spf = plan.sqlpageFiles();
         this.annotations = plan.annotations();
 
@@ -447,12 +447,12 @@ export class Workflow {
         );
     }
 
-    async renderMacros() {
-        await this.macros.render(this.lintr);
+    async forge() {
+        // await this.macros.transform(this.lintr);
     }
 
-    async capExecs() {
-        const result = new CapExecs(this.plan, this.lintr, {
+    async foundries() {
+        const result = new Foundries(this.plan, this.lintr, {
             cliOpts: this.cliOpts,
             mergeCtx: { cwd: Deno.cwd(), projectPaths: this.pp },
         });
@@ -464,12 +464,12 @@ export class Workflow {
         const stores = this.stores;
         if (init?.cleanAuto) await this.plan.clean(stores);
 
-        const macros = await this.renderMacros();
-        const capExecs = await this.capExecs();
+        const executed = await this.forge();
+        const execs = await this.foundries();
 
-        await capExecs.materialize("BEFORE_ANN_CATALOG");
+        await execs.materialize("BEFORE_ANN_CATALOG");
         await this.dropInAnnotations();
-        await capExecs.materialize("AFTER_ANN_CATALOG");
+        await execs.materialize("AFTER_ANN_CATALOG");
         await this.finalize();
     }
 }
@@ -603,8 +603,8 @@ export class Plan {
         );
     }
 
-    macros() {
-        return new Macros(this);
+    directives() {
+        return new Directives(this);
     }
 
     annotations() {
@@ -646,11 +646,11 @@ export class Plan {
         // we "own" the "spry.d/auto" directory so remove it
         await rmDirRecursive(stores.spryDistAutoStores.polyglot.destFsRoot);
 
-        // handle cleanable Cap Execs
+        // handle cleanable foundries
         const workflow = await this.workflow();
-        const capExecs = await workflow.capExecs();
+        const foundries = await workflow.foundries();
         for (
-            const ce of capExecs.ceSelected.filter((ce) =>
+            const ce of foundries.ceSelected.filter((ce) =>
                 ce.pfn.materialize.auto && ce.ann.isCleanable &&
                 ce.pfn.materialize.path
             )
@@ -661,7 +661,7 @@ export class Plan {
             } catch (error) {
                 if (error instanceof Deno.errors.NotFound) continue;
                 console.info(
-                    "Error cleaning isCleanable auto-materialized CapExec",
+                    "Error cleaning isCleanable auto-materialized foundry",
                     ce.we.entry.path,
                 );
                 console.info(ce.pfn.materialize.path!);

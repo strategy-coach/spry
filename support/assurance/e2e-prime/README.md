@@ -5,14 +5,14 @@ deno install
 # setup symlink to Spry stdlib
 ./spryctl.ts init               # only required once, creates `sqlpage/sqlpage.json` and `src/spry` symlink
 
-# spryctl.ts lets you perform different functions
+# Housekeeping
+./spryctl.ts clean
 ./spryctl.ts help
-./spryctl.ts dev                # launch SQLpage binary and reload SQLite content on file changes
 
-# informational
+# Listing and inspection
 ./spryctl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
 ./spryctl.ts ls ann             # list all candidate sqlpage_files that have been annotated with `@spry.*` or `@route.*`
-./spryctl.ts ls cap-execs       # list all capturable executables
+./spryctl.ts ls foundries       # list all candidate foundries (executables) which can generate content
 ./spryctl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
 ./spryctl.ts ls head            # list names of files which will generate SQL DDL/DML for "init" operations that go before sqlpage_files inserts
 ./spryctl.ts ls tail            # list names of files which will generate SQL DDL/DML for "finalization" operations that go after sqlpage_files inserts
@@ -21,16 +21,19 @@ deno install
 ./spryctl.ts ls routes -j       # list all discovered files that have route annotations as JSON
 ./spryctl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
-# emit SQL
+# SQL emission
 ./spryctl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
 ./spryctl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
 ./spryctl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
 ./spryctl.ts sql deploy         # generate the full deployment package (all the above)
 
-# deployment
+# Deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
 ./spryctl.ts > sqlpage-package.sql
 ./spryctl.ts | sqlite3 sqlpage.db
+
+# Development
+./spryctl.ts dev                # launch SQLpage binary and reload SQLite content on file changes
 ```
 
 ## TODO: explain Build vs. Deploy
@@ -90,6 +93,9 @@ applied to SQLPage’s distribution. Just be careful about putting things into
 
 WIP
 
+- [ ] Create #prepend and #append similar to #include/#includeEnd except
+      #prepend replaces everything before and #append replaces everything
+      afterwards
 - [ ] Create `spry.d/goverance.auto.sql` which is a partial that is included in
       SQLPage for constants; that file will be in `sqlpage_files` so create a
       wrapper view for its contents / availability. - also generate env vars
@@ -99,9 +105,9 @@ WIP
       [JMESPath](https://github.com/cloudydeno/jmespath)) or similar to allow
       defining "tables" and JMESPath _searches_ which place files into
       `spry.d/view/<table>.auto.json` and then this JSON can be used by SQLPage.
-- [ ] Add JSON Schema generator for each JSON passed through env to CapExecs and
-      ensure that env has location of schema for validation, etc.
-- [ ] Add an optional SQLite state database for CapExecs to use all the
+- [ ] Add JSON Schema generator for each JSON passed through env to Foundries
+      and ensure that env has location of schema for validation, etc.
+- [ ] Add an optional SQLite state database for Foundries to use all the
       annotations and other stateful information during a build.
 - [ ] Add `lint` CLI command to check if `page` types have typical includes
       (shell, etc.)

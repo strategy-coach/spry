@@ -1,7 +1,7 @@
-import { CapExecEnvAide } from "./env.ts";
+import { FoundryEnvAide } from "./env.ts";
 
 /**
- * SqliteAide for Deno TypeScript-based capturable executables.
+ * SqliteAide for Deno TypeScript-based foundries.
  *
  * Run SQLite via the `sqlite3` CLI using `Deno.Command`.
  * - `run()` → raw stdout string from sqlite.
@@ -17,23 +17,23 @@ import { CapExecEnvAide } from "./env.ts";
  *   - If result is an **array/scalar**: `{ data: result, ".context": { ... } }`
  *
  * ### DB resolution
- * 1. Env var `CAPEXEC_<dbEnvKey>` (default `CAPEXEC_TARGET_SQLITEDB`).
+ * 1. Env var `FOUNDRY_<dbEnvKey>` (default `FOUNDRY_TARGET_SQLITEDB`).
  * 2. Explicit path via `.database(path)`.
  * 3. Fallback to `:memory:`.
  */
 export class SqliteAide {
     private sql = "";
-    private readonly env: CapExecEnvAide;
+    private readonly env: FoundryEnvAide;
     private cmd = "sqlite3";
     private dbEnvKey = "TARGET_SQLITEDB";
     private dbExplicit?: string;
     private mode: ContextMode = ContextMode.Smart;
 
-    static create(env = new CapExecEnvAide()) {
+    static create(env = new FoundryEnvAide()) {
         return new SqliteAide(env);
     }
 
-    constructor(env = new CapExecEnvAide()) {
+    constructor(env = new FoundryEnvAide()) {
         this.env = env;
     }
 
@@ -98,7 +98,7 @@ export class SqliteAide {
                 envKey: sel.envKey,
                 warning: "warning" in sel ? sel.warning : undefined,
             },
-            capExecEnv: this.env.toObject(),
+            foundryEnv: this.env.toObject(),
         };
 
         const isObj = isPlainObject(parsed);

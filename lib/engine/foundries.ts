@@ -23,23 +23,23 @@ import {
 } from "./walk.ts";
 import { SpryEntryAnnotation } from "./anno/mod.ts";
 
-export type SpryCapExecEntryAnnotation = Extract<
+export type SpryFoundryAnnotation = Extract<
     SpryEntryAnnotation,
-    { nature: "cap-exec" }
+    { nature: "foundry" }
 >;
 
-export class CapExecs {
+export class Foundries {
     readonly candidates: EncountersSupplier;
     readonly contextForEnv: Record<string, unknown>;
     readonly ceSelected: {
         we: WalkEncounter<WalkSpec>;
-        ann: SpryCapExecEntryAnnotation;
-        pfn: ReturnType<CapExecs["parseFileName"]>;
+        ann: SpryFoundryAnnotation;
+        pfn: ReturnType<Foundries["parseFileName"]>;
     }[] = [];
     readonly ceMaterialized: {
         workflowStep: Workflow["workflowStep"];
         we: WalkEncounter<WalkSpec>;
-        ann: SpryCapExecEntryAnnotation;
+        ann: SpryFoundryAnnotation;
     }[] = [];
 
     constructor(
@@ -50,7 +50,7 @@ export class CapExecs {
             readonly mergeCtx?: Record<string, unknown>; // overrides merged into schema defaults
         },
     ) {
-        // any executable files in our path(s) can be capexec candidates
+        // any executable files in our path(s) can be foundry candidates
         // TODO: restrict it a bit more, though?
         this.candidates = Walkers.builder()
             .addRoot(plan.pp.projectFsPaths, {
@@ -67,34 +67,34 @@ export class CapExecs {
         };
     }
 
-    env(step: Workflow["workflowStep"], ce: CapExecs["ceSelected"][number]) {
+    env(step: Workflow["workflowStep"], ce: Foundries["ceSelected"][number]) {
         let ceEnv: Record<string, string> = {
-            CAPEXEC_PROJECT_HOME: this.plan.pp.projectFsPaths.root,
-            CAPEXEC_PROJECT_ID: this.plan.pp.projectFsPaths.identity ?? "",
-            CAPEXEC_PROJECT_SRC_HOME: this.plan.pp.projectSrcFsPaths.root,
-            CAPEXEC_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.fsHome,
-            CAPEXEC_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.fsAuto,
-            CAPEXEC_SOURCE_JSON: JSON.stringify(ce),
-            CAPEXEC_AUTO_MATERIALIZE: ce.pfn.materialize.auto
+            FOUNDRY_PROJECT_HOME: this.plan.pp.projectFsPaths.root,
+            FOUNDRY_PROJECT_ID: this.plan.pp.projectFsPaths.identity ?? "",
+            FOUNDRY_PROJECT_SRC_HOME: this.plan.pp.projectSrcFsPaths.root,
+            FOUNDRY_PROJECT_SPRYD_HOME: this.plan.pp.spryDropIn.fsHome,
+            FOUNDRY_PROJECT_SPRYD_AUTO: this.plan.pp.spryDropIn.fsAuto,
+            FOUNDRY_SOURCE_JSON: JSON.stringify(ce),
+            FOUNDRY_AUTO_MATERIALIZE: ce.pfn.materialize.auto
                 ? "TRUE"
                 : "FALSE",
-            CAPEXEC_MATERIALIZE_BASENAME: ce.pfn.materialize.auto
+            FOUNDRY_MATERIALIZE_BASENAME: ce.pfn.materialize.auto
                 ? ce.pfn.materialize.basename ?? ""
                 : "",
-            CAPEXEC_MATERIALIZE_PATH: ce.pfn.materialize.auto
+            FOUNDRY_MATERIALIZE_PATH: ce.pfn.materialize.auto
                 ? ce.pfn.materialize.path ?? ""
                 : "",
-            CAPEXEC_WORKFLOW_STEP: step ?? "unknown",
-            CAPEXEC_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
+            FOUNDRY_WORKFLOW_STEP: step ?? "unknown",
+            FOUNDRY_CONTEXT_JSON: JSON.stringify(this.contextForEnv),
         };
         if (step === "DESTROY_CLEAN") {
-            ceEnv.CAPEXEC_WORKFLOW_STEP = "TRUE";
+            ceEnv.FOUNDRY_WORKFLOW_STEP = "TRUE";
         }
         if (this.init?.cliOpts?.dbName) {
             const dbName = this.init.cliOpts.dbName;
             ceEnv = {
                 ...ceEnv,
-                CAPEXEC_TARGET_SQLITEDB: isAbsolute(dbName)
+                FOUNDRY_TARGET_SQLITEDB: isAbsolute(dbName)
                     ? dbName
                     : resolve(Deno.cwd(), dbName),
             };
@@ -102,7 +102,7 @@ export class CapExecs {
         return ceEnv;
     }
 
-    static async runCapExec(
+    static async execute(
         path: string,
         init?:
             & {
@@ -201,14 +201,14 @@ export class CapExecs {
         }
     }
 
-    async cleanMaterialized(ce: CapExecs["ceSelected"][number]) {
+    async cleanMaterialized(ce: Foundries["ceSelected"][number]) {
         if (ce.ann.isCleanable && ce.pfn.materialize.auto) {
             try {
                 // if ce.pfn.materialize.auto is true then .path! must be set
                 await Deno.remove(ce.pfn.materialize.path!);
             } catch (error) {
                 console.info(
-                    "Error cleaning isCleanable auto-materialized CapExec",
+                    "Error cleaning isCleanable auto-materialized foundry",
                     ce.we.entry.path,
                 );
                 console.info(ce.pfn.materialize.path!);
@@ -218,7 +218,7 @@ export class CapExecs {
 
         if (ce.ann.isCleanable && !ce.pfn.materialize.auto) {
             const { we } = ce;
-            await CapExecs.runCapExec(we.entry.path, {
+            await Foundries.execute(we.entry.path, {
                 env: this.env("DESTROY_CLEAN", ce),
                 cwd: Deno.cwd(),
                 ignoreOutput: true,
@@ -254,7 +254,7 @@ export class CapExecs {
 
     async catalog() {
         for await (const cec of this.candidates.encountered()) {
-            if (CapExecs.isExecutable(cec.entry.path)) {
+            if (Foundries.isExecutable(cec.entry.path)) {
                 try {
                     const anns = await extractAnnotationsFromText(
                         await Deno.readTextFile(cec.entry.path),
@@ -272,7 +272,7 @@ export class CapExecs {
                         this.plan.pp.webPaths,
                     );
                     if (
-                        entryAnn.parsed && entryAnn.parsed.nature === "cap-exec"
+                        entryAnn.parsed && entryAnn.parsed.nature === "foundry"
                     ) {
                         this.ceSelected.push({
                             we: cec,
@@ -297,12 +297,12 @@ export class CapExecs {
         const execute = async (
             ce: {
                 we: WalkEncounter<WalkSpec>;
-                ann: SpryCapExecEntryAnnotation;
-                pfn: ReturnType<CapExecs["parseFileName"]>;
+                ann: SpryFoundryAnnotation;
+                pfn: ReturnType<Foundries["parseFileName"]>;
             },
         ) => {
             const { we, ann, pfn } = ce;
-            await CapExecs.runCapExec(we.entry.path, {
+            await Foundries.execute(we.entry.path, {
                 env: this.env(step, ce),
                 cwd: Deno.cwd(),
                 materializeText: async (stdout, _stderr) => {
@@ -320,7 +320,7 @@ export class CapExecs {
                             });
                         } catch (error) {
                             this.lintr.add({
-                                rule: "invalid-cap-exec",
+                                rule: "invalid-foundry",
                                 code: "unable-to-materialize",
                                 content: we.origin.paths.relative(we.entry),
                                 message:
@@ -333,7 +333,7 @@ export class CapExecs {
                         }
                     } else {
                         this.lintr.add({
-                            rule: "invalid-cap-exec",
+                            rule: "invalid-foundry",
                             code: "invalid-file-name-pattern",
                             content: we.origin.paths.relative(we.entry),
                             message:

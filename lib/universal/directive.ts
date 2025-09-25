@@ -9,6 +9,7 @@
  * - Optional **typed events** via {@link Emitter} to observe parsing and output.
  * - **Structured error handling**: `onError(err, ctx) => "abandon" | "continue"`.
  * - **Line numbers** for events/errors—set `startLine` (default: 1).
+ * - **Payload has contentState**: { contentState: "unmodified" | "modified" } and will be set to "modified" on any successful render.
  *
  * Convenience helper {@link includeStream} composes a ready-to-use:
  * ```
@@ -86,7 +87,7 @@ export type IsCandidate<C extends CandidateDefn<Payload>, Payload> = (
  * Events & errors (line-numbered)
  * ────────────────────────────────────────────────────────────────────────── */
 
-export type ReplaceStreamEvents<C extends CandidateDefn<Any>> = {
+export type ReplaceStreamEvents<C extends CandidateDefn<Any>, Payload> = {
     line: (
         info: { lineWithDelim: string; lineNo: number; sourceLine: string },
     ) => void;
@@ -95,39 +96,51 @@ export type ReplaceStreamEvents<C extends CandidateDefn<Any>> = {
         line: string;
         lineNo: number;
         identity: string;
-        ctx: C;
+        probe: C;
         isBlock: boolean;
+        payload: Payload;
     }) => void;
 
     blockStart: (info: {
         identity: string;
-        ctx: C;
+        directive: C;
         beginLine: string;
         beginLineNo: number;
+        payload: Payload;
     }) => void;
 
     blockRender: (info: {
         identity: string;
-        ctx: C;
+        directive: C;
         result: string | string[] | ReadableStream<string | Uint8Array>;
         beginLineNo: number;
+        endLineNo: number;
+        payload: Payload;
     }) => void;
 
-    blockEnd: (
-        info: { identity: string; endLine: string; endLineNo: number },
-    ) => void;
+    blockEnd: (info: {
+        identity: string;
+        endLine: string;
+        endLineNo: number;
+        payload: Payload;
+    }) => void;
 
     inlineRender: (info: {
         identity: string;
-        ctx: C;
+        directive: C;
         replacedLine: string;
         lineNo: number;
         result: string | string[] | ReadableStream<string | Uint8Array>;
+        payload: Payload;
     }) => void;
 
     emitChunk: (info: { chunk: string; anchorLineNo: number }) => void;
 
-    error: (err: unknown, context: ReplaceErrorContext<C>) => void;
+    error: (
+        err: unknown,
+        context: ReplaceErrorContext<C>,
+        payload: Payload,
+    ) => void;
 };
 
 export type ReplaceErrorContext<C extends CandidateDefn<Any>> =
@@ -154,25 +167,30 @@ export type OnError<C extends CandidateDefn<Any>> = (
     ctx: ReplaceErrorContext<C>,
 ) => "abandon" | "continue";
 
-export type ProcessOverrides<C extends CandidateDefn<Payload>, Payload> =
-    Partial<{
-        isCandidate: IsCandidate<C, Payload>;
-        eol: "\n" | "\r\n";
-        onError: OnError<C>;
-        events: Emitter<ReplaceStreamEvents<C>>;
-        startLine: number;
-    }>;
+export type ProcessOverrides<
+    C extends CandidateDefn<Payload>,
+    Payload extends { contentState: "unmodified" | "modified" },
+> = Partial<{
+    isCandidate: IsCandidate<C, Payload>;
+    eol: "\n" | "\r\n";
+    onError: OnError<C>;
+    events: Emitter<ReplaceStreamEvents<C, Payload>>;
+    startLine: number;
+}>;
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * Core engine
  * ────────────────────────────────────────────────────────────────────────── */
 
-export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
+export class ReplaceStream<
+    C extends CandidateDefn<Payload>,
+    Payload extends { contentState: "unmodified" | "modified" },
+> {
     constructor(
         private readonly isCandidate: IsCandidate<C, Payload>,
         private readonly opts?: {
             onError?: OnError<C>;
-            events?: Emitter<ReplaceStreamEvents<C>>;
+            events?: Emitter<ReplaceStreamEvents<C, Payload>>;
             startLine?: number;
         },
     ) {}
@@ -191,6 +209,12 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
         const lineIter = typeof input === "string"
             ? ReplaceStream.iterateStringLines(input)
             : ReplaceStream.iterateStreamLines(input);
+
+        const markModified = () => {
+            if (payload.contentState !== "modified") {
+                payload.contentState = "modified";
+            }
+        };
 
         const createState = () => ({
             eol: overrides?.eol as "\n" | "\r\n" | undefined,
@@ -237,6 +261,7 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                                 "error",
                                 new Error("Unterminated block"),
                                 ctx,
+                                payload,
                             );
                             const decision = onError?.(
                                 new Error("Unterminated block"),
@@ -281,7 +306,7 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                                 identity: state.identity!,
                                 cand: state.cand!,
                             };
-                            events?.emit("error", err, ctx);
+                            events?.emit("error", err, ctx, payload);
                             const decision = onError?.(err, ctx) ?? "abandon";
                             if (decision === "abandon") {
                                 controller.close();
@@ -312,23 +337,27 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                             );
                             events?.emit("blockRender", {
                                 identity: state.identity!,
-                                ctx: state.cand!,
+                                directive: state.cand!,
                                 result: res,
                                 beginLineNo: state.beginLineNo,
+                                endLineNo: state.curLineNo,
+                                payload,
                             });
 
                             const eol = state.eol ?? (state.firstDelim || "\n");
-                            const chunk = await ReplaceStream.materializeResult(
+                            await ReplaceStream.pipeResultToController(
                                 res,
                                 eol,
+                                (chunk) => {
+                                    controller.enqueue(chunk);
+                                    events?.emit("emitChunk", {
+                                        chunk,
+                                        anchorLineNo: state?.beginLineNo ?? -1,
+                                    });
+                                },
                             );
-                            if (chunk.length) {
-                                controller.enqueue(chunk);
-                                events?.emit("emitChunk", {
-                                    chunk,
-                                    anchorLineNo: state.beginLineNo,
-                                });
-                            }
+                            // successful render → mark modified
+                            markModified();
                         } catch (err) {
                             const ctx: ReplaceErrorContext<C> = {
                                 phase: "render",
@@ -336,12 +365,13 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                                 cand: state.cand!,
                                 anchorLineNo: state.beginLineNo,
                             };
-                            events?.emit("error", err, ctx);
+                            events?.emit("error", err, ctx, payload);
                             const decision = onError?.(err, ctx) ?? "abandon";
                             if (decision === "abandon") {
                                 controller.close();
                                 return;
                             }
+                            // on continue, emit original inner → do NOT mark modified
                             for (const l of state.inner) {
                                 controller.enqueue(l);
                                 events?.emit("emitChunk", {
@@ -360,6 +390,7 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                             identity: state.identity!,
                             endLine: ln.whole,
                             endLineNo: state.curLineNo,
+                            payload,
                         });
 
                         state.curLineNo++;
@@ -397,7 +428,7 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                             line: stripped,
                             lineNo: state.curLineNo,
                         };
-                        events?.emit("error", err, ctx);
+                        events?.emit("error", err, ctx, payload);
                         const decision = onError?.(err, ctx) ?? "abandon";
                         if (decision === "abandon") {
                             controller.close();
@@ -426,8 +457,9 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                         line: stripped,
                         lineNo: state.curLineNo,
                         identity: cand.directive,
-                        ctx: cand,
+                        probe: cand,
                         isBlock: !!cand.blockEnd,
+                        payload,
                     });
 
                     if (cand.blockEnd) {
@@ -440,9 +472,10 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                         state.cand = cand;
                         events?.emit("blockStart", {
                             identity: cand.directive,
-                            ctx: cand,
+                            directive: cand,
                             beginLine: ln.whole,
                             beginLineNo: state.beginLineNo,
+                            payload,
                         });
                         state.curLineNo++;
                         continue;
@@ -453,23 +486,29 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                         const res = await cand.render(payload, state.curLineNo);
                         events?.emit("inlineRender", {
                             identity: cand.directive,
-                            ctx: cand,
+                            directive: cand,
                             replacedLine: ln.whole,
                             lineNo: state.curLineNo,
                             result: res,
+                            payload,
                         });
-                        const eol = state.eol ?? (state.firstDelim || "\n");
-                        const chunk = await ReplaceStream.materializeResult(
+                        const eol = ReplaceStream.pickEol(
+                            ln.delim as "\n" | "\r\n" | "" | undefined,
+                        ) ?? (state.eol ?? (state.firstDelim || "\n"));
+
+                        await ReplaceStream.pipeResultToController(
                             res,
-                            ReplaceStream.pickEol(
-                                ln.delim as "\n" | "\r\n" | "" | undefined,
-                            ) ?? eol,
+                            eol,
+                            (chunk) => {
+                                controller.enqueue(chunk);
+                                events?.emit("emitChunk", {
+                                    chunk,
+                                    anchorLineNo: state?.curLineNo ?? -1,
+                                });
+                            },
                         );
-                        controller.enqueue(chunk);
-                        events?.emit("emitChunk", {
-                            chunk,
-                            anchorLineNo: state.curLineNo,
-                        });
+                        // successful render → mark modified
+                        markModified();
                     } catch (err) {
                         const ctx: ReplaceErrorContext<C> = {
                             phase: "render",
@@ -477,12 +516,13 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
                             cand,
                             anchorLineNo: state.curLineNo,
                         };
-                        events?.emit("error", err, ctx);
+                        events?.emit("error", err, ctx, payload);
                         const decision = onError?.(err, ctx) ?? "abandon";
                         if (decision === "abandon") {
                             controller.close();
                             return;
                         }
+                        // on continue, emit original line → do NOT mark modified
                         controller.enqueue(ln.whole);
                         events?.emit("emitChunk", {
                             chunk: ln.whole,
@@ -515,8 +555,8 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
     }
 
     /* ──────────────────────────────────────────────────────────────────────── *
-   * Small helpers
-   * ──────────────────────────────────────────────────────────────────────── */
+     * Small helpers
+     * ──────────────────────────────────────────────────────────────────────── */
 
     static defaultOnError: OnError<CandidateDefn<Any>> = () => "abandon";
 
@@ -610,6 +650,55 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
         if (buf.length) yield { whole: buf, delim: "" as const };
     }
 
+    /**
+     * Stream result directly to the controller without whole-buffer materialization.
+     * Guarantees exactly one trailing EOL if the rendered output didn’t end in one.
+     */
+    static async pipeResultToController(
+        res: string | string[] | ReadableStream<string | Uint8Array>,
+        eol: "\n" | "\r\n",
+        enqueue: (chunk: string) => void,
+    ) {
+        // string path
+        if (typeof res === "string") {
+            enqueue(ReplaceStream.ensureTextHasTrailingEol(res, eol));
+            return;
+        }
+        // string[] path
+        if (Array.isArray(res)) {
+            const joined = res.join(eol);
+            enqueue(ReplaceStream.ensureTextHasTrailingEol(joined, eol));
+            return;
+        }
+        // ReadableStream path — pass chunks through as they come
+        const reader = ReplaceStream.toStringStream(res).getReader();
+
+        // Track last up to 2 chars to detect '\n' or '\r\n' at the end
+        let tail = "";
+        let sawAny = false;
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const chunk = value!;
+            enqueue(chunk);
+            sawAny = true;
+
+            // update tail (last 2 chars)
+            if (chunk.length >= 2) {
+                tail = chunk.slice(-2);
+            } else if (chunk.length === 1) {
+                tail = (tail + chunk).slice(-2);
+            }
+        }
+
+        const endsWithLF = tail.endsWith("\n");
+        if (!sawAny || !endsWithLF) {
+            enqueue(eol);
+        }
+    }
+
+    // Legacy helper: used by processToString; streaming paths should use pipeResultToController.
     static async materializeResult(
         res: string | string[] | ReadableStream<string | Uint8Array>,
         eol: "\n" | "\r\n",
@@ -641,7 +730,9 @@ export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
  * Compose {@link ReplaceStream} with a ready-to-use “#include” style macro.
  * Uses `CandidateDefn<Payload>` directly to avoid unsafe casts.
  */
-export function includeStream<Payload>(
+export function includeStream<
+    Payload extends { contentState: "unmodified" | "modified" },
+>(
     input: string | ReadableStream<Uint8Array | string>,
     opts: {
         render: (
@@ -656,7 +747,7 @@ export function includeStream<Payload>(
         endPrefix?: string;
         eol?: "\n" | "\r\n";
         onError?: OnError<CandidateDefn<Payload>>;
-        events?: Emitter<ReplaceStreamEvents<CandidateDefn<Payload>>>;
+        events?: Emitter<ReplaceStreamEvents<CandidateDefn<Payload>, Payload>>;
         overrides?: Omit<
             ProcessOverrides<CandidateDefn<Payload>, Payload>,
             "isCandidate" | "eol" | "onError" | "events"

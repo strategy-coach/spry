@@ -14,7 +14,9 @@ import {
     ReplaceStreamEvents,
     streamToString,
     textToShellArgv,
-} from "./macro.ts";
+} from "./directive.ts";
+
+type Payload = { contentState: "unmodified" | "modified" };
 
 // ———————————————————————————————————————————
 // Small helpers for tests
@@ -127,7 +129,7 @@ Deno.test("streamToString", async () => {
 });
 
 Deno.test("ReplaceStream inline replacement", async () => {
-    type P = { x: number };
+    type P = Payload & { x: number };
     type C = CandidateDefn<P>;
 
     const isCandidate = (line: string, _n: number, _p: P): C | false => {
@@ -146,12 +148,15 @@ Deno.test("ReplaceStream inline replacement", async () => {
 
     const engine = new ReplaceStream<C, P>(isCandidate);
     const input = "=sum 1 2 3\nother\n";
-    const out = await engine.processToString(input, { x: 4 });
+    const out = await engine.processToString(input, {
+        x: 4,
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "10\nother\n");
 });
 
 Deno.test("ReplaceStream inline preserves existing EOL or infers", async (t) => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false =>
         line.startsWith("=x")
@@ -164,25 +169,31 @@ Deno.test("ReplaceStream inline preserves existing EOL or infers", async (t) => 
 
     await t.step("LF preserved", async () => {
         const eng = new ReplaceStream<C, P>(isCandidate);
-        const res = await eng.processToString("=x\n", {});
+        const res = await eng.processToString("=x\n", {
+            contentState: "unmodified",
+        });
         assertEquals(res.after, "Z\n");
     });
 
     await t.step("CRLF preserved", async () => {
         const eng = new ReplaceStream<C, P>(isCandidate);
-        const res = await eng.processToString("=x\r\n", {});
+        const res = await eng.processToString("=x\r\n", {
+            contentState: "unmodified",
+        });
         assertEquals(res.after, "Z\r\n");
     });
 
     await t.step("no EOL on input line → inferred LF", async () => {
         const eng = new ReplaceStream<C, P>(isCandidate);
-        const res = await eng.processToString("=x", {});
+        const res = await eng.processToString("=x", {
+            contentState: "unmodified",
+        });
         assertEquals(res.after, "Z\n");
     });
 });
 
 Deno.test("ReplaceStream block replacement with markers preserved", async () => {
-    type P = { word: string };
+    type P = Payload & { word: string };
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false => {
         if (line.trim() === "BEGIN") {
@@ -197,7 +208,10 @@ Deno.test("ReplaceStream block replacement with markers preserved", async () => 
     };
     const engine = new ReplaceStream<C, P>(isCandidate);
     const input = ["x", "BEGIN", "old1", "old2", "END", "y"].join("\n") + "\n";
-    const out = await engine.processToString(input, { word: "W" });
+    const out = await engine.processToString(input, {
+        word: "W",
+        contentState: "unmodified",
+    });
     assertEquals(
         out.after,
         ["x", "BEGIN", "A:W", "B:ok", "END", "y", ""].join("\n"),
@@ -205,7 +219,7 @@ Deno.test("ReplaceStream block replacement with markers preserved", async () => 
 });
 
 Deno.test("ReplaceStream render returning ReadableStream", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
 
     const isCandidate = (line: string): C | false =>
@@ -218,16 +232,18 @@ Deno.test("ReplaceStream render returning ReadableStream", async () => {
             : false;
 
     const eng = new ReplaceStream<C, P>(isCandidate);
-    const out = await eng.processToString("=rs\n", {});
+    const out = await eng.processToString("=rs\n", {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "hello world\n");
 });
 
 Deno.test("ReplaceStream events fire in expected order (inline)", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const events: string[] = [];
 
-    const emitter = new Emitter<ReplaceStreamEvents<C>>();
+    const emitter = new Emitter<ReplaceStreamEvents<C, P>>();
     emitter.on("line", (i) => events.push(`line#${i.lineNo}`));
     emitter.on("candidate", (i) => events.push(`cand:${i.identity}`));
     emitter.on("inlineRender", (i) => events.push(`ir:${i.identity}`));
@@ -247,7 +263,9 @@ Deno.test("ReplaceStream events fire in expected order (inline)", async () => {
         startLine: 10,
     });
 
-    const res = await eng.processToString("=x\n", {});
+    const res = await eng.processToString("=x\n", {
+        contentState: "unmodified",
+    });
     assertEquals(res.after, "Z\n");
     assertEquals(events, [
         "line#10",
@@ -258,7 +276,7 @@ Deno.test("ReplaceStream events fire in expected order (inline)", async () => {
 });
 
 Deno.test("Error policy: candidate throws → continue preserves text", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
 
     const isCandidate = (_line: string, _n: number): C | false => {
@@ -275,17 +293,19 @@ Deno.test("Error policy: candidate throws → continue preserves text", async ()
     emitter.on("error", (e) => errors.push(String(e)));
 
     const eng = new ReplaceStream<C, P>(isCandidate, {
-        events: emitter as unknown as Emitter<ReplaceStreamEvents<C>>,
+        events: emitter as unknown as Emitter<ReplaceStreamEvents<C, P>>,
         onError: () => "continue",
     });
     const input = "plain\n";
-    const out = await eng.processToString(input, {});
+    const out = await eng.processToString(input, {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, input);
     assertMatch(errors[0], /bad detect/);
 });
 
 Deno.test("Error policy: blockEnd predicate throws → continue keeps inner", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
 
     const isCandidate = (line: string): C | false => {
@@ -307,12 +327,14 @@ Deno.test("Error policy: blockEnd predicate throws → continue keeps inner", as
     });
 
     const input = "BEGIN\n1\n2\nEND\n";
-    const out = await eng.processToString(input, {});
+    const out = await eng.processToString(input, {
+        contentState: "unmodified",
+    });
     assertMatch(out.after, /^BEGIN\n1\n2\nEND\n$/);
 });
 
 Deno.test("Unterminated block → continue policy best-effort passthrough", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false =>
         line.trim() === "BEGIN"
@@ -328,12 +350,14 @@ Deno.test("Unterminated block → continue policy best-effort passthrough", asyn
         onError: () => "continue",
     });
 
-    const out = await eng.processToString("BEGIN\nx\n", {});
+    const out = await eng.processToString("BEGIN\nx\n", {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "BEGIN\nx\n");
 });
 
 Deno.test("CRLF inference for inserted lines within block", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
 
     const isCandidate = (line: string): C | false =>
@@ -348,7 +372,9 @@ Deno.test("CRLF inference for inserted lines within block", async () => {
 
     const eng = new ReplaceStream<C, P>(isCandidate);
     const input = "X\r\nBEGIN\r\nOLD\r\nEND\r\nY\r\n";
-    const res = await eng.processToString(input, {});
+    const res = await eng.processToString(input, {
+        contentState: "unmodified",
+    });
     assertEquals(res.after, "X\r\nBEGIN\r\na\r\nb\r\nEND\r\nY\r\n");
 });
 
@@ -375,7 +401,7 @@ Deno.test("includeStream: basic happy path with two regions", async () => {
             },
             startLine: 1,
         },
-        {} as Record<PropertyKey, never>,
+        { contentState: "unmodified" },
     );
 
     const out = await streamToString(rs);
@@ -405,14 +431,14 @@ Deno.test("includeStream: ensure end matches same name", async () => {
             render: () => ["X"],
             onError: () => "continue",
         },
-        {} as Record<PropertyKey, never>,
+        { contentState: "unmodified" },
     );
     const out = await streamToString(rs);
     assertEquals(out, input);
 });
 
 Deno.test("ReplaceStream accepts ReadableStream input", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false =>
         line.startsWith("=hi")
@@ -421,12 +447,14 @@ Deno.test("ReplaceStream accepts ReadableStream input", async () => {
 
     const eng = new ReplaceStream<C, P>(isCandidate);
     const input = rsFromStrings("=hi", "\n", "plain\n");
-    const out = await eng.processToString(input, {});
+    const out = await eng.processToString(input, {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "yo\nplain\n");
 });
 
 Deno.test("Inline render returns empty string → engine appends EOL", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false =>
         line === "=empty"
@@ -437,12 +465,14 @@ Deno.test("Inline render returns empty string → engine appends EOL", async () 
             }
             : false;
     const eng = new ReplaceStream<C, P>(isCandidate);
-    const out = await eng.processToString("=empty\n", {});
+    const out = await eng.processToString("=empty\n", {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "\n");
 });
 
 Deno.test("Block render returns empty array → single EOL inserted", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
     const isCandidate = (line: string): C | false =>
         line.trim() === "BEGIN"
@@ -455,16 +485,18 @@ Deno.test("Block render returns empty array → single EOL inserted", async () =
             : false;
 
     const eng = new ReplaceStream<C, P>(isCandidate);
-    const out = await eng.processToString("BEGIN\nOLD\nEND\n", {});
+    const out = await eng.processToString("BEGIN\nOLD\nEND\n", {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "BEGIN\n\nEND\n");
 });
 
 Deno.test("startLine offsets event line numbers", async () => {
-    type P = Record<PropertyKey, never>;
+    type P = Payload;
     type C = CandidateDefn<P>;
 
     const ev: number[] = [];
-    const emitter = new Emitter<ReplaceStreamEvents<C>>();
+    const emitter = new Emitter<ReplaceStreamEvents<C, P>>();
     emitter.on("line", (i) => ev.push(i.lineNo));
 
     const isCandidate = (_l: string): C | false => false;
@@ -474,7 +506,9 @@ Deno.test("startLine offsets event line numbers", async () => {
         startLine: 5,
     });
 
-    const out = await eng.processToString("a\nb\n", {});
+    const out = await eng.processToString("a\nb\n", {
+        contentState: "unmodified",
+    });
     assertEquals(out.after, "a\nb\n");
     assertEquals(ev, [5, 6]);
 });

@@ -25,8 +25,8 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         ...spryEntryAnnCommon,
     }).strict(),
     z.object({
-        nature: z.literal("cap-exec").describe(
-            "A capturable executable",
+        nature: z.literal("foundry").describe(
+            "An executable which generates and materializes output",
         ),
         runBeforeAnnCatalog: z.boolean().default(true).optional().describe(
             "Instruct engine to run this before catalogging SQLPage file annotations",
@@ -35,7 +35,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
             "Instruct engine to run this after catalogging SQLPage file annotations",
         ),
         isCleanable: z.boolean().default(false).optional().describe(
-            "Instruct engine that when `clean` (delete generated artifacts) is called, call this cap ex too (CAPEXEC_DESTROY_CLEAN env var will be set)",
+            "Instruct engine that when `clean` (delete generated artifacts) is called, call this cap ex too (FOUNDRY_DESTROY_CLEAN env var will be set)",
         ),
         dependsOn: z.enum(["none", "db-after-build"]).default("none").optional()
             .describe(
@@ -84,7 +84,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
    Possible values are:
    - 'action' for SQLPage code that executes and redirects back to a page
    - 'api' for SQLPage API endpoints
-   - 'cap-exec' for Capturable Executables
+   - 'foundry' for executables which generate and materialize content
    - 'resource' for JSON or other types of data
    - 'page' for standard SQLPage SSG pages (default)
    - 'partial' for SQLPage SSG partials, usually imported into other pages

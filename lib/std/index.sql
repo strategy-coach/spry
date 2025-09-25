@@ -1,5 +1,6 @@
--- @region.include ./middleware/file.sql
--- @region.includeEnd file.sql
+-- #include blockName -f ./middleware/file.sql
+/** this will be replaced! **/
+-- #includeEnd blockName
 
 -- @route.title 'Spry Backend-as-a-Service (BaaS)' @route.caption "Spry BaaS"
 -- @route.description 'Welcome to Spry Backend-as-a-Service (BaaS) Database' 
