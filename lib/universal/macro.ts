@@ -4,9 +4,7 @@
  * Stream-first, comment-driven text macro engine with great DX.
  *
  * - Works on strings **or** streams; outputs a `ReadableStream<string>` as it processes.
- * - Delegates parsing & rendering to two tiny callbacks:
- *   - {@link IsCandidate} → detect macro candidates (inline or block begin)
- *   - {@link IsMacro} → provide a `render()` that returns replacement **lines** (no EOLs)
+ * - Delegate detection to {@link IsCandidate} which returns a candidate **with render()**.
  * - Preserves block begin/end markers; replaces **only** inner lines.
  * - Optional **typed events** via {@link Emitter} to observe parsing and output.
  * - **Structured error handling**: `onError(err, ctx) => "abandon" | "continue"`.
@@ -18,27 +16,26 @@
  *   ...replaced...
  * -- #includeEnd <name>
  * ```
- * You provide only `render(identity, raw)`.
+ * You provide only `render(identity, candidate)`.
  */
 
+// deno-lint-ignore no-explicit-any
+type Any = any;
+
 /* ────────────────────────────────────────────────────────────────────────── *
- * Typed event emitter (optional, minimal)
+ * Minimal typed event emitter
  * ────────────────────────────────────────────────────────────────────────── */
 
-/** Minimal, strongly-typed event emitter. Tree-shakable, zero-dep. */
 // deno-lint-ignore no-explicit-any
 export type EventMap = Record<string, (...args: any[]) => void>;
 
 export class Emitter<Events extends EventMap> {
     private readonly listeners: { [K in keyof Events]?: Set<Events[K]> } = {};
 
-    /** Subscribe; returns an unsubscribe function. */
     on<K extends keyof Events>(event: K, handler: Events[K]) {
         (this.listeners[event] ??= new Set()).add(handler);
         return () => this.off(event, handler);
     }
-
-    /** Subscribe once; auto-unsubscribes on first call. */
     once<K extends keyof Events>(event: K, handler: Events[K]) {
         const off = this.on(
             event,
@@ -49,13 +46,9 @@ export class Emitter<Events extends EventMap> {
         );
         return off;
     }
-
-    /** Unsubscribe. */
     off<K extends keyof Events>(event: K, handler: Events[K]) {
         this.listeners[event]?.delete(handler);
     }
-
-    /** Emit to current subscribers (copy for safe iteration). */
     emit<K extends keyof Events>(event: K, ...args: Parameters<Events[K]>) {
         const ls = this.listeners[event];
         if (!ls?.size) return;
@@ -67,120 +60,78 @@ export class Emitter<Events extends EventMap> {
  * Public macro types
  * ────────────────────────────────────────────────────────────────────────── */
 
-export type CandidateDefn = {
+export type CandidateDefn<Payload> = {
     readonly directive: string;
     readonly argsText: string;
+    readonly render: (
+        payload: Payload,
+        curLineNo: number,
+    ) =>
+        | Promise<string | string[] | ReadableStream<string | Uint8Array>>
+        | string
+        | string[]
+        | ReadableStream<string | Uint8Array>;
     readonly blockEnd?: (line: string) => boolean;
 };
 
-/**
- * Return shape from {@link IsCandidate}. `false` means "not a macro line".
- * - `identity`: name/handle for this macro occurrence (e.g., region label)
- * - `raw`: trailing unparsed text after your macro prefix (free-form)
- * - `blockEnd?`: presence marks a **block** macro; predicate returns true at the end line
- */
-export type Candidate<C extends CandidateDefn> = false | C;
+export type Candidate<C extends CandidateDefn<Payload>, Payload> = false | C;
 
-/** Return shape from {@link IsMacro}. `false` => unknown macro → original text preserved. */
-export type Macro =
-    | false
-    | { render: () => Promise<string | string[]> | string | string[] };
-
-/** Decide if a line starts a macro (inline or block). */
-export type IsCandidate<C extends CandidateDefn, Payload> = (
+export type IsCandidate<C extends CandidateDefn<Payload>, Payload> = (
     line: string,
     lineNum: number,
     payload: Payload,
-) => Candidate<C> | Promise<Candidate<C>>;
-
-/** For a detected macro (`identity`, `raw`), provide a renderer or `false` to pass-through. */
-export type IsMacro<C extends CandidateDefn> = (
-    identity: string,
-    ctx: C,
-) => Macro | Promise<Macro>;
+) => Candidate<C, Payload> | Promise<Candidate<C, Payload>>;
 
 /* ────────────────────────────────────────────────────────────────────────── *
- * Events & errors (with line numbers)
+ * Events & errors (line-numbered)
  * ────────────────────────────────────────────────────────────────────────── */
 
-/** Events fired by {@link ReplaceStream}. Line numbers are 1-based. */
-export type ReplaceStreamEvents<C extends CandidateDefn> = {
-    /** Every input line as read (can be chatty). */
-    line: (info: { lineWithDelim: string; lineNo: number }) => void;
-
-    /** A candidate macro was detected on this line. */
-    candidate: (
-        info: {
-            line: string;
-            lineNo: number;
-            identity: string;
-            ctx: C;
-            isBlock: boolean;
-        },
+export type ReplaceStreamEvents<C extends CandidateDefn<Any>> = {
+    line: (
+        info: { lineWithDelim: string; lineNo: number; sourceLine: string },
     ) => void;
 
-    /** Candidate found but `isMacro` returned false → passthrough. */
-    unknownMacro: (
-        info: { line: string; lineNo: number; identity: string; ctx: C },
-    ) => void;
+    candidate: (info: {
+        line: string;
+        lineNo: number;
+        identity: string;
+        ctx: C;
+        isBlock: boolean;
+    }) => void;
 
-    /** Block began at `beginLineNo`. */
-    blockStart: (
-        info: {
-            identity: string;
-            ctx: C;
-            beginLine: string;
-            beginLineNo: number;
-        },
-    ) => void;
+    blockStart: (info: {
+        identity: string;
+        ctx: C;
+        beginLine: string;
+        beginLineNo: number;
+    }) => void;
 
-    /** Block replacement lines computed (anchored to begin line). */
-    blockRender: (
-        info: {
-            identity: string;
-            ctx: C;
-            lines: string | string[];
-            beginLineNo: number;
-        },
-    ) => void;
+    blockRender: (info: {
+        identity: string;
+        ctx: C;
+        result: string | string[] | ReadableStream<string | Uint8Array>;
+        beginLineNo: number;
+    }) => void;
 
-    /** Block ended at `endLineNo`. */
     blockEnd: (
         info: { identity: string; endLine: string; endLineNo: number },
     ) => void;
 
-    /** Inline replacement computed at `lineNo`. */
-    inlineRender: (
-        info: {
-            identity: string;
-            ctx: C;
-            replacedLine: string;
-            lineNo: number;
-            lines: string | string[];
-        },
-    ) => void;
+    inlineRender: (info: {
+        identity: string;
+        ctx: C;
+        replacedLine: string;
+        lineNo: number;
+        result: string | string[] | ReadableStream<string | Uint8Array>;
+    }) => void;
 
-    /**
-     * A chunk was enqueued to the output stream.
-     * - Inline anchor: original lineNo
-     * - Block anchor:  beginLineNo (for begin/replacement/end)
-     */
     emitChunk: (info: { chunk: string; anchorLineNo: number }) => void;
 
-    /** An error was caught. See {@link ReplaceErrorContext}. */
     error: (err: unknown, context: ReplaceErrorContext<C>) => void;
 };
 
-/** Structured error context with precise location data. */
-export type ReplaceErrorContext<C extends CandidateDefn> =
+export type ReplaceErrorContext<C extends CandidateDefn<Any>> =
     | { phase: "candidate"; line: string; lineNo: number }
-    | {
-        phase: "macro";
-        line: string;
-        lineNo: number;
-        identity: string;
-        cand: C;
-    }
     | {
         phase: "blockEnd";
         probeLine: string;
@@ -198,99 +149,42 @@ export type ReplaceErrorContext<C extends CandidateDefn> =
         cand: C;
     };
 
-/**
- * Error policy hook.
- * - `"abandon"`: fail fast (default) → stream closes immediately
- * - `"continue"`: preserve original text for that occurrence and proceed
- */
-export type OnError = <C extends CandidateDefn>(
+export type OnError<C extends CandidateDefn<Any>> = (
     err: unknown,
     ctx: ReplaceErrorContext<C>,
 ) => "abandon" | "continue";
 
-export type ProcessOverrides<C extends CandidateDefn, Payload> = Partial<{
-    /** Override the candidate detector. */
-    isCandidate: IsCandidate<C, Payload>;
-    /** Override the macro resolver/renderer. */
-    isMacro: IsMacro<C>;
-    /** Force EOL for **inserted** lines; inferred from first delimiter if omitted. */
-    eol: "\n" | "\r\n";
-    /** Error policy hook (overrides constructor). */
-    onError: OnError;
-    /** Typed event emitter for observability. */
-    events: Emitter<ReplaceStreamEvents<C>>;
-    /** Starting 1-based line number for the first input line (default: 1). */
-    startLine: number;
-}>;
+export type ProcessOverrides<C extends CandidateDefn<Payload>, Payload> =
+    Partial<{
+        isCandidate: IsCandidate<C, Payload>;
+        eol: "\n" | "\r\n";
+        onError: OnError<C>;
+        events: Emitter<ReplaceStreamEvents<C>>;
+        startLine: number;
+    }>;
 
 /* ────────────────────────────────────────────────────────────────────────── *
- * Core engine: ReplaceStream
+ * Core engine
  * ────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Stream-first macro replacer. Tiny API, predictable behavior.
- *
- * - **Inline**: the line is replaced by `render()` result.
- * - **Block**: begin/end markers are preserved; only inner lines are replaced.
- * - **Idempotent** by design if your `render()` is deterministic.
- *
- * @example
- * ```ts
- * const isCandidate: IsCandidate = (line) => {
- *   if (!line.startsWith("-- #include ")) return false;
- *   const name = line.slice("-- #include ".length).split(/\s+/,1)[0] ?? "";
- *   if (!name) return false;
- *   const raw = line.slice("-- #include ".length + name.length).trimStart();
- *   return { identity: name, raw, blockEnd: (probe) => probe.trim() === `-- #includeEnd ${name}` };
- * };
- *
- * const isMacro: IsMacro = (id, raw) => ({ render: () => [`[${id}]`, raw] });
- *
- * const engine = new ReplaceStream(isCandidate, isMacro, {
- *   onError: (err, ctx) => "continue",
- *   events: new Emitter(),
- *   startLine: 1,
- * });
- *
- * const result = await engine.processToString("-- #include libs X\nOLD\n-- #includeEnd libs\n");
- * console.log(result.after);
- * ```
- */
-export class ReplaceStream<C extends CandidateDefn, Payload> {
-    /**
-     * @param isCandidate Decide if a line starts a macro (inline or block).
-     * @param isMacro     For a detected macro, return a renderer or `false` to pass through.
-     * @param opts        Optional defaults: `onError`, `events`, `startLine`.
-     */
+export class ReplaceStream<C extends CandidateDefn<Payload>, Payload> {
     constructor(
         private readonly isCandidate: IsCandidate<C, Payload>,
-        private readonly isMacro: IsMacro<C>,
         private readonly opts?: {
-            onError?: OnError;
+            onError?: OnError<C>;
             events?: Emitter<ReplaceStreamEvents<C>>;
             startLine?: number;
         },
     ) {}
 
-    /**
-     * Process an input (string or stream) and return a **ReadableStream<string>**
-     * that emits the edited text as it’s produced.
-     *
-     * @example
-     * ```ts
-     * const rs = engine.processToStream(myString, { startLine: 10 });
-     * const text = await new Response(rs).text();
-     * ```
-     */
     processToStream(
         input: string | ReadableStream<Uint8Array | string>,
-        payload?: Payload,
+        payload: Payload,
         overrides?: ProcessOverrides<C, Payload>,
     ) {
         const isCandidate = overrides?.isCandidate ?? this.isCandidate;
-        const isMacro = overrides?.isMacro ?? this.isMacro;
         const onError = overrides?.onError ?? this.opts?.onError ??
-            ReplaceStream.defaultOnError;
+            ReplaceStream.defaultOnError as OnError<C>;
         const events = overrides?.events ?? this.opts?.events;
         const startLine = overrides?.startLine ?? this.opts?.startLine ?? 1;
 
@@ -303,7 +197,7 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
             firstDelim: undefined as "\n" | "\r\n" | undefined,
             inBlock: false,
             identity: undefined as string | undefined,
-            cand: undefined as CandidateDefn | undefined,
+            cand: undefined as C | undefined,
             beginLine: undefined as string | undefined,
             beginLineNo: 0,
             inner: [] as string[],
@@ -327,7 +221,7 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                 if (!state) state = createState();
 
                 while (true) {
-                    // ── Block mode: consume until end marker or EOF
+                    // ── Block mode
                     if (state.inBlock) {
                         const { value, done } = await state.nextLine();
                         if (done) {
@@ -337,7 +231,7 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                                 beginLineNo: state.beginLineNo,
                                 innerCount: state.inner.length,
                                 identity: state.identity!,
-                                cand: state.cand! as C,
+                                cand: state.cand!,
                             };
                             events?.emit(
                                 "error",
@@ -352,7 +246,6 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                                 controller.close();
                                 return;
                             }
-                            // continue → best-effort pass-through
                             controller.enqueue(state.beginLine!);
                             events?.emit("emitChunk", {
                                 chunk: state.beginLine!,
@@ -370,23 +263,23 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                         }
 
                         const ln = value!;
+                        const stripped = ReplaceStream.stripDelim(ln.whole);
                         events?.emit("line", {
                             lineWithDelim: ln.whole,
                             lineNo: state.curLineNo,
+                            sourceLine: stripped,
                         });
 
                         let ends = false;
                         try {
-                            ends = state.blockEnd!(
-                                ReplaceStream.stripDelim(ln.whole),
-                            );
+                            ends = state.blockEnd!(stripped);
                         } catch (err) {
                             const ctx: ReplaceErrorContext<C> = {
                                 phase: "blockEnd",
-                                probeLine: ReplaceStream.stripDelim(ln.whole),
+                                probeLine: stripped,
                                 probeLineNo: state.curLineNo,
                                 identity: state.identity!,
-                                cand: state.cand! as C,
+                                cand: state.cand!,
                             };
                             events?.emit("error", err, ctx);
                             const decision = onError?.(err, ctx) ?? "abandon";
@@ -405,66 +298,42 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                             continue;
                         }
 
-                        // Found end marker at current line
+                        // Found end marker
                         controller.enqueue(state.beginLine!);
                         events?.emit("emitChunk", {
                             chunk: state.beginLine!,
                             anchorLineNo: state.beginLineNo,
                         });
 
-                        // Render and insert
                         try {
-                            const m = await ReplaceStream.resolveMacro<C>(
-                                isMacro,
-                                state.identity!,
-                                state.cand! as C,
+                            const res = await state.cand!.render(
+                                payload,
+                                state.beginLineNo,
                             );
-                            if (!m) {
-                                events?.emit("unknownMacro", {
-                                    line: ReplaceStream.stripDelim(
-                                        state.beginLine!,
-                                    ),
-                                    lineNo: state.beginLineNo,
-                                    identity: state.identity!,
-                                    ctx: state.cand! as C,
+                            events?.emit("blockRender", {
+                                identity: state.identity!,
+                                ctx: state.cand!,
+                                result: res,
+                                beginLineNo: state.beginLineNo,
+                            });
+
+                            const eol = state.eol ?? (state.firstDelim || "\n");
+                            const chunk = await ReplaceStream.materializeResult(
+                                res,
+                                eol,
+                            );
+                            if (chunk.length) {
+                                controller.enqueue(chunk);
+                                events?.emit("emitChunk", {
+                                    chunk,
+                                    anchorLineNo: state.beginLineNo,
                                 });
-                                for (const l of state.inner) {
-                                    controller.enqueue(l);
-                                    events?.emit("emitChunk", {
-                                        chunk: l,
-                                        anchorLineNo: state.beginLineNo,
-                                    });
-                                }
-                            } else {
-                                const ins = await m.render();
-                                events?.emit("blockRender", {
-                                    identity: state.identity!,
-                                    ctx: state.cand! as C,
-                                    lines: ins,
-                                    beginLineNo: state.beginLineNo,
-                                });
-                                const eol = state.eol ??
-                                    (state.firstDelim || "\n");
-                                if (ins.length) {
-                                    const chunk = (typeof ins === "string"
-                                        ? ins
-                                        : ins.join(eol)) +
-                                        ReplaceStream.ensureTrailingEol(
-                                            ins[ins.length - 1],
-                                            eol,
-                                        );
-                                    controller.enqueue(chunk);
-                                    events?.emit("emitChunk", {
-                                        chunk,
-                                        anchorLineNo: state.beginLineNo,
-                                    });
-                                }
                             }
                         } catch (err) {
                             const ctx: ReplaceErrorContext<C> = {
                                 phase: "render",
                                 identity: state.identity!,
-                                cand: state.cand! as C,
+                                cand: state.cand!,
                                 anchorLineNo: state.beginLineNo,
                             };
                             events?.emit("error", err, ctx);
@@ -482,7 +351,6 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                             }
                         }
 
-                        // Emit end marker and reset
                         controller.enqueue(ln.whole);
                         events?.emit("emitChunk", {
                             chunk: ln.whole,
@@ -494,38 +362,39 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                             endLineNo: state.curLineNo,
                         });
 
-                        state.curLineNo++; // consumed end line
+                        state.curLineNo++;
                         state.reset();
                         continue;
                     }
 
-                    // ── Normal mode: read next line
+                    // ── Normal mode
                     const { value, done } = await state.nextLine();
                     if (done) {
                         controller.close();
                         return;
                     }
                     const ln = value!;
+                    const stripped = ReplaceStream.stripDelim(ln.whole);
                     events?.emit("line", {
                         lineWithDelim: ln.whole,
                         lineNo: state.curLineNo,
+                        sourceLine: stripped,
                     });
                     if (!state.firstDelim && ln.delim) {
                         state.firstDelim = ln.delim as "\n" | "\r\n";
                     }
 
-                    // Candidate?
-                    let cand: Candidate<C> = false;
+                    let cand: Candidate<C, Payload> = false;
                     try {
                         cand = await isCandidate(
-                            ReplaceStream.stripDelim(ln.whole),
+                            stripped,
                             state.curLineNo,
-                            payload as Payload,
+                            payload,
                         );
                     } catch (err) {
                         const ctx: ReplaceErrorContext<C> = {
                             phase: "candidate",
-                            line: ReplaceStream.stripDelim(ln.whole),
+                            line: stripped,
                             lineNo: state.curLineNo,
                         };
                         events?.emit("error", err, ctx);
@@ -554,61 +423,13 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                     }
 
                     events?.emit("candidate", {
-                        line: ReplaceStream.stripDelim(ln.whole),
+                        line: stripped,
                         lineNo: state.curLineNo,
                         identity: cand.directive,
                         ctx: cand,
                         isBlock: !!cand.blockEnd,
                     });
 
-                    // Resolve macro
-                    let m: Macro;
-                    try {
-                        m = await ReplaceStream.resolveMacro(
-                            isMacro,
-                            cand.directive,
-                            cand,
-                        );
-                    } catch (err) {
-                        const ctx: ReplaceErrorContext<C> = {
-                            phase: "macro",
-                            line: ReplaceStream.stripDelim(ln.whole),
-                            lineNo: state.curLineNo,
-                            identity: cand.directive,
-                            cand,
-                        };
-                        events?.emit("error", err, ctx);
-                        const decision = onError?.(err, ctx) ?? "abandon";
-                        if (decision === "abandon") {
-                            controller.close();
-                            return;
-                        }
-                        controller.enqueue(ln.whole);
-                        events?.emit("emitChunk", {
-                            chunk: ln.whole,
-                            anchorLineNo: state.curLineNo,
-                        });
-                        state.curLineNo++;
-                        continue;
-                    }
-
-                    if (!m) {
-                        events?.emit("unknownMacro", {
-                            line: ReplaceStream.stripDelim(ln.whole),
-                            lineNo: state.curLineNo,
-                            identity: cand.directive,
-                            ctx: cand,
-                        });
-                        controller.enqueue(ln.whole);
-                        events?.emit("emitChunk", {
-                            chunk: ln.whole,
-                            anchorLineNo: state.curLineNo,
-                        });
-                        state.curLineNo++;
-                        continue;
-                    }
-
-                    // Block begin
                     if (cand.blockEnd) {
                         state.inBlock = true;
                         state.blockEnd = cand.blockEnd;
@@ -623,25 +444,27 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
                             beginLine: ln.whole,
                             beginLineNo: state.beginLineNo,
                         });
-                        state.curLineNo++; // consumed begin line
+                        state.curLineNo++;
                         continue;
                     }
 
-                    // Inline replacement
+                    // Inline
                     try {
-                        const ins = await m.render();
+                        const res = await cand.render(payload, state.curLineNo);
                         events?.emit("inlineRender", {
                             identity: cand.directive,
                             ctx: cand,
                             replacedLine: ln.whole,
                             lineNo: state.curLineNo,
-                            lines: ins,
+                            result: res,
                         });
                         const eol = state.eol ?? (state.firstDelim || "\n");
-                        const chunk = ins.length
-                            ? (typeof ins === "string" ? ins : ins.join(eol)) +
-                                (ln.delim || eol)
-                            : (ln.delim || eol);
+                        const chunk = await ReplaceStream.materializeResult(
+                            res,
+                            ReplaceStream.pickEol(
+                                ln.delim as "\n" | "\r\n" | "" | undefined,
+                            ) ?? eol,
+                        );
                         controller.enqueue(chunk);
                         events?.emit("emitChunk", {
                             chunk,
@@ -672,13 +495,9 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
         });
     }
 
-    /**
-     * Convenience wrapper that consumes the output stream and returns a single string.
-     * If the input was a string, `before/changed` are included.
-     */
     async processToString(
         input: string | ReadableStream<Uint8Array | string>,
-        payload?: Payload,
+        payload: Payload,
         overrides?: ProcessOverrides<C, Payload>,
     ) {
         const out = this.processToStream(input, payload, overrides).getReader();
@@ -696,25 +515,31 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
     }
 
     /* ──────────────────────────────────────────────────────────────────────── *
-   * Small static helpers (kept private for DX simplicity)
+   * Small helpers
    * ──────────────────────────────────────────────────────────────────────── */
 
-    /** Default error policy: fail fast → encourages explicit decisions. */
-    static defaultOnError: OnError = () => "abandon";
+    static defaultOnError: OnError<CandidateDefn<Any>> = () => "abandon";
 
-    /** Strip trailing EOL delimiter from a line, if present. */
     static stripDelim(s: string) {
         if (s.endsWith("\r\n")) return s.slice(0, -2);
         if (s.endsWith("\n")) return s.slice(0, -1);
         return s;
     }
 
-    /** Ensure a final EOL if the last inserted line lacks one. */
-    static ensureTrailingEol(line: string, eol: "\n" | "\r\n") {
-        return (line.endsWith("\n") || line.endsWith("\r\n")) ? "" : eol;
+    static ensureTextHasTrailingEol(text: string, eol: "\n" | "\r\n") {
+        return (text.endsWith("\n") || text.endsWith("\r\n"))
+            ? text
+            : text + eol;
     }
 
-    /** Iterate a **string** into lines, preserving delimiters (`\n`/`\r\n`). */
+    static pickEol(
+        delim: "\n" | "\r\n" | "" | undefined,
+    ): "\n" | "\r\n" | undefined {
+        if (delim === "\r\n") return "\r\n";
+        if (delim === "\n") return "\n";
+        return undefined;
+    }
+
     static async *iterateStringLines(text: string) {
         let i = 0, start = 0;
         while (i < text.length) {
@@ -737,7 +562,6 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
         }
     }
 
-    /** Convert a byte/string stream into a string stream using UTF-8 for bytes. */
     static toStringStream(src: ReadableStream<Uint8Array | string>) {
         return new ReadableStream<string>({
             start(controller) {
@@ -759,7 +583,6 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
         });
     }
 
-    /** Iterate a stream into lines, preserving delimiters. */
     static async *iterateStreamLines(
         stream: ReadableStream<Uint8Array | string>,
     ) {
@@ -787,58 +610,67 @@ export class ReplaceStream<C extends CandidateDefn, Payload> {
         if (buf.length) yield { whole: buf, delim: "" as const };
     }
 
-    /** Await the user-supplied macro resolver/renderer. */
-    static async resolveMacro<C extends CandidateDefn>(
-        fn: IsMacro<C>,
-        id: string,
-        ctx: C,
-    ) {
-        return await fn(id, ctx);
+    static async materializeResult(
+        res: string | string[] | ReadableStream<string | Uint8Array>,
+        eol: "\n" | "\r\n",
+    ): Promise<string> {
+        if (typeof res === "string") {
+            return ReplaceStream.ensureTextHasTrailingEol(res, eol);
+        }
+        if (Array.isArray(res)) {
+            const joined = res.join(eol);
+            return ReplaceStream.ensureTextHasTrailingEol(joined, eol);
+        }
+        // ReadableStream → string
+        const reader = ReplaceStream.toStringStream(res).getReader();
+        let out = "";
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            out += value!;
+        }
+        return ReplaceStream.ensureTextHasTrailingEol(out, eol);
     }
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
- * Convenience: includeStream
+ * includeStream convenience
  * ────────────────────────────────────────────────────────────────────────── */
 
 /**
  * Compose {@link ReplaceStream} with a ready-to-use “#include” style macro.
- *
- * Defaults:
- * - Start: `"-- #include"`
- * - End:   `"-- #includeEnd <name>"`
- *
- * You provide `render(identity, raw)` → replacement lines (no EOLs).
+ * Uses `CandidateDefn<Payload>` directly to avoid unsafe casts.
  */
-export function includeStream<C extends CandidateDefn, Payload>(
+export function includeStream<Payload>(
     input: string | ReadableStream<Uint8Array | string>,
     opts: {
-        /** Produce replacement lines for the given region identity and raw arg tail. */
-        render: (identity: string, ctx: C) => Promise<string[]> | string[];
-        /** Macro start marker (default: `"-- #include"`). */
+        render: (
+            identity: string,
+            cand: CandidateDefn<Payload>,
+        ) =>
+            | Promise<string[] | string | ReadableStream<string | Uint8Array>>
+            | string[]
+            | string
+            | ReadableStream<string | Uint8Array>;
         start?: string;
-        /** Macro end base (default: `"-- #includeEnd"`). Full end is `<endPrefix> <name>`. */
         endPrefix?: string;
-        /** Force EOL for inserted lines (default inferred). */
         eol?: "\n" | "\r\n";
-        /** Error policy (default fail-fast). */
-        onError?: OnError;
-        /** Typed emitter for observability. */
-        events?: Emitter<ReplaceStreamEvents<C>>;
-        /** Additional per-run overrides (except isCandidate/isMacro/eol/onError/events). */
+        onError?: OnError<CandidateDefn<Payload>>;
+        events?: Emitter<ReplaceStreamEvents<CandidateDefn<Payload>>>;
         overrides?: Omit<
-            ProcessOverrides<C, Payload>,
-            "isCandidate" | "isMacro" | "eol" | "onError" | "events"
+            ProcessOverrides<CandidateDefn<Payload>, Payload>,
+            "isCandidate" | "eol" | "onError" | "events"
         >;
-        /** Starting line number for input (1-based, default: 1). */
         startLine?: number;
     },
+    payload: Payload,
 ) {
     const start = opts.start ?? "-- #include";
     const endPrefix = opts.endPrefix ?? "-- #includeEnd";
 
-    /** Detect `-- #include <name> ...` and pair with `-- #includeEnd <name>`. */
-    const isCandidate: IsCandidate<C, Payload> = (line) => {
+    const isCandidate: IsCandidate<CandidateDefn<Payload>, Payload> = (
+        line,
+    ) => {
         const trimmed = line.trimStart();
         if (!trimmed.startsWith(start + " ")) return false;
 
@@ -849,21 +681,27 @@ export function includeStream<C extends CandidateDefn, Payload>(
         const raw = afterStart.slice(name.length).trimStart();
         const blockEnd = (probe: string) =>
             probe.trimStart() === `${endPrefix} ${name}`;
-        return { directive: name, argsText: raw, blockEnd } as C;
+
+        const cand: CandidateDefn<Payload> = {
+            directive: name,
+            argsText: raw,
+            blockEnd,
+            render: (_payload: Payload, _curLineNo: number) =>
+                opts.render(name, cand),
+        };
+        return cand;
     };
 
-    /** Provide a renderer that delegates to user-supplied `render`. */
-    const isMacro: IsMacro<C> = (identity, raw) => ({
-        render: () => opts.render(identity, raw),
-    });
+    const engine = new ReplaceStream<CandidateDefn<Payload>, Payload>(
+        isCandidate,
+        {
+            onError: opts.onError,
+            events: opts.events,
+            startLine: opts.startLine,
+        },
+    );
 
-    const engine = new ReplaceStream(isCandidate, isMacro, {
-        onError: opts.onError,
-        events: opts.events,
-        startLine: opts.startLine,
-    });
-
-    return engine.processToStream(input, undefined, {
+    return engine.processToStream(input, payload, {
         ...(opts.overrides ?? {}),
         eol: opts.eol,
         startLine: opts.startLine,
@@ -871,7 +709,7 @@ export function includeStream<C extends CandidateDefn, Payload>(
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
- * Convenience functions
+ * Utilities
  * ────────────────────────────────────────────────────────────────────────── */
 
 export async function streamToString(rs: ReadableStream<string>) {
@@ -885,28 +723,9 @@ export async function streamToString(rs: ReadableStream<string>) {
     return chunks.join("");
 }
 
-// macro.ts
-
 /**
  * Parse lines shaped like:
  *   <comment><whitespace?><token><whitespace><remainder>
- *
- * Returns either:
- *   - [token, remainder, directivePrefix] if a valid token is found
- *   - false if there is no match (e.g. empty line, marker only, prefix with no token)
- *
- * Rules:
- * - If the line starts with `comment`:
- *   - Allow optional whitespace after the marker.
- *   - If the next part starts with `directivePrefix`, allow optional whitespace
- *     after the prefix as well. If no token after the prefix → return false.
- *     Otherwise: token = directive name (without prefix), remainder = rest,
- *     directivePrefix = prefix.
- *   - Otherwise, token = first word after the marker, remainder = rest, prefix = "".
- *   - If no token → return false.
- * - If the line doesn’t start with `comment`:
- *   - token = first word, remainder = rest, prefix = "".
- *   - If no token → return false.
  */
 export function lineCommentDirectiveParser(
     init: { comment: string; directivePrefix: string },
@@ -925,31 +744,27 @@ export function lineCommentDirectiveParser(
         if (!trimmed) return false;
 
         if (trimmed.startsWith(comment)) {
-            // <comment><whitespace?>
             const after = trimmed.slice(comment.length).replace(/^\s+/, "");
-            if (!after) return false; // marker only (or marker + spaces)
+            if (!after) return false;
 
-            // Optional directive prefix
             if (directivePrefix && after.startsWith(directivePrefix)) {
                 const rest = after.slice(directivePrefix.length).replace(
                     /^\s+/,
                     "",
                 );
-                if (!rest) return false; // prefix present but no directive name
+                if (!rest) return false;
                 const pair = splitFirst(rest);
                 if (!pair) return false;
                 const [token, remainder] = pair;
                 return [token, remainder, directivePrefix];
             }
 
-            // No directive prefix → token is the first word after the marker
             const pair = splitFirst(after);
             if (!pair) return false;
             const [token, remainder] = pair;
             return [token, remainder, ""];
         }
 
-        // Not a comment-starting line → normal first-word split
         const pair = splitFirst(trimmed);
         if (!pair) return false;
         const [token, remainder] = pair;
@@ -958,31 +773,7 @@ export function lineCommentDirectiveParser(
 }
 
 /**
- * Split a command line string into argv using shell-like rules (POSIX-ish).
- * Useful when parsing things like `-- #include x y "z" --a -b`
- *
- * Supported behavior:
- * - Whitespace tokenization (spaces, tabs, newlines)
- * - Single quotes: take characters literally until the next single quote
- * - Double quotes: allow backslash escapes for `"`, `\`, `$`, and `` ` ``
- * - Backslash escapes outside quotes: `\x` becomes literal `x`
- * - Trailing backslash handling (treated as a literal backslash)
- * - Throws on unclosed quotes
- *
- * Not included:
- * - Variable/tilde/glob expansion
- * - Command substitution
- * - Locale or IFS-specific behavior
- * - Comments (e.g., `#`) are **not** treated specially
- *
- * Examples:
- * ```ts
- * textToShellArgv(`cmd 'a b' "c \\"d\\"" \\$HOME`)
- * // → ["cmd", "a b", 'c "d"', "$HOME"]
- *
- * textToShellArgv(`a\\ b "\\$HOME" end`)
- * // → ["a b", "$HOME", "end"]
- * ```
+ * Split a command line string into argv (POSIX-ish).
  */
 export function textToShellArgv(input: string): string[] {
     const out: string[] = [];
@@ -1003,18 +794,13 @@ export function textToShellArgv(input: string): string[] {
         }
     };
 
-    const esc = (ch: string) => {
-        // Simple escape: \x => x (keep x literally).
-        // Intentionally *not* translating \n, \t, etc. into control chars.
-        return ch;
-    };
+    const esc = (ch: string) => ch;
 
     while (i < input.length) {
         const ch = input[i];
 
         if (state === State.Normal) {
             if (/\s/.test(ch)) {
-                // Token boundary on any whitespace
                 pushBuf();
                 i++;
                 continue;
@@ -1031,10 +817,8 @@ export function textToShellArgv(input: string): string[] {
             }
             if (ch === "\\") {
                 i++;
-                if (i >= input.length) {
-                    // Trailing backslash outside quotes → literal backslash
-                    buf.push("\\");
-                } else {
+                if (i >= input.length) buf.push("\\");
+                else {
                     buf.push(esc(input[i]));
                     i++;
                 }
@@ -1056,8 +840,7 @@ export function textToShellArgv(input: string): string[] {
             continue;
         }
 
-        // ...snip...
-        // state === State.InDouble
+        // InDouble
         if (ch === '"') {
             state = State.Normal;
             i++;
@@ -1065,38 +848,30 @@ export function textToShellArgv(input: string): string[] {
         }
         if (ch === "\\") {
             i++;
-            if (i >= input.length) {
-                // Backslash at end inside double quotes → literal backslash
-                buf.push("\\");
-            } else {
+            if (i >= input.length) buf.push("\\");
+            else {
                 const nxt = input[i];
                 if (nxt === '"' || nxt === "\\" || nxt === "$" || nxt === "`") {
-                    // SPECIAL CASE: If nxt is a double quote *and* it's the final char,
-                    // treat the backslash as literal and let this " close the quotes.
                     if (nxt === '"' && i === input.length - 1) {
-                        buf.push("\\"); // keep the backslash
-                        state = State.Normal; // close the quote
-                        i++; // consume the closing "
+                        buf.push("\\");
+                        state = State.Normal;
+                        i++;
                     } else {
-                        buf.push(nxt); // regular escape inside double quotes
+                        buf.push(nxt);
                         i++;
                     }
                 } else {
-                    // Other sequences keep the backslash literally, then the char
                     buf.push("\\", nxt);
                     i++;
                 }
             }
             continue;
         }
-        // ...snip...
         buf.push(ch);
         i++;
     }
 
-    if (state !== State.Normal) {
-        throw new Error("Unclosed quote in input.");
-    }
+    if (state !== State.Normal) throw new Error("Unclosed quote in input.");
     pushBuf();
     return out;
 }

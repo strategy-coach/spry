@@ -9,6 +9,9 @@ emits a consolidated markdown report. It also exposes a CLI to list routes,
 print breadcrumbs, generate SQL DDL/inserts, and watch the filesystem to
 re-orchestrate on change with a `dev` mode.
 
+TODO: use `deps.ts` or import maps to unify usage of all libraries instead of
+putting hardcoded libraries in import statements.
+
 ## TypeScript Engine vs Polyglot Plugins
 
 Spry itself (the engine) is written in Deno and TypeScript. But the pipeline is

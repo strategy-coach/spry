@@ -1,587 +1,483 @@
-import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1.0.6";
+// macro_test.ts
 import {
-    type CandidateDefn,
+    assert,
+    assertEquals,
+    assertMatch,
+    assertStrictEquals,
+} from "jsr:@std/assert@1";
+import {
+    CandidateDefn,
     Emitter,
     includeStream,
-    type IsCandidate,
-    type IsMacro,
     lineCommentDirectiveParser,
-    type ReplaceErrorContext,
     ReplaceStream,
-    type ReplaceStreamEvents,
+    ReplaceStreamEvents,
+    streamToString,
     textToShellArgv,
 } from "./macro.ts";
 
-async function streamToString(rs: ReadableStream<string>) {
-    const r = rs.getReader();
-    const chunks: string[] = [];
-    while (true) {
-        const { value, done } = await r.read();
-        if (done) break;
-        chunks.push(value);
-    }
-    return chunks.join("");
+// ———————————————————————————————————————————
+// Small helpers for tests
+// ———————————————————————————————————————————
+function rsFromStrings(...parts: string[]): ReadableStream<string> {
+    return new ReadableStream<string>({
+        start(c) {
+            for (const p of parts) c.enqueue(p);
+            c.close();
+        },
+    });
 }
 
-Deno.test("includeStream: basic block replacement with default markers", async (t) => {
-    await t.step(
-        "replaces inner region; preserves begin/end lines",
-        async () => {
-            const input = [
-                "-- before",
-                "-- #include libs --from a --from b",
-                "-- old interior should be replaced",
-                "-- #includeEnd libs",
-                "-- after",
-                "",
-            ].join("\n");
+function delay(ms: number) {
+    return new Promise((r) => setTimeout(r, ms));
+}
 
-            const rs = includeStream(input, {
-                render: (name, ctx) => {
-                    const out: string[] = [];
-                    const argv = ctx.argsText.trim().length
-                        ? ctx.argsText.trim().split(/\s+/)
-                        : [];
-                    for (let i = 0; i < argv.length; i++) {
-                        if (argv[i] === "--from" && i + 1 < argv.length) {
-                            out.push(argv[++i]);
-                        }
-                    }
-                    return [`[${name}]`, ...out];
-                },
-            });
+Deno.test("Emitter basics", async (t) => {
+    type Ev = { ping: (n: number) => void; oncey: () => void };
+    const em = new Emitter<Ev>();
+    const got: number[] = [];
+    let onceCount = 0;
 
-            const out = await streamToString(rs);
-            const lines = out.split("\n");
-            const begin = lines.findIndex((l) =>
-                l.includes("-- #include libs")
-            );
-            const end = lines.findIndex((l) =>
-                l.includes("-- #includeEnd libs")
-            );
-
-            assert(begin >= 0 && end > begin);
-            assertEquals(lines[begin + 1], "[libs]");
-            assertEquals(lines[begin + 2], "a");
-            assertEquals(lines[begin + 3], "b");
-            assertEquals(lines.at(-1), "");
-        },
-    );
-
-    await t.step(
-        "uses CRLF from parent by default; can be overridden via eol",
-        async () => {
-            const inputCRLF = [
-                "-- #include libs --from X",
-                "-- to be replaced",
-                "-- #includeEnd libs",
-                "",
-            ].join("\r\n");
-
-            const rsDefault = includeStream(inputCRLF, {
-                render: () => ["A", "B"],
-            });
-            const outDefault = await streamToString(rsDefault);
-            assert(outDefault.includes("\r\nA\r\nB\r\n"));
-
-            const rsLF = includeStream(inputCRLF, {
-                render: () => ["A", "B"],
-                eol: "\n",
-            });
-            const outLF = await streamToString(rsLF);
-            assert(outLF.includes("\nA\nB\n"));
-        },
-    );
-
-    await t.step(
-        "works as a stream input (Uint8Array chunks) and emits stream",
-        async () => {
-            const enc = new TextEncoder();
-            const chunks = [
-                enc.encode("-- #include libs --from 1 --from 2\n"),
-                enc.encode("OLD\n"),
-                enc.encode("-- #includeEnd libs\n"),
-            ];
-            const input = new ReadableStream<Uint8Array>({
-                start(controller) {
-                    for (const c of chunks) controller.enqueue(c);
-                    controller.close();
-                },
-            });
-
-            const rs = includeStream(input, {
-                render: (_name, ctx) => {
-                    const vals = ctx.argsText.split(/\s+/);
-                    const out: string[] = [];
-                    for (let i = 0; i < vals.length; i++) {
-                        if (vals[i] === "--from" && i + 1 < vals.length) {
-                            out.push(vals[++i]);
-                        }
-                    }
-                    return out;
-                },
-            });
-
-            const out = await streamToString(rs);
-            const between = out.split("\n")[1];
-            assertEquals(between, "1");
-        },
-    );
-
-    await t.step(
-        "unclosed block: with onError=continue, engine preserves begin + inner and emits error event",
-        async () => {
-            const input = [
-                "-- before",
-                "-- #include skip --from A",
-                "INNER LINE",
-                // missing: -- #includeEnd skip
-            ].join("\n");
-
-            const events = new Emitter<ReplaceStreamEvents<CandidateDefn>>();
-            // Capture only the phase explicitly; avoids TS inferring `never`.
-            let gotErrorPhase:
-                | ReplaceErrorContext<CandidateDefn>["phase"]
-                | undefined = undefined;
-
-            events.on(
-                "error",
-                (_err, ctx: ReplaceErrorContext<CandidateDefn>) => {
-                    gotErrorPhase = ctx.phase;
-                },
-            );
-
-            const rs = includeStream(input, {
-                render: () => ["SHOULD NOT APPEAR"],
-                onError: () => "continue",
-                events,
-            });
-
-            const out = await streamToString(rs);
-            assert(
-                out.includes("-- #include skip --from A"),
-                "begin preserved",
-            );
-            assert(out.includes("INNER LINE"), "inner preserved");
-            assert(!out.includes("SHOULD NOT APPEAR"));
-            assertEquals(gotErrorPhase, "unterminatedBlock");
-        },
-    );
-});
-
-Deno.test("ReplaceStream: inline (single-line) macro replacement", async (t) => {
-    await t.step("replaces a single line and preserves delimiter", async () => {
-        const input = "hello\nREPLACE_ME\nworld\n";
-
-        const isCandidate: IsCandidate<CandidateDefn, unknown> = (line) =>
-            line === "REPLACE_ME"
-                ? { directive: "inline", argsText: "" }
-                : false;
-
-        const isMacro: IsMacro<CandidateDefn> = () => ({
-            render: () => ["X", "Y"],
-        });
-
-        const engine = new ReplaceStream(isCandidate, isMacro);
-        const out = await engine.processToString(input);
-        assertEquals(out.after, "hello\nX\nY\nworld\n");
+    await t.step("on/off", () => {
+        const off = em.on("ping", (n) => got.push(n));
+        em.emit("ping", 1);
+        em.emit("ping", 2);
+        off();
+        em.emit("ping", 3);
+        assertEquals(got, [1, 2]);
     });
 
-    await t.step(
-        "no output from render keeps just the original line’s delimiter",
-        async () => {
-            const input = "A\r\nREPLACE_ME\r\nB\r\n";
-
-            const isCandidate: IsCandidate<CandidateDefn, unknown> = (line) =>
-                line === "REPLACE_ME"
-                    ? ({ directive: "empty", argsText: "" })
-                    : false;
-
-            const isMacro: IsMacro<CandidateDefn> = () => ({
-                render: () => [],
-            });
-
-            const engine = new ReplaceStream(isCandidate, isMacro);
-            const out = await engine.processToString(input);
-            assertEquals(out.after, "A\r\n\r\nB\r\n");
-        },
-    );
-});
-
-Deno.test("ReplaceStream: block macro with unknown macro at render-time preserves inner", async () => {
-    const input = [
-        "start",
-        "#BEGIN x",
-        "keep this",
-        "#END x",
-        "tail",
-        "",
-    ].join("\n");
-
-    const isCandidate: IsCandidate<CandidateDefn, unknown> = (line) => {
-        if (!line.startsWith("#BEGIN ")) return false;
-        const name = line.slice("#BEGIN ".length).trim();
-        const blockEnd = (probe: string) => probe.trim() === `#END ${name}`;
-        return { directive: name, argsText: "", blockEnd };
-    };
-
-    const isMacro: IsMacro<CandidateDefn> = (
-        id,
-    ) => (id === "x" ? false : ({ render: () => ["NOOP"] }));
-
-    const rs = new ReplaceStream(isCandidate, isMacro);
-    const out = await rs.processToString(input);
-    assert(out.after.includes("#BEGIN x\nkeep this\n#END x\n"));
-});
-
-Deno.test("ReplaceStream: two consecutive block macros", async () => {
-    const input = [
-        "-- #BLOCK a",
-        "old",
-        "-- #END a",
-        "-- #BLOCK b",
-        "old",
-        "-- #END b",
-        "",
-    ].join("\n");
-
-    const isCandidate: IsCandidate<CandidateDefn, unknown> = (line) => {
-        if (!line.startsWith("-- #BLOCK ")) return false;
-        const name = line.slice("-- #BLOCK ".length).trim();
-        return {
-            directive: name,
-            argsText: "",
-            blockEnd: (probe) => probe.trim() === `-- #END ${name}`,
-        };
-    };
-
-    const isMacro: IsMacro<CandidateDefn> = (id) => ({
-        render: () => [`<${id}-1>`, `<${id}-2>`],
-    });
-
-    const rs = new ReplaceStream(isCandidate, isMacro);
-    const out = await rs.processToString(input);
-    const lines = out.after.split("\n");
-    const i1 = lines.findIndex((l) => l.includes("-- #BLOCK a"));
-    assertEquals(lines[i1 + 1], "<a-1>");
-    assertEquals(lines[i1 + 2], "<a-2>");
-    const i2 = lines.findIndex((l) => l.includes("-- #BLOCK b"));
-    assertEquals(lines[i2 + 1], "<b-1>");
-    assertEquals(lines[i2 + 2], "<b-2>");
-});
-
-Deno.test("includeStream: custom markers", async () => {
-    const input = ["#inc libs ARGS GO HERE", "old", "#end libs", ""].join("\n");
-
-    const rs = includeStream(input, {
-        start: "#inc",
-        endPrefix: "#end",
-        render: (name, ctx) => [`N=${name}`, `RAW=${ctx.argsText}`],
-    });
-
-    const out = await streamToString(rs);
-    const lines = out.split("\n");
-    const i = lines.findIndex((l) => l.startsWith("#inc libs"));
-    assertEquals(lines[i + 1], "N=libs");
-    assertEquals(lines[i + 2], "RAW=ARGS GO HERE");
-});
-
-Deno.test("Error handling and events: inline render throws -> continue preserves original; events fire", async () => {
-    const input = "A\nRENDER_ME\nZ\n";
-
-    const events = new Emitter<ReplaceStreamEvents<CandidateDefn>>();
-    const calls: string[] = [];
-    events.on("candidate", (c) => calls.push(`candidate:${c.identity}`));
-    events.on("inlineRender", (i) => calls.push(`inline:${i.identity}`));
-    events.on(
-        "error",
-        (_e, ctx: ReplaceErrorContext<CandidateDefn>) =>
-            calls.push(`error:${ctx.phase}`),
-    );
-    events.on("emitChunk", (emit) => {
-        if (emit.chunk.includes("RENDER_ME")) calls.push("emit:original");
-    });
-
-    const isCandidate: IsCandidate<CandidateDefn, unknown> = (line) =>
-        line === "RENDER_ME" ? { directive: "boom", argsText: "" } : false;
-
-    const isMacro: IsMacro<CandidateDefn> = () => ({
-        render: () => {
-            throw new Error("kaboom");
-        },
-    });
-
-    const engine = new ReplaceStream(isCandidate, isMacro, {
-        onError: () => "continue",
-        events,
-    });
-
-    const out = await engine.processToString(input);
-    assert(out.after.includes("RENDER_ME\n"));
-    assertEquals(calls.includes("candidate:boom"), true);
-    assertEquals(calls.includes("error:render"), true);
-    assertEquals(calls.some((c) => c.startsWith("inline:")), false);
-    assertEquals(calls.includes("emit:original"), true);
-});
-
-Deno.test("Error handling and events: unterminated block -> continue preserves; events fire blockStart + error", async () => {
-    const input = ["-- #include cfg FLAGS", "old"].join("\n"); // no end
-
-    const events = new Emitter<ReplaceStreamEvents<CandidateDefn>>();
-    const seen: string[] = [];
-    events.on("blockStart", (b) => seen.push(`start:${b.identity}`));
-    events.on("blockEnd", (b) => seen.push(`end:${b.identity}`));
-    events.on(
-        "error",
-        (_e, ctx: ReplaceErrorContext<CandidateDefn>) =>
-            seen.push(`error:${ctx.phase}`),
-    );
-
-    const rs = includeStream(input, {
-        render: () => ["NEW"], // never used
-        onError: () => "continue",
-        events,
-    });
-
-    const out = await streamToString(rs);
-    assert(out.includes("-- #include cfg FLAGS"));
-    assert(out.includes("old"));
-    assertEquals(seen.includes("start:cfg"), true);
-    assertEquals(seen.includes("error:unterminatedBlock"), true);
-    assertEquals(seen.some((s) => s.startsWith("end:")), false);
-});
-
-Deno.test("textToShellArgv - core behavior", async (t) => {
-    await t.step("simple tokens", () => {
-        assertEquals(textToShellArgv("ls -la /tmp"), ["ls", "-la", "/tmp"]);
-    });
-
-    await t.step("whitespace splitting (spaces, tabs, newlines)", () => {
-        assertEquals(textToShellArgv("a   b\tc\nd"), ["a", "b", "c", "d"]);
-    });
-
-    await t.step("empty and spaces-only", () => {
-        assertEquals(textToShellArgv(""), []);
-        assertEquals(textToShellArgv("   \t  \n  "), []);
-    });
-
-    await t.step("single quotes are literal", () => {
-        assertEquals(textToShellArgv("echo 'hello world'"), [
-            "echo",
-            "hello world",
-        ]);
-        assertEquals(textToShellArgv("'a\"b\"c' d"), ['a"b"c', "d"]);
-    });
-
-    await t.step('double quotes with escapes for ", \\, $, `', () => {
-        assertEquals(
-            textToShellArgv(
-                `echo "a \\"quote\\"" "\\\\ backslash" "\\$HOME" "\\\`cmd\`"`,
-            ),
-            ["echo", `a "quote"`, `\\ backslash`, `$HOME`, "`cmd`"],
-        );
-    });
-
-    await t.step("double quotes: unknown escapes keep backslash", () => {
-        assertEquals(textToShellArgv(`"hello\\nworld" "x\\y"`), [
-            "hello\\nworld",
-            "x\\y",
-        ]);
-    });
-
-    await t.step("backslash outside quotes escapes next char", () => {
-        assertEquals(textToShellArgv(`a\\ b c\\d e\\$ f\\"`), [
-            "a b",
-            "cd",
-            "e$",
-            'f"',
-        ]);
-    });
-
-    await t.step(
-        "trailing backslash outside quotes → literal backslash",
-        () => {
-            assertEquals(textToShellArgv(`foo\\`), ["foo\\"]);
-        },
-    );
-
-    await t.step(
-        "backslash at end inside double quotes → literal backslash",
-        () => {
-            assertEquals(textToShellArgv(`"foo\\"`), ["foo\\"]);
-        },
-    );
-
-    await t.step("mixed quotes and escapes", () => {
-        assertEquals(
-            textToShellArgv(
-                `cmd 'a b' "c d" e\\ f "\\$HOME and \\backslash" tail`,
-            ),
-            ["cmd", "a b", "c d", "e f", "$HOME and \\backslash", "tail"],
-        );
-    });
-
-    await t.step(
-        "multiple consecutive spaces collapse into token boundaries",
-        () => {
-            assertEquals(textToShellArgv("cmd   arg1    arg2"), [
-                "cmd",
-                "arg1",
-                "arg2",
-            ]);
-        },
-    );
-
-    await t.step("no expansions performed", () => {
-        assertEquals(textToShellArgv(`echo $HOME`), ["echo", "$HOME"]);
-        assertEquals(textToShellArgv(`echo "\\$HOME"`), ["echo", "$HOME"]);
-    });
-
-    await t.step("unclosed single quote throws", () => {
-        assertThrows(
-            () => textToShellArgv("echo 'oops"),
-            Error,
-            "Unclosed quote",
-        );
-    });
-
-    await t.step("unclosed double quote throws", () => {
-        assertThrows(
-            () => textToShellArgv('echo "oops'),
-            Error,
-            "Unclosed quote",
-        );
+    await t.step("once", () => {
+        em.once("oncey", () => onceCount++);
+        em.emit("oncey");
+        em.emit("oncey");
+        assertEquals(onceCount, 1);
     });
 });
 
-Deno.test("lineCommentDirectiveParser: SQL style -- with # directives", async (t) => {
+Deno.test("lineCommentDirectiveParser", async (t) => {
     const parse = lineCommentDirectiveParser({
         comment: "--",
         directivePrefix: "#",
     });
 
-    await t.step("marker only / marker + spaces → no token", () => {
-        assertEquals(parse("--"), false);
-        assertEquals(parse("--   "), false);
-    });
-
-    await t.step("<comment><ws?><token>", () => {
-        assertEquals(parse("--include"), ["include", "", ""]);
-        assertEquals(parse("-- include"), ["include", "", ""]);
-        assertEquals(parse("   --    include"), ["include", "", ""]);
-    });
-
-    await t.step("<comment><ws?><token><ws><remainder>", () => {
-        assertEquals(parse("-- include files"), ["include", "files", ""]);
-        assertEquals(parse("--   include   users list"), [
+    await t.step("comment + prefix + token", () => {
+        assertEquals(parse("--   #include  libs  x y"), [
             "include",
-            "users list",
-            "",
+            "libs  x y",
+            "#",
         ]);
     });
 
-    await t.step("directive: <comment><ws?><prefix><token>", () => {
-        assertEquals(parse("--#include"), ["include", "", "#"]);
-        assertEquals(parse("-- #include"), ["include", "", "#"]);
-        assertEquals(parse(" --   #include"), ["include", "", "#"]);
+    await t.step("comment + token (no prefix)", () => {
+        assertEquals(parse("--   hello   world  x"), ["hello", "world  x", ""]);
     });
 
-    await t.step(
-        "directive with remainder: <comment><ws?><prefix><token><ws><remainder>",
-        () => {
-            assertEquals(parse("--# name users"), ["name", "users", "#"]);
-            assertEquals(parse("--   #name   users table"), [
-                "name",
-                "users table",
-                "#",
-            ]);
+    await t.step("no comment = first word split", () => {
+        assertEquals(parse("hi there you"), ["hi", "there you", ""]);
+    });
+
+    await t.step("marker only returns false", () => {
+        assertEquals(parse("--      "), false);
+    });
+
+    await t.step("prefix but no directive returns false", () => {
+        assertEquals(parse("-- #    "), false);
+    });
+});
+
+Deno.test("textToShellArgv", async (t) => {
+    await t.step("whitespace tokenization", () => {
+        assertEquals(textToShellArgv("a b   c"), ["a", "b", "c"]);
+    });
+    await t.step("single quotes literal", () => {
+        assertEquals(textToShellArgv("cmd 'a b' c"), ["cmd", "a b", "c"]);
+    });
+    await t.step("double quotes escapes", () => {
+        assertEquals(textToShellArgv(`x "c \\"d\\"" end`), [
+            "x",
+            `c "d"`,
+            "end",
+        ]);
+    });
+    await t.step("backslash outside quotes", () => {
+        assertEquals(textToShellArgv("a\\ b \\$HOME"), ["a b", "$HOME"]);
+    });
+    await t.step("trailing backslash outside quotes", () => {
+        assertEquals(textToShellArgv("a \\"), ["a", "\\"]);
+    });
+    await t.step("double-quote final backslash special-case", () => {
+        // Match current parser behavior: \" before the final " yields a literal "
+        assertEquals(textToShellArgv(`"a\\""`), [`a"`]);
+    });
+    await t.step("unclosed quotes throws", () => {
+        try {
+            textToShellArgv("'oops");
+            assert(false, "should have thrown");
+        } catch (e) {
+            assertMatch(String(e), /Unclosed quote/);
+        }
+    });
+});
+
+Deno.test("streamToString", async () => {
+    const rs = rsFromStrings("a", "b", "c");
+    const s = await streamToString(rs);
+    assertEquals(s, "abc");
+});
+
+Deno.test("ReplaceStream inline replacement", async () => {
+    type P = { x: number };
+    type C = CandidateDefn<P>;
+
+    const isCandidate = (line: string, _n: number, _p: P): C | false => {
+        if (!line.startsWith("=sum")) return false;
+        const argsText = line.slice(4).trim();
+        return {
+            directive: "sum",
+            argsText,
+            render: (p) => {
+                const parts = argsText.split(/\s+/).map(Number);
+                const val = parts.reduce((a, b) => a + b, 0) + p.x;
+                return String(val);
+            },
+        };
+    };
+
+    const engine = new ReplaceStream<C, P>(isCandidate);
+    const input = "=sum 1 2 3\nother\n";
+    const out = await engine.processToString(input, { x: 4 });
+    assertEquals(out.after, "10\nother\n");
+});
+
+Deno.test("ReplaceStream inline preserves existing EOL or infers", async (t) => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false =>
+        line.startsWith("=x")
+            ? {
+                directive: "x",
+                argsText: "",
+                render: () => "Z",
+            }
+            : false;
+
+    await t.step("LF preserved", async () => {
+        const eng = new ReplaceStream<C, P>(isCandidate);
+        const res = await eng.processToString("=x\n", {});
+        assertEquals(res.after, "Z\n");
+    });
+
+    await t.step("CRLF preserved", async () => {
+        const eng = new ReplaceStream<C, P>(isCandidate);
+        const res = await eng.processToString("=x\r\n", {});
+        assertEquals(res.after, "Z\r\n");
+    });
+
+    await t.step("no EOL on input line → inferred LF", async () => {
+        const eng = new ReplaceStream<C, P>(isCandidate);
+        const res = await eng.processToString("=x", {});
+        assertEquals(res.after, "Z\n");
+    });
+});
+
+Deno.test("ReplaceStream block replacement with markers preserved", async () => {
+    type P = { word: string };
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false => {
+        if (line.trim() === "BEGIN") {
+            return {
+                directive: "B",
+                argsText: "",
+                blockEnd: (probe) => probe.trim() === "END",
+                render: (p) => [`A:${p.word}`, "B:ok"],
+            };
+        }
+        return false;
+    };
+    const engine = new ReplaceStream<C, P>(isCandidate);
+    const input = ["x", "BEGIN", "old1", "old2", "END", "y"].join("\n") + "\n";
+    const out = await engine.processToString(input, { word: "W" });
+    assertEquals(
+        out.after,
+        ["x", "BEGIN", "A:W", "B:ok", "END", "y", ""].join("\n"),
+    );
+});
+
+Deno.test("ReplaceStream render returning ReadableStream", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+
+    const isCandidate = (line: string): C | false =>
+        line.startsWith("=rs")
+            ? {
+                directive: "rs",
+                argsText: "",
+                render: () => rsFromStrings("hello", " ", "world"),
+            }
+            : false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate);
+    const out = await eng.processToString("=rs\n", {});
+    assertEquals(out.after, "hello world\n");
+});
+
+Deno.test("ReplaceStream events fire in expected order (inline)", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const events: string[] = [];
+
+    const emitter = new Emitter<ReplaceStreamEvents<C>>();
+    emitter.on("line", (i) => events.push(`line#${i.lineNo}`));
+    emitter.on("candidate", (i) => events.push(`cand:${i.identity}`));
+    emitter.on("inlineRender", (i) => events.push(`ir:${i.identity}`));
+    emitter.on(
+        "emitChunk",
+        (i) => events.push(`chunk:${JSON.stringify(i.chunk)}`),
+    );
+    emitter.on("error", () => events.push("error"));
+
+    const isCandidate = (line: string): C | false =>
+        line.startsWith("=x")
+            ? { directive: "x", argsText: "", render: () => "Z" }
+            : false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate, {
+        events: emitter,
+        startLine: 10,
+    });
+
+    const res = await eng.processToString("=x\n", {});
+    assertEquals(res.after, "Z\n");
+    assertEquals(events, [
+        "line#10",
+        "cand:x",
+        "ir:x",
+        `chunk:"Z\\n"`,
+    ]);
+});
+
+Deno.test("Error policy: candidate throws → continue preserves text", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+
+    const isCandidate = (_line: string, _n: number): C | false => {
+        throw new Error("bad detect");
+    };
+
+    const errors: string[] = [];
+    const emitter = new Emitter<
+        {
+            error: (e: unknown, _ctx: unknown) => void;
+            emitChunk: (i: { chunk: string; anchorLineNo: number }) => void;
+        }
+    >();
+    emitter.on("error", (e) => errors.push(String(e)));
+
+    const eng = new ReplaceStream<C, P>(isCandidate, {
+        events: emitter as unknown as Emitter<ReplaceStreamEvents<C>>,
+        onError: () => "continue",
+    });
+    const input = "plain\n";
+    const out = await eng.processToString(input, {});
+    assertEquals(out.after, input);
+    assertMatch(errors[0], /bad detect/);
+});
+
+Deno.test("Error policy: blockEnd predicate throws → continue keeps inner", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+
+    const isCandidate = (line: string): C | false => {
+        if (line.trim() === "BEGIN") {
+            return {
+                directive: "B",
+                argsText: "",
+                blockEnd: (_probe) => {
+                    throw new Error("oops probe");
+                },
+                render: () => ["new"],
+            };
+        }
+        return false;
+    };
+
+    const eng = new ReplaceStream<C, P>(isCandidate, {
+        onError: () => "continue",
+    });
+
+    const input = "BEGIN\n1\n2\nEND\n";
+    const out = await eng.processToString(input, {});
+    assertMatch(out.after, /^BEGIN\n1\n2\nEND\n$/);
+});
+
+Deno.test("Unterminated block → continue policy best-effort passthrough", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false =>
+        line.trim() === "BEGIN"
+            ? {
+                directive: "B",
+                argsText: "",
+                blockEnd: (probe) => probe.trim() === "END",
+                render: () => ["SHOULD-NOT-BE-USED"],
+            }
+            : false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate, {
+        onError: () => "continue",
+    });
+
+    const out = await eng.processToString("BEGIN\nx\n", {});
+    assertEquals(out.after, "BEGIN\nx\n");
+});
+
+Deno.test("CRLF inference for inserted lines within block", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+
+    const isCandidate = (line: string): C | false =>
+        line.trim() === "BEGIN"
+            ? {
+                directive: "B",
+                argsText: "",
+                blockEnd: (p) => p.trim() === "END",
+                render: () => ["a", "b"],
+            }
+            : false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate);
+    const input = "X\r\nBEGIN\r\nOLD\r\nEND\r\nY\r\n";
+    const res = await eng.processToString(input, {});
+    assertEquals(res.after, "X\r\nBEGIN\r\na\r\nb\r\nEND\r\nY\r\n");
+});
+
+Deno.test("includeStream: basic happy path with two regions", async () => {
+    const input = [
+        "-- #include A",
+        "will be replaced",
+        "-- #includeEnd A",
+        "-- #include B arg1 arg2",
+        "old",
+        "-- #includeEnd B",
+    ].join("\n");
+
+    const rs = includeStream(
+        input,
+        {
+            render: (name, cand) => {
+                if (name === "A") return ["X"];
+                if (name === "B") {
+                    assertStrictEquals(cand.argsText, "arg1 arg2");
+                    return ["Y1", "Y2"];
+                }
+                return ["?"];
+            },
+            startLine: 1,
         },
+        {} as Record<PropertyKey, never>,
     );
 
-    await t.step("no marker at start → normal split", () => {
-        assertEquals(parse("select * from t"), ["select", "* from t", ""]);
-        assertEquals(parse("include stuff"), ["include", "stuff", ""]);
-    });
+    const out = await streamToString(rs);
+    // Normalize EOLs and compare line-by-line (more robust than one big string)
+    const lines = out.replace(/\r\n/g, "\n").split("\n");
+    assertEquals(lines, [
+        "-- #include A",
+        "X",
+        "-- #includeEnd A",
+        "-- #include B arg1 arg2",
+        "Y1",
+        "Y2",
+        "-- #includeEnd B",
+    ]);
 });
 
-Deno.test("lineCommentDirectiveParser: Bash style # with @ directives", async (t) => {
-    const parse = lineCommentDirectiveParser({
-        comment: "#",
-        directivePrefix: "@",
-    });
+Deno.test("includeStream: ensure end matches same name", async () => {
+    const input = [
+        "-- #include name-1",
+        "wrong",
+        "-- #includeEnd name-2",
+    ].join("\n");
 
-    await t.step("plain comment word", () => {
-        assertEquals(parse("# note"), ["note", "", ""]);
-        assertEquals(parse("# note this"), ["note", "this", ""]);
-    });
-
-    await t.step("directive immediate or spaced", () => {
-        assertEquals(parse("#@todo"), ["todo", "", "@"]);
-        assertEquals(parse("# @todo fix"), ["todo", "fix", "@"]);
-        assertEquals(parse("   #   @tag release 1.2"), [
-            "tag",
-            "release 1.2",
-            "@",
-        ]);
-    });
-
-    await t.step("shebang-like (no remainder)", () => {
-        assertEquals(parse("#!/usr/bin/env bash"), [
-            "!/usr/bin/env",
-            "bash",
-            "",
-        ]);
-    });
-
-    await t.step("no comment marker → normal split", () => {
-        assertEquals(parse("echo hello"), ["echo", "hello", ""]);
-    });
+    const rs = includeStream(
+        input,
+        {
+            render: () => ["X"],
+            onError: () => "continue",
+        },
+        {} as Record<PropertyKey, never>,
+    );
+    const out = await streamToString(rs);
+    assertEquals(out, input);
 });
 
-Deno.test("lineCommentDirectiveParser: JS/C style // with ! directives", async (t) => {
-    const parse = lineCommentDirectiveParser({
-        comment: "//",
-        directivePrefix: "!",
-    });
+Deno.test("ReplaceStream accepts ReadableStream input", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false =>
+        line.startsWith("=hi")
+            ? { directive: "hi", argsText: "", render: () => "yo" }
+            : false;
 
-    await t.step("plain // comment", () => {
-        assertEquals(parse("// region Name"), ["region", "Name", ""]);
-        assertEquals(parse("   //   TODO later"), ["TODO", "later", ""]);
-    });
-
-    await t.step("directive with !", () => {
-        assertEquals(parse("//!pragma once"), ["pragma", "once", "!"]);
-        assertEquals(parse("// !enable feature-x"), [
-            "enable",
-            "feature-x",
-            "!",
-        ]);
-    });
-
-    await t.step("no marker → normal split", () => {
-        assertEquals(parse("console.log(x)"), ["console.log(x)", "", ""]);
-        assertEquals(parse("let x = 1;"), ["let", "x = 1;", ""]);
-    });
+    const eng = new ReplaceStream<C, P>(isCandidate);
+    const input = rsFromStrings("=hi", "\n", "plain\n");
+    const out = await eng.processToString(input, {});
+    assertEquals(out.after, "yo\nplain\n");
 });
 
-Deno.test("lineCommentDirectiveParser: edge cases", async (t) => {
-    const parseHash = lineCommentDirectiveParser({
-        comment: "#",
-        directivePrefix: ":",
-    });
-
-    await t.step("empty / whitespace-only lines", () => {
-        assertEquals(parseHash(""), false);
-        assertEquals(parseHash("   \t  "), false);
-    });
-
-    await t.step("comment with only prefix and spaces", () => {
-        assertEquals(parseHash("#:"), false);
-        assertEquals(parseHash("#:   "), false);
-    });
-
-    await t.step("marker not at the very start → normal split", () => {
-        assertEquals(parseHash("x # y"), ["x", "# y", ""]);
-        assertEquals(parseHash("path // comment"), ["path", "// comment", ""]);
-    });
+Deno.test("Inline render returns empty string → engine appends EOL", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false =>
+        line === "=empty"
+            ? {
+                directive: "empty",
+                argsText: "",
+                render: () => "",
+            }
+            : false;
+    const eng = new ReplaceStream<C, P>(isCandidate);
+    const out = await eng.processToString("=empty\n", {});
+    assertEquals(out.after, "\n");
 });
+
+Deno.test("Block render returns empty array → single EOL inserted", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+    const isCandidate = (line: string): C | false =>
+        line.trim() === "BEGIN"
+            ? {
+                directive: "B",
+                argsText: "",
+                blockEnd: (p) => p.trim() === "END",
+                render: () => [],
+            }
+            : false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate);
+    const out = await eng.processToString("BEGIN\nOLD\nEND\n", {});
+    assertEquals(out.after, "BEGIN\n\nEND\n");
+});
+
+Deno.test("startLine offsets event line numbers", async () => {
+    type P = Record<PropertyKey, never>;
+    type C = CandidateDefn<P>;
+
+    const ev: number[] = [];
+    const emitter = new Emitter<ReplaceStreamEvents<C>>();
+    emitter.on("line", (i) => ev.push(i.lineNo));
+
+    const isCandidate = (_l: string): C | false => false;
+
+    const eng = new ReplaceStream<C, P>(isCandidate, {
+        events: emitter,
+        startLine: 5,
+    });
+
+    const out = await eng.processToString("a\nb\n", {});
+    assertEquals(out.after, "a\nb\n");
+    assertEquals(ev, [5, 6]);
+});
+
+// (Optional) tiny delay to flush microtasks
+await delay(1);

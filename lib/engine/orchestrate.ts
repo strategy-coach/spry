@@ -21,6 +21,7 @@ import { Linter } from "./lint.ts";
 import { FsPathSupplier, PathSupplier, projectPaths } from "./paths.ts";
 import { JsonStore, Store } from "./storage.ts";
 import { EncountersSupplier, Walkers } from "./walk.ts";
+import { Macros } from "./macros.ts";
 import { Routes, SpryRouteAnnotation } from "./anno/mod.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -145,6 +146,7 @@ export class Workflow {
     readonly linter: Linter;
     readonly lintr: ReturnType<Linter["lintResults"]>;
     readonly stores: ReturnType<Plan["stores"]>;
+    readonly macros: ReturnType<Plan["macros"]>;
     readonly pp: Plan["pp"];
     readonly spf: ReturnType<Plan["sqlpageFiles"]>;
     readonly annotations: ReturnType<Plan["annotations"]>;
@@ -166,6 +168,7 @@ export class Workflow {
         this.linter = plan.linter();
         this.lintr = this.linter.lintResults();
         this.stores = plan.stores();
+        this.macros = plan.macros();
         this.spf = plan.sqlpageFiles();
         this.annotations = plan.annotations();
 
@@ -444,6 +447,10 @@ export class Workflow {
         );
     }
 
+    async renderMacros() {
+        await this.macros.render(this.lintr);
+    }
+
     async capExecs() {
         const result = new CapExecs(this.plan, this.lintr, {
             cliOpts: this.cliOpts,
@@ -457,6 +464,7 @@ export class Workflow {
         const stores = this.stores;
         if (init?.cleanAuto) await this.plan.clean(stores);
 
+        const macros = await this.renderMacros();
         const capExecs = await this.capExecs();
 
         await capExecs.materialize("BEFORE_ANN_CATALOG");
@@ -595,6 +603,10 @@ export class Plan {
         );
     }
 
+    macros() {
+        return new Macros(this);
+    }
+
     annotations() {
         return new Annotations(this.pp.projectFsPaths, this.pp.webPaths);
     }
@@ -658,7 +670,7 @@ export class Plan {
         }
 
         // if `auto` was the only directory in `spry.d`, remove that too
-        rmDirIfEmpty(stores.spryDropInStores.polyglot.destFsRoot);
+        await rmDirIfEmpty(stores.spryDropInStores.polyglot.destFsRoot);
     }
 
     async workflow(cliOpts?: SafeCliArgs) {

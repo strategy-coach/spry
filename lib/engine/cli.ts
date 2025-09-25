@@ -161,50 +161,50 @@ export class CLI {
     }
 
     async lsRegions() {
-        const workflow = await this.plan.workflow();
-        const includes = workflow.annsCatalog.filter((ea) =>
-            ea.regionsAnn.includes.length
-        ).flatMap((ea) => (ea.regionsAnn.includes.map((i) => ({
-            path: i.we.entry.path,
-            include: i.directives.include.relPath,
-            region: i.directives.include.name,
-            start: i.directives.include.lineNum,
-            end: i.directives.includeEnd.lineNum,
-        }))));
-        if (includes.length) {
-            await new ListerBuilder<typeof includes[number]>()
-                .declareColumns("path", "region", "include", "start", "end")
-                .from(includes)
-                .field("path", "path", this.lsColorPathField())
-                .field("region", "region")
-                .field("include", "include")
-                .field("start", "start", { align: "right" })
-                .field("end", "end", { align: "right" })
-                .sortBy("path").sortDir("asc")
-                .build()
-                .ls(true);
-        }
+        // const workflow = await this.plan.workflow();
+        // const includes = workflow.annsCatalog.filter((ea) =>
+        //     ea.regionsAnn.includes.length
+        // ).flatMap((ea) => (ea.regionsAnn.includes.map((i) => ({
+        //     path: i.we.entry.path,
+        //     include: i.directives.include.relPath,
+        //     region: i.directives.include.name,
+        //     start: i.directives.include.lineNum,
+        //     end: i.directives.includeEnd.lineNum,
+        // }))));
+        // if (includes.length) {
+        //     await new ListerBuilder<typeof includes[number]>()
+        //         .declareColumns("path", "region", "include", "start", "end")
+        //         .from(includes)
+        //         .field("path", "path", this.lsColorPathField())
+        //         .field("region", "region")
+        //         .field("include", "include")
+        //         .field("start", "start", { align: "right" })
+        //         .field("end", "end", { align: "right" })
+        //         .sortBy("path").sortDir("asc")
+        //         .build()
+        //         .ls(true);
+        // }
 
-        const issues = workflow.annsCatalog.filter((ea) =>
-            ea.regionsAnn.issues.length
-        ).flatMap((ea) => (ea.regionsAnn.issues.map((i) => ({
-            path: i.we.entry.path,
-            issue: i.issue,
-            ann: i.ann.raw,
-            line: i.ann.source?.loc?.start?.line ?? 0,
-        }))));
-        if (issues.length) {
-            await new ListerBuilder<typeof issues[number]>()
-                .declareColumns("path", "issue", "ann", "line")
-                .from(issues)
-                .field("path", "path", this.lsColorPathField())
-                .field("issue", "issue")
-                .field("ann", "ann")
-                .field("line", "line", { align: "right" })
-                .sortBy("path").sortDir("asc")
-                .build()
-                .ls(true);
-        }
+        // const issues = workflow.annsCatalog.filter((ea) =>
+        //     ea.regionsAnn.issues.length
+        // ).flatMap((ea) => (ea.regionsAnn.issues.map((i) => ({
+        //     path: i.we.entry.path,
+        //     issue: i.issue,
+        //     ann: i.ann.raw,
+        //     line: i.ann.source?.loc?.start?.line ?? 0,
+        // }))));
+        // if (issues.length) {
+        //     await new ListerBuilder<typeof issues[number]>()
+        //         .declareColumns("path", "issue", "ann", "line")
+        //         .from(issues)
+        //         .field("path", "path", this.lsColorPathField())
+        //         .field("issue", "issue")
+        //         .field("ann", "ann")
+        //         .field("line", "line", { align: "right" })
+        //         .sortBy("path").sortDir("asc")
+        //         .build()
+        //         .ls(true);
+        // }
     }
 
     async lsAnnotations(_opts: { json?: boolean }) {

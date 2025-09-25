@@ -5,7 +5,7 @@ export class Linter {
         return defineRegistry(
             {
                 "invalid-annotation": defineRule({
-                    code: ["region", "entry", "route"] as const,
+                    code: ["entry", "route"] as const,
                     data: { annotation: {} },
                     defaultSeverity: "error",
                 }),
@@ -25,6 +25,11 @@ export class Linter {
                             | null,
                     },
                     defaultSeverity: "warn",
+                }),
+                "invalid-directive": defineRule({
+                    code: ["include"] as const,
+                    data: { elaboration: {} },
+                    defaultSeverity: "error",
                 }),
             } as const,
         );
