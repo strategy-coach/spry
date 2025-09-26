@@ -31,6 +31,11 @@ export class Linter {
                     data: { elaboration: {} },
                     defaultSeverity: "error",
                 }),
+                "invalid-parser": defineRule({
+                    code: ["directive"] as const,
+                    data: { elaboration: {} },
+                    defaultSeverity: "error",
+                }),
             } as const,
         );
     }

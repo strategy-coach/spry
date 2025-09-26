@@ -447,8 +447,10 @@ export class Workflow {
         );
     }
 
-    async forge() {
-        // await this.macros.transform(this.lintr);
+    async materializeDirectives() {
+        for await (const d of this.directives.materialize(this.lintr)) {
+            console.log("Materialized", d.we.entry.path);
+        }
     }
 
     async foundries() {
@@ -464,7 +466,7 @@ export class Workflow {
         const stores = this.stores;
         if (init?.cleanAuto) await this.plan.clean(stores);
 
-        const executed = await this.forge();
+        await this.materializeDirectives();
         const execs = await this.foundries();
 
         await execs.materialize("BEFORE_ANN_CATALOG");

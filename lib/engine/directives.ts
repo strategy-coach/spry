@@ -1,4 +1,5 @@
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { dirname, extname, resolve } from "jsr:@std/path@1";
 import {
     type CandidateDefn,
     Emitter,
@@ -8,14 +9,14 @@ import {
     ReplaceStreamEvents,
     textToShellArgv,
 } from "../universal/directive.ts";
+import { Linter } from "./lint.ts";
+import { Plan } from "./orchestrate.ts";
 import {
     EncountersSupplier,
     WalkEncounter,
     Walkers,
     WalkSpec,
 } from "./walk.ts";
-import { Plan } from "./orchestrate.ts";
-import { Linter } from "./lint.ts";
 
 type DirectivePayload = {
     walkEntry: WalkEncounter<WalkSpec>;
@@ -24,31 +25,37 @@ type DirectivePayload = {
 
 type IncludeDirective = CandidateDefn<DirectivePayload> & {
     blockName: string;
-    files: string[];
+    file: string;
     srcLineNo: number;
 };
 
 export class Directives {
     readonly replaceables: EncountersSupplier;
-    readonly sqlIncludeParser = lineCommentDirectiveParser({
-        comment: "--", // e.g. -- #include
-        directivePrefix: "#", // e.g. #include
-    });
+    readonly directiveParsers = {
+        ".sql": lineCommentDirectiveParser({
+            comment: "--", // e.g. -- #include
+            directivePrefix: "#", // e.g. #include
+        }),
+    };
     readonly sqlIncludeDirective = new Command()
         .name("#include")
         .description(
             "include one or more files into the source (in-place replacement)",
         )
         .arguments("<block-name:string>")
-        .option("-f, --file <path:string>", "include file", {
-            collect: true,
-            required: true,
-        });
+        .option(
+            "-f, --file <path:string>",
+            "include file (relative to source file)",
+            {
+                // collect: true, TODO: should we allow multiple?
+                required: true,
+            },
+        );
 
     constructor(readonly plan: Plan) {
         this.replaceables = Walkers.builder()
             .addRoot(plan.pp.projectSrcFsPaths, {
-                exts: [".sql"],
+                exts: Object.keys(this.directiveParsers),
                 includeDirs: false,
                 includeFiles: true,
                 includeSymlinks: false,
@@ -69,7 +76,24 @@ export class Directives {
             curLineNo,
             payload,
         ) => {
-            const parsed = this.sqlIncludeParser(line);
+            const nature = extname(payload.walkEntry.entry.path);
+            if (!(nature in this.directiveParsers)) {
+                if (lintr) {
+                    lintr.add({
+                        rule: "invalid-parser",
+                        code: "directive",
+                        content: payload.walkEntry.entry.path,
+                        message:
+                            `Unknown directive parser for '${nature}' (line ${curLineNo})`,
+                        severity: "error",
+                        data: { elaboration: {} },
+                    });
+                }
+            }
+            const directiveParser = this.directiveParsers[
+                nature as keyof Directives["directiveParsers"]
+            ];
+            const parsed = directiveParser(line);
             if (!parsed) return false;
 
             const [token, argsText] = parsed;
@@ -82,15 +106,43 @@ export class Directives {
                                 directive: "include",
                                 argsText,
                                 blockName,
-                                files: file,
+                                file,
                                 srcLineNo: curLineNo,
-                                render: (payload, curLineNo) => {
-                                    return "test";
+                                render: (payload) => {
+                                    try {
+                                        return Deno.readTextFileSync(
+                                            resolve(
+                                                dirname(
+                                                    payload.walkEntry.entry
+                                                        .path,
+                                                ),
+                                                file,
+                                            ),
+                                        );
+                                    } catch (err) {
+                                        if (lintr) {
+                                            lintr.add({
+                                                rule: "invalid-directive",
+                                                code: "include",
+                                                content: payload.walkEntry.entry
+                                                    .path,
+                                                message:
+                                                    `Error reading ${file} (at line ${curLineNo})`,
+                                                severity: "error",
+                                                data: {
+                                                    elaboration: err &&
+                                                            typeof err ===
+                                                                "object"
+                                                        ? err
+                                                        : {},
+                                                },
+                                            });
+                                        }
+                                        return String(err);
+                                    }
                                 },
                                 blockEnd: (probe) => {
-                                    const parsedEnd = this.sqlIncludeParser(
-                                        probe,
-                                    );
+                                    const parsedEnd = directiveParser(probe);
                                     if (!parsedEnd) return false;
                                     const [endToken, endRemains] = parsedEnd;
                                     const matches = endToken == "includeEnd" &&
@@ -125,6 +177,7 @@ export class Directives {
         return handler;
     }
 
+    // list (and execute) directives but don't materialize
     async directives(lintr?: ReturnType<Linter["lintResults"]>) {
         const incDirHandler = this.includeDirective(lintr);
         const engine = new ReplaceStream(incDirHandler);
@@ -149,7 +202,7 @@ export class Directives {
                     endLineNo: i.endLineNo,
                 }),
         );
-        // emitter.on("error", () => events.push("error"));
+        // TODO: emitter.on("error", () => events.push("error"));
 
         for await (const we of this.sources()) {
             const original = await Deno.readTextFile(we.entry.path);
@@ -165,6 +218,20 @@ export class Directives {
         return { modified };
     }
 
-    async *transform(lintr: ReturnType<Linter["lintResults"]>) {
+    async *materialize(lintr: ReturnType<Linter["lintResults"]>) {
+        const incDirHandler = this.includeDirective(lintr);
+        const engine = new ReplaceStream(incDirHandler);
+        for await (const we of this.sources()) {
+            const original = await Deno.readTextFile(we.entry.path);
+            const payload: DirectivePayload = {
+                walkEntry: we,
+                contentState: "unmodified",
+            };
+            const result = await engine.processToString(original, payload);
+            if (result.changed && result.after != result.before) {
+                await Deno.writeTextFile(we.entry.path, result.after);
+                yield { we, result };
+            }
+        }
     }
 }
