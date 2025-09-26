@@ -16,7 +16,7 @@ import { Annotations } from "./annotations.ts";
 import { DeploySQL, Plan } from "./orchestrate.ts";
 import * as sqldx from "./sqlitedx.ts";
 import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
-import { SpryEntryAnnotation } from "./anno/mod.ts";
+import { SpryResourceAnnotation } from "./anno/mod.ts";
 
 export type SafeCliArgs = {
     dbName?: string;
@@ -81,8 +81,8 @@ export class CLI {
     }
 
     lsNatureField<
-        Row extends { nature: SpryEntryAnnotation["nature"] },
-    >(): Partial<ColumnDef<Row, SpryEntryAnnotation["nature"]>> {
+        Row extends { nature: SpryResourceAnnotation["nature"] },
+    >(): Partial<ColumnDef<Row, SpryResourceAnnotation["nature"]>> {
         return {
             header: "Nature",
             format: (v) =>
@@ -115,7 +115,10 @@ export class CLI {
     }
 
     lsNaturePathField<
-        Row extends { nature: SpryEntryAnnotation["nature"]; error?: string },
+        Row extends {
+            nature: SpryResourceAnnotation["nature"];
+            error?: string;
+        },
     >(): Partial<ColumnDef<Row, string>> {
         const lscpf = this.lsColorPathField();
         return {
@@ -140,15 +143,16 @@ export class CLI {
 
     async ls() {
         const workflow = await this.plan.workflow();
-        const list = workflow.annsCatalog.filter((ea) => ea.entryAnn.found).map(
-            (ea) => ({
-                nature: ea.entryAnn.parsed?.nature ?? "unknown",
-                path: ea.walkEntry.entry.path,
-                error: ea.entryAnn.error
-                    ? z.prettifyError(ea.entryAnn.error)
-                    : "",
-            }),
-        );
+        const list = workflow.annsCatalog.filter((ea) => ea.resourceAnn.found)
+            .map(
+                (ea) => ({
+                    nature: ea.resourceAnn.parsed?.nature ?? "unknown",
+                    path: ea.walkEntry.entry.path,
+                    error: ea.resourceAnn.error
+                        ? z.prettifyError(ea.resourceAnn.error)
+                        : "",
+                }),
+            );
         await new ListerBuilder<typeof list[number]>()
             .declareColumns("nature", "path", "error")
             .from(list)
@@ -250,19 +254,21 @@ export class CLI {
             this.plan.pp.webPaths,
         );
         const table = new Table({
-            head: ["E", "R", "Path", "Entry Error", "Route Error"],
+            head: ["Res", "Rou", "Path", "Resource Error", "Route Error"],
         });
         for await (const a of anns.catalog()) {
-            if (a.entryAnn.found == 0 && a.routeAnn.found == 0) continue;
+            if (a.resourceAnn.found == 0 && a.routeAnn.found == 0) continue;
             table.push([
-                a.entryAnn?.error
+                a.resourceAnn?.error
                     ? ""
-                    : (a.entryAnn.found ? String(a.entryAnn.found) : ""),
+                    : (a.resourceAnn.found ? String(a.resourceAnn.found) : ""),
                 a.routeAnn?.error
                     ? ""
                     : (a.routeAnn.found ? String(a.routeAnn.found) : ""),
                 relative(Deno.cwd(), a.walkEntry.entry.path),
-                a.entryAnn?.error ? z.prettifyError(a.entryAnn.error) : "",
+                a.resourceAnn?.error
+                    ? z.prettifyError(a.resourceAnn.error)
+                    : "",
                 a.routeAnn?.error ? z.prettifyError(a.routeAnn.error) : "",
             ]);
         }

@@ -9,8 +9,8 @@ import {
     languageExtnIndex,
 } from "../universal/content/code.ts";
 import {
-    SpryEntryAnnotation,
-    spryEntryAnnSchema,
+    SpryResourceAnnotation,
+    spryResourceAnnSchema,
     SpryRouteAnnotation,
     spryRouteAnnSchema,
 } from "./anno/mod.ts";
@@ -79,10 +79,10 @@ export class Annotations {
     ) {
         const prefixedItems = catalog.items
             .filter((it) => it.kind === "tag" && it.key?.startsWith(prefix));
-        const entries = prefixedItems.map((it) =>
+        const resources = prefixedItems.map((it) =>
             [it.key!.slice(prefix.length), it.value ?? it.raw] as const
         );
-        const found = entries.length;
+        const found = resources.length;
         if (found == 0) {
             return {
                 parsed: transform?.onNotFound
@@ -101,7 +101,7 @@ export class Annotations {
 
         const grouped = {
             ...defaults,
-            ...Object.fromEntries(entries),
+            ...Object.fromEntries(resources),
         } as z.input<S>;
         const result = schema.safeParse(
             transform?.beforeParse
@@ -121,7 +121,7 @@ export class Annotations {
             };
     }
 
-    static defaultPageEntryAnn(
+    static defaultPageResourceAnn(
         we: YieldOf<Annotations["sources"]>,
         webPaths: PathSupplier,
         isSystem: boolean,
@@ -132,35 +132,35 @@ export class Annotations {
             relFsPath: we.origin.paths.relative(we.entry),
             webPath: webPaths.absolute(we.entry),
             isSystemGenerated: isSystem,
-        } as SpryEntryAnnotation;
+        } as SpryResourceAnnotation;
     }
 
-    static async entryAnnFromCatalog(
+    static async resourceAnnFromCatalog(
         we: YieldOf<Annotations["sources"]>,
         anns: Awaited<ReturnType<typeof extractAnnotationsFromText>>,
         webPaths: PathSupplier,
         transform?: {
             onNotFound?: () =>
-                | SpryEntryAnnotation
-                | Promise<SpryEntryAnnotation>
+                | SpryResourceAnnotation
+                | Promise<SpryResourceAnnotation>
                 | undefined
                 | Promise<undefined>;
             onFound?: (
-                supplied: SpryEntryAnnotation,
-            ) => SpryEntryAnnotation | Promise<SpryEntryAnnotation>;
+                supplied: SpryResourceAnnotation,
+            ) => SpryResourceAnnotation | Promise<SpryResourceAnnotation>;
             onError?: () =>
-                | SpryEntryAnnotation
-                | Promise<SpryEntryAnnotation>
+                | SpryResourceAnnotation
+                | Promise<SpryResourceAnnotation>
                 | undefined
                 | Promise<undefined>;
         },
     ) {
         return await Annotations.safeAnnGroup(
-            spryEntryAnnSchema,
+            spryResourceAnnSchema,
             "spry.",
             anns,
             transform,
-            Annotations.defaultPageEntryAnn(we, webPaths, false),
+            Annotations.defaultPageResourceAnn(we, webPaths, false),
         );
     }
 
@@ -225,16 +225,17 @@ export class Annotations {
                     this.webPaths,
                 );
 
-                const entryAnn = await Annotations.entryAnnFromCatalog(
+                const resourceAnn = await Annotations.resourceAnnFromCatalog(
                     we,
                     anns,
                     this.webPaths,
                     {
-                        // if no entry was found or the entry has an error but we have a route then let's create
-                        // a default system entry of type "page"
+                        // if no resource was cataloged or the resource has an
+                        // error but we have a route then let's create a default
+                        // system resource of type "page"
                         onNotFound: () =>
                             routeAnn.found > 0
-                                ? Annotations.defaultPageEntryAnn(
+                                ? Annotations.defaultPageResourceAnn(
                                     we,
                                     this.webPaths,
                                     true,
@@ -242,7 +243,7 @@ export class Annotations {
                                 : undefined,
                         onError: () =>
                             routeAnn.found > 0
-                                ? Annotations.defaultPageEntryAnn(
+                                ? Annotations.defaultPageResourceAnn(
                                     we,
                                     this.webPaths,
                                     true,
@@ -254,7 +255,7 @@ export class Annotations {
                 yield {
                     walkEntry: we,
                     annotations: anns,
-                    entryAnn,
+                    resourceAnn,
                     routeAnn,
                 };
             } catch (err) {
@@ -272,19 +273,19 @@ export class Annotations {
                 a.walkEntry.entry,
             );
 
-            if (a.entryAnn.found > 0 && a.entryAnn.error) {
+            if (a.resourceAnn.found > 0 && a.resourceAnn.error) {
                 lintr.add({
                     rule: "invalid-annotation",
-                    code: "entry",
+                    code: "resource",
                     content,
-                    message: z.prettifyError(a.entryAnn.error),
-                    data: { annotation: a.entryAnn },
+                    message: z.prettifyError(a.resourceAnn.error),
+                    data: { annotation: a.resourceAnn },
                     severity: "error",
                 });
             }
 
-            if (a.entryAnn.found > 0 && a.entryAnn.parsed) {
-                switch (a.entryAnn.parsed.nature) {
+            if (a.resourceAnn.found > 0 && a.resourceAnn.parsed) {
+                switch (a.resourceAnn.parsed.nature) {
                     case "foundry":
                         if (!Foundries.isExecutable(a.walkEntry.entry.path)) {
                             lintr.add({
@@ -293,7 +294,10 @@ export class Annotations {
                                 content,
                                 message:
                                     "Foundry candidate does not appear to be executable",
-                                data: { annotation: a.entryAnn, error: null },
+                                data: {
+                                    annotation: a.resourceAnn,
+                                    error: null,
+                                },
                                 severity: "warn",
                             });
                         }

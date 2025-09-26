@@ -88,16 +88,16 @@ export const DEFAULT_VARS = {
     spryd_auto_home: {
         descr: "Spry Drop-in auto-generated content SQLPage home web path",
     },
-    spryd_entries_home: {
+    spryd_resources_home: {
         descr:
-            "Spry Drop-in auto-generated entries annotation relaated SQLPage home web path",
+            "Spry Drop-in auto-generated resources annotation relaated SQLPage home web path",
     },
-    spryd_entries_catalog_json_path: {
+    spryd_resources_catalog_json_path: {
         descr:
-            "Spry Drop-in auto-generated entries catalog JSON SQLPage web path",
+            "Spry Drop-in auto-generated resources catalog JSON SQLPage web path",
     },
-    spryd_entries_catalog_json: {
-        descr: "Spry Drop-in auto-generated entries catalog JSON content",
+    spryd_resources_catalog_json: {
+        descr: "Spry Drop-in auto-generated resources catalog JSON content",
     },
     spryd_routes_home: {
         descr:
@@ -220,28 +220,29 @@ export class Workflow {
         return this;
     }
 
-    protected async dropInEntryAnns(
+    protected async dropInResourceAnns(
         annotated: Set<{ relPath: string; count: number }>,
     ) {
-        function* validEntryAnns(annsCatalog: YieldOf<
+        function* validResourceAnns(annsCatalog: YieldOf<
             ReturnType<Plan["annotations"]>["catalog"]
         >[]) {
             for (const a of annsCatalog) {
                 if (
-                    a.entryAnn.parsed == undefined || a.entryAnn.parsed == null
+                    a.resourceAnn.parsed == undefined ||
+                    a.resourceAnn.parsed == null
                 ) continue;
                 yield {
-                    ...a.entryAnn.parsed,
-                    webPath: a.entryAnn.parsed.webPath,
-                    relFsPath: a.entryAnn.parsed.relFsPath,
+                    ...a.resourceAnn.parsed,
+                    webPath: a.resourceAnn.parsed.webPath,
+                    relFsPath: a.resourceAnn.parsed.relFsPath,
                     ...(a.routeAnn.found > 0 && a.routeAnn.parsed
                         ? { route: a.routeAnn.parsed }
                         : {}),
                     ".provenance": {
-                        entry: {
-                            anns: a.entryAnn.anns,
-                            found: a.entryAnn.found,
-                            error: a.entryAnn.error,
+                        resource: {
+                            anns: a.resourceAnn.anns,
+                            found: a.resourceAnn.found,
+                            error: a.resourceAnn.error,
                         },
                         ...(a.routeAnn.found > 0
                             ? {
@@ -265,40 +266,41 @@ export class Workflow {
         const { spryDistAutoStores: { json: spryDistAutoJsonStore } } =
             this.stores;
 
-        const entryAnns = await Array.fromAsync(
-            validEntryAnns(this.annsCatalog),
+        const resourceAnns = await Array.fromAsync(
+            validResourceAnns(this.annsCatalog),
         );
-        for await (const a of entryAnns) {
+        for await (const a of resourceAnns) {
             if (a.webPath) {
                 await spryDistAutoJsonStore.write(
-                    join("entry", a.webPath + ".auto.json"),
+                    join("resource", a.webPath + ".auto.json"),
                     a,
                     omitNonIdempotent,
                 );
                 annotated.add({
                     relPath: a.relFsPath,
-                    count: a[".provenance"].entry.found,
+                    count: a[".provenance"].resource.found,
                 });
             }
         }
 
         this.spGovn.assignLiteral(
-            "spryd_entries_home",
-            this.stores.spryDistAutoStores.polyglot.webPath("entry"),
+            "spryd_resources_home",
+            this.stores.spryDistAutoStores.polyglot.webPath("resource"),
         );
 
-        const { webPath: entriesJsonPath } = await spryDistAutoJsonStore.write(
-            join("entry", "entries.auto.json"),
-            entryAnns,
-            omitNonIdempotent,
-        );
+        const { webPath: resourcesJsonPath } = await spryDistAutoJsonStore
+            .write(
+                join("resource", "resources.auto.json"),
+                resourceAnns,
+                omitNonIdempotent,
+            );
         this.spGovn.assignLiteral(
-            "spryd_entries_catalog_json_path",
-            entriesJsonPath,
+            "spryd_resources_catalog_json_path",
+            resourcesJsonPath,
         );
         this.spGovn.assignSQL(
-            "spryd_entries_catalog_json",
-            `sqlpage.read_file_as_text('${entriesJsonPath}')`,
+            "spryd_resources_catalog_json",
+            `sqlpage.read_file_as_text('${resourcesJsonPath}')`,
         );
     }
 
@@ -404,7 +406,7 @@ export class Workflow {
             { root?: string; relPath: string; count: number }
         >();
 
-        await this.dropInEntryAnns(annotated);
+        await this.dropInResourceAnns(annotated);
         await this.dropInRouteAnns(annotated);
 
         this.orchMD.h2("Annotated Sources");
@@ -688,9 +690,9 @@ const spryDistAutoReadme = (_plan: Plan) => {
     md.h1("Spry Dropin Annotations and Routes");
     md.pTag`After annotations are parsed and validated, Spry generates the following in \`spry.d/auto\`:`;
     md.li("`breadcrumbs/` directory contains computed \"breadcrumbs\" for each node in `forest.auto.json`.")
-    md.li("`entry/` directory contains parsed `@spry.*` annotation for each route / endpoint individually.")
-    md.li("[`entry/entries.auto.json`](entry/entries.auto.json) is a single JSON array of all annotated `@spry.*` entries")
-    md.li("[`entry/issues.auto.md`](entry/issues.auto.json) is a single JSON array of all errors found in annotated `@spry.*` entries (will be an empty array if no issues found)")
+    md.li("`resoruce/` directory contains parsed `@spry.*` annotation for each route / endpoint individually.")
+    md.li("[`resource/resources.auto.json`](resource/resources.auto.json) is a single JSON array of all annotated `@spry.*` resources")
+    md.li("[`resources/issues.auto.md`](resource/issues.auto.json) is a single JSON array of all errors found in annotated `@spry.*` resources (will be an empty array if no issues found)")
     md.li("[`orchestrated.auto.md`](orchestrated.auto.md) is a human-readable summary of orchestration (`build`) results.")
     md.li("`route/` directory contains route annotations JSON for each route / endpoint individually.")
     md.li("[`route/edges.auto.json`](route/edges.auto.json) contains route edges to conveniently build graph with `forest.auto.json`.")

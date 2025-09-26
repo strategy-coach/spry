@@ -9,7 +9,7 @@ Table: sqlpage_files
 What it stores
   One row per “file” that SQLPage/Spry can read:
     • SQL pages / partials (as text)
-    • JSON control files (routes, breadcrumbs, entries, etc.)
+    • JSON control files (routes, breadcrumbs, resources, etc.)
 
 Why it exists
   Keeps runtime-ready artifacts inside the DB so routing, nav, and content can be
@@ -17,7 +17,7 @@ Why it exists
 
 How it’s used
   • SQLPage: maps path → contents to render pages.
-  • Spry: reads JSON files under spry.d/auto/* for routes/breadcrumbs/entries, etc.
+  • Spry: reads JSON files under spry.d/auto/* for routes/breadcrumbs/resources, etc.
 
 Columns
   path          PK “filename” (e.g. spry/console/index.sql.auto.json)

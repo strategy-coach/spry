@@ -147,12 +147,12 @@ CLI. To learn more about the CLI use:
 > Think of annotations as labels and settings. Spry reads them; your file’s text
 > is unchanged.
 
-#### `@spry` _entry_ annotations
+#### `@spry` _resource_ annotations
 
-- Purpose: Describe an _entry point_ into your project.
+- Purpose: Describe a _resource_ or _entry point_ into your project.
 - Where used:
 
-  - Capturable executables (`abc.sql.auto.ts`, `abc.json.auto.ts`, etc.)
+  - Foundries (executables) (`abc.sql.auto.ts`, `abc.json.auto.ts`, etc.)
   - SQLPage files (`.sql`, `.md`, etc.)
 - What they do:
 
@@ -162,8 +162,8 @@ CLI. To learn more about the CLI use:
   - Define outputs (SQL, JSON, Markdown) and where to materialize them.
   - Carry extra metadata for orchestration, e.g. dependencies, purpose, or tags.
 
-Think of `@spry entry` as a declaration of capability — “this file participates
-in Spry’s workflow, here’s what it does.”
+Think of `@spry resource` as a declaration of capability — “this file
+participates in Spry’s workflow, here’s what it does.”
 
 #### `@route` annotations
 
@@ -183,7 +183,7 @@ navigation tree.”
 
 #### Side by side
 
-| Aspect         | `@spry.*` tags define _entries_           | `@route.*` tags define navigation              |
+| Aspect         | `@spry.*` tags define _resources_         | `@route.*` tags define navigation              |
 | -------------- | ----------------------------------------- | ---------------------------------------------- |
 | Focus          | How a file participates in orchestration  | How a page appears in site navigation          |
 | Scope          | Executables, SQL, JSON, Markdown          | SQLPage routes (pages, views, menus)           |
@@ -271,7 +271,7 @@ Debug template: print env
 
 ```bash
 #!/usr/bin/env bash
-# @spry.entry after-sqlpage-files
+# @spry.nature foundry after-sqlpage-files
 # Foundry debug script: shows FOUNDRY_* environment
 
 echo "# Foundry environment"
@@ -313,7 +313,7 @@ easy for SQLPage to consume.
 - Directive didn’t apply: ensure the directive line is commented and correctly
   formatted (e.g., `-- #include …`).
 - Foundry didn’t run: ensure the file is executable (`chmod +x`) and has
-  `@spry.entry`. Use the debug script to print `FOUNDRY_*` env.
+  `@spry.nature foundry`. Use the debug script to print `FOUNDRY_*` env.
 - Auto-materialized name looks odd: follow the `<basename>.<nature>.<runner>`
   pattern (`report.sql.ts` → `report.auto.sql`).
 

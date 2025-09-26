@@ -1,11 +1,11 @@
 #!/usr/bin/env -S deno run -A 
 
 import { fromFileUrl } from "jsr:@std/path@1";
-import * as o from "../../../lib/engine/mod.ts";
+import * as e from "../../../lib/engine/mod.ts";
 
-export class EndToEndTestPrime extends o.Plan {
+export class EndToEndTestPrime extends e.Plan {
   constructor() {
-    super(o.projectPaths(
+    super(e.projectPaths(
       fromFileUrl(import.meta.resolve("./")),
       "../../../lib/std",
     ));
@@ -15,8 +15,8 @@ export class EndToEndTestPrime extends o.Plan {
 if (import.meta.main) {
   const e2e = new EndToEndTestPrime();
   if (Deno.args.length > 0) {
-    await new o.CLI(e2e).cli().parse(Deno.args);
+    await new e.CLI(e2e).cli().parse(Deno.args);
   } else {
-    await new o.DeploySQL(e2e).toStdOut();
+    await new e.DeploySQL(e2e).toStdOut();
   }
 }

@@ -1,28 +1,28 @@
 import { z } from "jsr:@zod/zod@4";
 
-const spryEntryAnnCommon = {
+const spryResourceAnnCommon = {
     absFsPath: z.string(),
     relFsPath: z.string(),
     webPath: z.string(),
     isSystemGenerated: z.boolean().describe(
-        "Virtual entries are not annotated by a user but created by the system",
+        "Virtual resources are not annotated by a user but created by the system",
     ),
     documentation: z.json().optional(),
 };
 
 export const spryResourceNature = "resource" as const;
-export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
+export const spryResourceAnnSchema = z.discriminatedUnion("nature", [
     z.object({
         nature: z.literal("action").describe(
             "Code that executes an action and redirects back to a page.",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("api").describe(
             "An API endpoint exposed by the system.",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("foundry").describe(
@@ -41,19 +41,19 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
             .describe(
                 "Expresses dependencies: 'none' means it's idempotent, 'db-after-build' means it needs the database before/after the build",
             ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("page").describe(
             "A standard SQLPage server-side generated (SSG) page, this is the default.",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("partial").describe(
             "Part of a standard SQLPage SSG page which is usually imported into other SQLPage pages using `run_sql`.",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal(spryResourceNature).describe(
@@ -62,7 +62,7 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         sqlImpact: z.enum(["unknown", "json"]).describe(
             "Specifies the type of resource.",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("sql").describe(
@@ -71,13 +71,13 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
         sqlImpact: z.enum(["dql", "dml", "ddl"]).describe(
             "Specifies the type of SQL impact: DQL (read/query), DML (insert/update/delete), or DDL (schema changes).",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
     z.object({
         nature: z.literal("unknown").describe(
             "When the nature is indeterminate",
         ),
-        ...spryEntryAnnCommon,
+        ...spryResourceAnnCommon,
     }).strict(),
 ]).describe(
     `The nature of this file influences how it's treated by the system. 
@@ -91,4 +91,4 @@ export const spryEntryAnnSchema = z.discriminatedUnion("nature", [
    - 'sql' for SQL stored procedures, requiring 'sqlImpact'.`,
 );
 
-export type SpryEntryAnnotation = z.infer<typeof spryEntryAnnSchema>;
+export type SpryResourceAnnotation = z.infer<typeof spryResourceAnnSchema>;

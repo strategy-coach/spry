@@ -21,10 +21,10 @@ import {
     Walkers,
     WalkSpec,
 } from "./walk.ts";
-import { SpryEntryAnnotation } from "./anno/mod.ts";
+import { SpryResourceAnnotation } from "./anno/mod.ts";
 
 export type SpryFoundryAnnotation = Extract<
-    SpryEntryAnnotation,
+    SpryResourceAnnotation,
     { nature: "foundry" }
 >;
 
@@ -266,24 +266,26 @@ export class Foundries {
                             json: false,
                         },
                     );
-                    const entryAnn = await Annotations.entryAnnFromCatalog(
-                        cec,
-                        anns,
-                        this.plan.pp.webPaths,
-                    );
+                    const resourceAnn = await Annotations
+                        .resourceAnnFromCatalog(
+                            cec,
+                            anns,
+                            this.plan.pp.webPaths,
+                        );
                     if (
-                        entryAnn.parsed && entryAnn.parsed.nature === "foundry"
+                        resourceAnn.parsed &&
+                        resourceAnn.parsed.nature === "foundry"
                     ) {
                         this.ceSelected.push({
                             we: cec,
-                            ann: entryAnn.parsed,
+                            ann: resourceAnn.parsed,
                             pfn: this.parseFileName(cec.entry.path),
                         });
                     }
-                    if (entryAnn.error) {
+                    if (resourceAnn.error) {
                         console.info(dim(cec.origin.paths.relative(cec.entry)));
                         console.error(
-                            brightRed(z.prettifyError(entryAnn.error)),
+                            brightRed(z.prettifyError(resourceAnn.error)),
                         );
                     }
                 } catch (err) {
