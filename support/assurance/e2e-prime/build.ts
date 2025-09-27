@@ -1,4 +1,4 @@
-import { MaterializationEngine } from "../../../lib/engine-next/materialize.ts";
+import { MaterializationEngine } from "../../../lib/engine-next/mod.ts";
 
 const engine = MaterializationEngine.instance(
   import.meta.resolve("./"),
