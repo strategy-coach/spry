@@ -1,6 +1,7 @@
 import { MaterializationEngine } from "../../../lib/engine-next/mod.ts";
 
 const engine = MaterializationEngine.instance(
+  "e2e-prime",
   import.meta.resolve("./"),
   "../../../lib/std",
 );

@@ -129,6 +129,7 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
   readonly paths: ReturnType<MaterializationEngine["projectPaths"]>;
 
   protected constructor(
+    readonly projectId: string,
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly stdlibSymlinkDest: string, // relative dest to stdlib
   ) {
@@ -191,8 +192,8 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
       relative(Deno.cwd(), spryStdLibAbs),
     ];
     return {
-      projectHome: projectHome,
-      projectSrcHome: projectSrcHome,
+      projectHome,
+      projectSrcHome,
       spryDropIn: {
         fsHome: resolve(projectSrcHome, "spry.d"),
         fsAuto: resolve(projectSrcHome, "spry.d", "auto"),
@@ -211,6 +212,41 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
         absPathToConfDir: join(projectHome, "sqlpage"),
       },
       devWatchRoots,
+    };
+  }
+
+  projectStateEnv(
+    init?: { projectVarPrefix?: string; pathVarPrefix?: string },
+  ) {
+    const paths = this.projectPaths();
+    const {
+      pathVarPrefix = "FOUNDRY_PROJECT_PATH_",
+      projectVarPrefix = "FOUNDRY_PROJECT_",
+    } = init ?? {};
+    const projectVars = {
+      "ID": this.projectId,
+    };
+    const pathVars = {
+      "HOME": paths.projectHome,
+      "SRC_HOME": paths.projectSrcHome,
+      "SQLPAGE_HOME": paths.sqlPage.absPathToConfDir,
+      "SPRY_STD_HOME": paths.spryStd.absPathToLocal,
+      "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.homeFromSymlink,
+      "SPRY_STD_HOME_REL": paths.spryStd.relPathToHome,
+      "SPRYD_HOME": paths.spryDropIn.fsHome,
+      "SPRYD_AUTO": paths.spryDropIn.fsAuto,
+      "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
+      "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
+    };
+    return {
+      ...[`${projectVarPrefix}ID`, this.projectId],
+      ...[`${projectVarPrefix}PATHS_JSON`, JSON.stringify(paths)],
+      ...Object.entries(projectVars).map((
+        [k, v],
+      ) => [`${projectVarPrefix}${k}`, v]),
+      ...Object.entries(pathVars).map((
+        [k, v],
+      ) => [`${pathVarPrefix}${k}`, v]),
     };
   }
 
@@ -239,7 +275,11 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
     // await this.discover();
   }
 
-  static instance(moduleHome: string, sprySymlinkDest: string) {
-    return new MaterializationEngine(moduleHome, sprySymlinkDest);
+  static instance(
+    projectId: string,
+    moduleHome: string,
+    sprySymlinkDest: string,
+  ) {
+    return new MaterializationEngine(projectId, moduleHome, sprySymlinkDest);
   }
 }
