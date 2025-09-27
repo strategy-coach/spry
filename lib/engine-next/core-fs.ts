@@ -65,7 +65,14 @@ export function fsFilesContributor<State, Identity extends string>(
                 relFsPath: init.relFsPath?.(absFsPath) ??
                     relative(root, absFsPath),
                 webPath: init.webPath?.(absFsPath),
-                text: async () => await Deno.readTextFile(absFsPath),
+                text: async (replace) => {
+                    if (replace) {
+                        await Deno.writeTextFile(absFsPath, replace);
+                        return replace;
+                    } else {
+                        return await Deno.readTextFile(absFsPath);
+                    }
+                },
                 walkEntry,
                 supplier: {
                     identity,

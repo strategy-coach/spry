@@ -1,5 +1,4 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
-import { detectLanguageByPath } from "../universal/content/code.ts";
 import * as d from "../universal/directive.ts";
 import {
   executableCandidate,
@@ -13,50 +12,66 @@ import {
   Engine,
   EngineEvents,
   EngineListener,
+  isSrcCodeLangSpecSupplier,
   LintCatalog,
   ResourceSupplier,
+  SrcCodeLangSpecSupplier,
+  TextSupplier,
 } from "./core.ts";
 import { IncludeDirective, includeDirective } from "./include.ts";
 import { Resource } from "./resource.ts";
 
-const stages = ["init", "discovery", "materialization"] as const;
+type WorkflowState =
+  | { stage: "init" }
+  | {
+    stage: "discovery";
+    fcDiscovered: FsFilesCollection<EngineState>;
+    registerDiscovery: (
+      ev: Parameters<
+        EngineListener<
+          EngineEvents<EngineState, Resource>,
+          "resource:encountered"
+        >
+      >[0],
+    ) => Promise<void>;
+  }
+  | {
+    stage: "materialization";
+    fcDiscovered: FsFilesCollection<EngineState>;
+    fcMaterialized: FsFilesCollection<EngineState>;
+    registerRediscovery: (
+      ev: Parameters<
+        EngineListener<
+          EngineEvents<EngineState, Resource>,
+          "resource:encountered"
+        >
+      >[0],
+    ) => Promise<void>;
+  };
 
-export class MaterializationState {
-  #fcDiscovered?: FsFilesCollection<MaterializationState>;
-  #stage: typeof stages[number];
+class EngineState {
+  #workflow: WorkflowState;
 
   constructor() {
-    this.#stage = "init";
+    this.#workflow = { stage: "init" };
   }
 
-  get stage() {
-    return this.#stage;
-  }
-
-  get fcDiscovered() {
-    return this.#fcDiscovered;
+  get workflow() {
+    return this.#workflow;
   }
 
   nextStage() {
-    switch (this.#stage) {
-      case "init":
-        this.#stage = "discovery";
-        this.#fcDiscovered = new FsFilesCollection();
-        break;
-    }
-  }
-
-  // deno-lint-ignore require-await
-  async onEncountered(
-    ev: Parameters<
-      EngineListener<
-        EngineEvents<MaterializationState, Resource>,
-        "resource:encountered"
-      >
-    >[0],
-  ) {
-    if (this.#stage === "discovery") {
-      this.#fcDiscovered?.onEncountered(ev.event);
+    switch (this.#workflow.stage) {
+      case "init": {
+        const fcDiscovered = new FsFilesCollection<EngineState>();
+        this.#workflow = {
+          stage: "discovery",
+          fcDiscovered,
+          registerDiscovery: async (ev) =>
+            await fcDiscovered.onEncountered(ev.event),
+        };
+        return this.#workflow;
+      }
     }
   }
 }
@@ -69,6 +84,9 @@ export class FsFilesCollection<State> {
   readonly resources: readonly Resource[] = [];
   readonly fsFiles: readonly FsFileResource[] = [];
   readonly walkedFiles: readonly (FsFileResource & FsWalkedEncounter)[] = [];
+  readonly walkedSrcFiles:
+    readonly (FsFileResource & FsWalkedEncounter & SrcCodeLangSpecSupplier)[] =
+      [];
   readonly execCandidate = executableCandidate();
   readonly isExecutable = this.execCandidate.isExecutable;
 
@@ -96,15 +114,27 @@ export class FsFilesCollection<State> {
       if (isFsWalkedEncounter(resource)) {
         (this.walkedFiles as (FsFileResource & FsWalkedEncounter)[])
           .push(resource);
+        if (isSrcCodeLangSpecSupplier(resource)) {
+          (this
+            .walkedSrcFiles as (
+              & FsFileResource
+              & FsWalkedEncounter
+              & SrcCodeLangSpecSupplier
+            )[]).push(resource);
+        }
       }
     }
   }
 
-  // list (and execute) directives but don't materialize
   // TODO: support more languages
-  directives() {
+  directives(
+    srcFiles: Iterable<
+      TextSupplier & SrcCodeLangSpecSupplier & { absFsPath: string }
+    >,
+  ) {
+    type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
     type SourceFile = {
-      resource: FsFileResource & FsWalkedEncounter;
+      resource: ElementOfIterable<typeof srcFiles>;
       contentState: "unmodified" | "modified";
     };
 
@@ -121,32 +151,30 @@ export class FsFilesCollection<State> {
 
     const replacer = new d.ReplaceStream(incDirective.directive({
       lcdParser: (payload) => {
-        const langSpec = detectLanguageByPath(payload.resource.absFsPath);
-        if (langSpec) {
-          let lcdParser = lcdParsers.get(langSpec.id);
-          if (lcdParser) return lcdParser;
-          if (langSpec.comment.line.length == 0) {
-            console.warn(
-              langSpec,
-              "has no line comments, using SQL defaults in",
-              payload.resource.absFsPath,
-            );
-            return lcdDefaultParser;
-          }
-          if (langSpec.comment.line.length > 1) {
-            console.warn(
-              langSpec,
-              "has multiple line comment styles, using first of",
-              langSpec.comment.line.join(", "),
-              payload.resource.absFsPath,
-            );
-          }
-          lcdParser = d.lineCommentDirectiveParser({
-            comment: langSpec.comment.line[0], // e.g. -- #include
-            directivePrefix: "#", // e.g. #include
-          });
-          lcdParsers.set(langSpec.id, lcdParser);
+        const { srcCodeLanguage: langSpec } = payload.resource;
+        let lcdParser = lcdParsers.get(langSpec.id);
+        if (lcdParser) return lcdParser;
+        if (langSpec.comment.line.length == 0) {
+          console.warn(
+            langSpec,
+            "has no line comments, using SQL defaults in",
+            payload.resource.absFsPath,
+          );
+          return lcdDefaultParser;
         }
+        if (langSpec.comment.line.length > 1) {
+          console.warn(
+            langSpec,
+            "has multiple line comment styles, using first of",
+            langSpec.comment.line.join(", "),
+            payload.resource.absFsPath,
+          );
+        }
+        lcdParser = d.lineCommentDirectiveParser({
+          comment: langSpec.comment.line[0], // e.g. -- #include
+          directivePrefix: "#", // e.g. #include
+        });
+        lcdParsers.set(langSpec.id, lcdParser);
         return lcdDefaultParser;
       },
       onRender: (payload, directive) => {
@@ -161,7 +189,7 @@ export class FsFilesCollection<State> {
 
     const dryRun = async () => {
       const modified: {
-        resource: FsFileResource & FsWalkedEncounter;
+        resource: SourceFile["resource"];
         directive: IncludeDirective<SourceFile>;
         beginLineNo: number;
         endLineNo: number;
@@ -182,8 +210,8 @@ export class FsFilesCollection<State> {
       );
       // TODO: emitter.on("error", () => events.push("error"));
 
-      for await (const resource of this.walkedFiles) {
-        const original = await Deno.readTextFile(resource.absFsPath);
+      for await (const resource of srcFiles) {
+        const original = await resource.text();
         await replacer.processToString(original, {
           resource,
           contentState: "unmodified",
@@ -194,14 +222,14 @@ export class FsFilesCollection<State> {
     };
 
     const materialize = async () => {
-      for await (const resource of this.walkedFiles) {
-        const original = await Deno.readTextFile(resource.absFsPath);
+      for await (const resource of srcFiles) {
+        const original = await resource.text();
         const result = await replacer.processToString(original, {
           resource,
           contentState: "unmodified",
         });
         if (result.changed && result.after != result.before) {
-          await Deno.writeTextFile(resource.absFsPath, result.after);
+          await resource.text(result.after);
           console.info("Materialized", resource.absFsPath);
         }
       }
@@ -211,22 +239,21 @@ export class FsFilesCollection<State> {
   }
 }
 
-export class MaterializationEngine
-  extends Engine<MaterializationState, LintCatalog> {
+export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
   readonly paths: ReturnType<MaterializationEngine["projectPaths"]>;
 
   protected constructor(
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly stdlibSymlinkDest: string, // relative dest to stdlib
   ) {
-    super(new MaterializationState());
+    super(new EngineState());
     this.paths = this.projectPaths();
 
     // register our resource contributors, thse are called when "discover"
     // event is fired
     this.on(
       "resource:contribute",
-      fsFilesContributor<MaterializationState, ResSupplierIdentity>({
+      fsFilesContributor<EngineState, ResSupplierIdentity>({
         identity: "PROJECT_HOME",
         root: this.paths.projectSrcHome,
         walkOptions: {
@@ -241,7 +268,13 @@ export class MaterializationEngine
       }),
     );
 
-    this.on("resource:encountered", (ev) => ev.event.state.onEncountered(ev));
+    this.on("resource:encountered", (ev) => {
+      const { workflow } = this.state;
+      switch (workflow.stage) {
+        case "discovery":
+          workflow.registerDiscovery(ev);
+      }
+    });
   }
 
   relToPrjOrStd(supplied: string) {
@@ -295,23 +328,31 @@ export class MaterializationEngine
     };
   }
 
-  async materialize() {
+  async materialize(args?: { readonly dryRun?: boolean }) {
+    const { dryRun = false } = args ?? {};
+
     // we start in "init", then move to next stage
-    this.state.nextStage();
+    const workflow = this.state.nextStage();
 
-    // get all files by running the contributors, the event handlers know the
-    // stage and put state information into the right place
-    await this.discover();
+    if (workflow?.stage === "discovery") {
+      // get all files by running the contributors, the event handlers know the
+      // stage and put state information into the right place
+      await this.discover();
 
-    // directives are able to modify files so let's do that now
-    const directives = this.state.fcDiscovered!.directives();
-    await directives?.materialize();
+      // directives are able to modify files so let's do that now
+      const directives = workflow.fcDiscovered.directives(
+        workflow.fcDiscovered.walkedSrcFiles,
+      );
+      if (!dryRun) await directives.materialize();
+    } else {
+      console.warn("should be in discovery stage now");
+    }
 
     // we were in "discovery", now move to next stage
     // get all files again by running the contributors, the event handlers know the
     // stage and put state information into the right place
-    this.state.nextStage();
-    await this.discover();
+    // this.state.nextStage();
+    // await this.discover();
   }
 
   static instance(moduleHome: string, sprySymlinkDest: string) {

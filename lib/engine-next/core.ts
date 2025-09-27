@@ -11,7 +11,7 @@ import { Resource, zodParsedResourceAnns } from "./resource.ts";
 type Any = any;
 
 export type TextSupplier = {
-    readonly text: () => string | Promise<string>;
+    readonly text: (replace?: string) => string | Promise<string>;
 };
 
 export const isTextSupplier = (o: unknown): o is TextSupplier =>
