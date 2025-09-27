@@ -1,5 +1,4 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
-import * as d from "../universal/directive.ts";
 import {
   executableCandidate,
   FsFileResource,
@@ -16,9 +15,8 @@ import {
   LintCatalog,
   ResourceSupplier,
   SrcCodeLangSpecSupplier,
-  TextSupplier,
 } from "./core.ts";
-import { IncludeDirective, includeDirective } from "./include.ts";
+import { directives as directivesHanders } from "./directives.ts";
 import { Resource } from "./resource.ts";
 
 type WorkflowState =
@@ -125,118 +123,6 @@ export class FsFilesCollection<State> {
       }
     }
   }
-
-  // TODO: support more languages
-  directives(
-    srcFiles: Iterable<
-      TextSupplier & SrcCodeLangSpecSupplier & { absFsPath: string }
-    >,
-  ) {
-    type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
-    type SourceFile = {
-      resource: ElementOfIterable<typeof srcFiles>;
-      contentState: "unmodified" | "modified";
-    };
-
-    const incDirective = includeDirective<SourceFile>();
-
-    const lcdParsers = new Map<
-      string,
-      ReturnType<typeof d.lineCommentDirectiveParser>
-    >();
-    const lcdDefaultParser = d.lineCommentDirectiveParser({
-      comment: "--", // e.g. -- #include
-      directivePrefix: "#", // e.g. #include
-    });
-
-    const replacer = new d.ReplaceStream(incDirective.directive({
-      lcdParser: (payload) => {
-        const { srcCodeLanguage: langSpec } = payload.resource;
-        let lcdParser = lcdParsers.get(langSpec.id);
-        if (lcdParser) return lcdParser;
-        if (langSpec.comment.line.length == 0) {
-          console.warn(
-            langSpec,
-            "has no line comments, using SQL defaults in",
-            payload.resource.absFsPath,
-          );
-          return lcdDefaultParser;
-        }
-        if (langSpec.comment.line.length > 1) {
-          console.warn(
-            langSpec,
-            "has multiple line comment styles, using first of",
-            langSpec.comment.line.join(", "),
-            payload.resource.absFsPath,
-          );
-        }
-        lcdParser = d.lineCommentDirectiveParser({
-          comment: langSpec.comment.line[0], // e.g. -- #include
-          directivePrefix: "#", // e.g. #include
-        });
-        lcdParsers.set(langSpec.id, lcdParser);
-        return lcdDefaultParser;
-      },
-      onRender: (payload, directive) => {
-        return `-- replace ${payload.resource.absFsPath} with ${directive.file}`;
-      },
-      onError: (payload, _err, _, curLineNo) => {
-        console.error(
-          `Include materialization error in ${payload.resource.absFsPath} on line ${curLineNo}`,
-        );
-      },
-    }));
-
-    const dryRun = async () => {
-      const modified: {
-        resource: SourceFile["resource"];
-        directive: IncludeDirective<SourceFile>;
-        beginLineNo: number;
-        endLineNo: number;
-      }[] = [];
-
-      const emitter = new d.Emitter<
-        d.ReplaceStreamEvents<IncludeDirective<SourceFile>, SourceFile>
-      >();
-      emitter.on(
-        "blockRender",
-        (i) =>
-          modified.push({
-            resource: i.payload.resource,
-            directive: i.directive,
-            beginLineNo: i.beginLineNo,
-            endLineNo: i.endLineNo,
-          }),
-      );
-      // TODO: emitter.on("error", () => events.push("error"));
-
-      for await (const resource of srcFiles) {
-        const original = await resource.text();
-        await replacer.processToString(original, {
-          resource,
-          contentState: "unmodified",
-        }, { events: emitter });
-      }
-
-      return modified;
-    };
-
-    const materialize = async () => {
-      for await (const resource of srcFiles) {
-        const original = await resource.text();
-        const result = await replacer.processToString(original, {
-          resource,
-          contentState: "unmodified",
-        });
-        if (result.changed && result.after != result.before) {
-          await resource.text(result.after);
-          console.info("Materialized", resource.absFsPath);
-        }
-      }
-    };
-
-    return { dryRun, materialize };
-  }
 }
 
 export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
@@ -340,10 +226,8 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
       await this.discover();
 
       // directives are able to modify files so let's do that now
-      const directives = workflow.fcDiscovered.directives(
-        workflow.fcDiscovered.walkedSrcFiles,
-      );
-      if (!dryRun) await directives.materialize();
+      const dh = directivesHanders(workflow.fcDiscovered.walkedSrcFiles);
+      if (!dryRun) await dh.materialize();
     } else {
       console.warn("should be in discovery stage now");
     }
