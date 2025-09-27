@@ -1,6 +1,6 @@
-import { MaterializationEngine } from "../../../lib/engine-next/mod.ts";
+import { Engine } from "../../../lib/engine-next/mod.ts";
 
-const engine = MaterializationEngine.instance(
+const engine = Engine.instance(
   "e2e-prime",
   import.meta.resolve("./"),
   "../../../lib/std",

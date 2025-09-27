@@ -1,6 +1,6 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
 import {
-  executableCandidate,
+  executables,
   FsFileResource,
   fsFilesContributor,
   FsWalkedEncounter,
@@ -8,26 +8,26 @@ import {
   isFsWalkedEncounter,
 } from "./core-fs.ts";
 import {
-  Engine,
-  EngineEvents,
-  EngineListener,
   isSrcCodeLangSpecSupplier,
   LintCatalog,
+  PipelineBus,
+  PipelineEvents,
+  PipelineListener,
   ResourceSupplier,
   SrcCodeLangSpecSupplier,
 } from "./core.ts";
-import { directives as directivesHanders } from "./directives.ts";
+import { directives as directivesHandlers } from "./directives.ts";
 import { Resource } from "./resource.ts";
 
-type WorkflowState =
+type PipelineStage =
   | { stage: "init" }
   | {
     stage: "discovery";
     fcDiscovered: FsFilesCollection<EngineState>;
     registerDiscovery: (
       ev: Parameters<
-        EngineListener<
-          EngineEvents<EngineState, Resource>,
+        PipelineListener<
+          PipelineEvents<EngineState, Resource>,
           "resource:encountered"
         >
       >[0],
@@ -39,8 +39,8 @@ type WorkflowState =
     fcMaterialized: FsFilesCollection<EngineState>;
     registerRediscovery: (
       ev: Parameters<
-        EngineListener<
-          EngineEvents<EngineState, Resource>,
+        PipelineListener<
+          PipelineEvents<EngineState, Resource>,
           "resource:encountered"
         >
       >[0],
@@ -48,7 +48,7 @@ type WorkflowState =
   };
 
 class EngineState {
-  #workflow: WorkflowState;
+  #workflow: PipelineStage;
 
   constructor() {
     this.#workflow = { stage: "init" };
@@ -74,8 +74,8 @@ class EngineState {
   }
 }
 
-export const resSupplierIdentity = ["PROJECT_HOME"] as const;
-export type ResSupplierIdentity = typeof resSupplierIdentity[number];
+export const resourceSupplierIdentity = ["PROJECT_HOME"] as const;
+export type ResourceSupplierIdentity = typeof resourceSupplierIdentity[number];
 
 export class FsFilesCollection<State> {
   readonly suppliers = new Set<ResourceSupplier<State, Resource>>();
@@ -85,7 +85,7 @@ export class FsFilesCollection<State> {
   readonly walkedSrcFiles:
     readonly (FsFileResource & FsWalkedEncounter & SrcCodeLangSpecSupplier)[] =
       [];
-  readonly execCandidate = executableCandidate();
+  readonly execCandidate = executables();
   readonly isExecutable = this.execCandidate.isExecutable;
 
   constructor() {
@@ -94,8 +94,8 @@ export class FsFilesCollection<State> {
   // deno-lint-ignore require-await
   async onEncountered(
     ev: Parameters<
-      EngineListener<
-        EngineEvents<State, Resource>,
+      PipelineListener<
+        PipelineEvents<State, Resource>,
         "resource:encountered"
       >
     >[0]["event"],
@@ -106,6 +106,7 @@ export class FsFilesCollection<State> {
         supplier as ResourceSupplier<State, Resource>,
       );
     }
+
     (this.resources as Resource[]).push(resource);
     if (isFsFileResource(resource)) {
       (this.fsFiles as FsFileResource[]).push(resource);
@@ -113,34 +114,35 @@ export class FsFilesCollection<State> {
         (this.walkedFiles as (FsFileResource & FsWalkedEncounter)[])
           .push(resource);
         if (isSrcCodeLangSpecSupplier(resource)) {
-          (this
-            .walkedSrcFiles as (
-              & FsFileResource
-              & FsWalkedEncounter
-              & SrcCodeLangSpecSupplier
-            )[]).push(resource);
+          (this.walkedSrcFiles as (
+            & FsFileResource
+            & FsWalkedEncounter
+            & SrcCodeLangSpecSupplier
+          )[]).push(resource);
         }
       }
     }
   }
 }
 
-export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
-  readonly paths: ReturnType<MaterializationEngine["projectPaths"]>;
+export class Engine {
+  readonly bus: PipelineBus<EngineState, LintCatalog>;
+  readonly paths: ReturnType<Engine["projectPaths"]>;
+  readonly executables = executables();
 
   protected constructor(
     readonly projectId: string,
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly stdlibSymlinkDest: string, // relative dest to stdlib
   ) {
-    super(new EngineState());
+    this.bus = new PipelineBus(new EngineState());
     this.paths = this.projectPaths();
 
     // register our resource contributors, thse are called when "discover"
     // event is fired
-    this.on(
+    this.bus.on(
       "resource:contribute",
-      fsFilesContributor<EngineState, ResSupplierIdentity>({
+      fsFilesContributor<EngineState, ResourceSupplierIdentity>({
         identity: "PROJECT_HOME",
         root: this.paths.projectSrcHome,
         walkOptions: {
@@ -155,8 +157,8 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
       }),
     );
 
-    this.on("resource:encountered", (ev) => {
-      const { workflow } = this.state;
+    this.bus.on("resource:encountered", (ev) => {
+      const { workflow } = this.bus.state;
       switch (workflow.stage) {
         case "discovery":
           workflow.registerDiscovery(ev);
@@ -238,32 +240,65 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
       "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
       "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
     };
-    return {
-      ...[`${projectVarPrefix}ID`, this.projectId],
-      ...[`${projectVarPrefix}PATHS_JSON`, JSON.stringify(paths)],
-      ...Object.entries(projectVars).map((
-        [k, v],
-      ) => [`${projectVarPrefix}${k}`, v]),
-      ...Object.entries(pathVars).map((
-        [k, v],
-      ) => [`${pathVarPrefix}${k}`, v]),
-    };
+    const result: Record<string, string> = {};
+    result[`${projectVarPrefix}ID`] = this.projectId;
+    result[`${projectVarPrefix}PATHS_JSON`] = JSON.stringify(paths);
+    for (const [k, v] of Object.entries(projectVars)) {
+      if (typeof k === "string") result[`${projectVarPrefix}${k}`] = String(v);
+    }
+    for (const [k, v] of Object.entries(pathVars)) {
+      if (typeof k === "string") result[`${pathVarPrefix}${k}`] = String(v);
+    }
+    return result;
+  }
+
+  async materializeFoundries(
+    candidates: Iterable<FsFileResource>,
+    args?: { readonly dryRun?: boolean },
+  ) {
+    // now see which files are executable and materialize them appropriately
+    const { isExecutable, materialize } = this.executables;
+    const env = this.projectStateEnv();
+    const cwd = Deno.cwd();
+
+    for await (const wf of candidates) {
+      if (wf.nature === "foundry") {
+        if (!isExecutable(wf.absFsPath)) {
+          console.error("foundry", wf.relFsPath, "is not executable");
+        } else {
+          materialize({
+            absFsPath: wf.absFsPath,
+            matAbsFsPath: wf.extensions.autoMaterializable(),
+            env,
+            cwd,
+            dryRun: args?.dryRun,
+          }, (error) => console.error(error));
+        }
+      }
+    }
   }
 
   async materialize(args?: { readonly dryRun?: boolean }) {
     const { dryRun = false } = args ?? {};
 
-    // we start in "init", then move to next stage
-    const workflow = this.state.nextStage();
+    // TODO: publish events before/after/etc. stage changes and other works
+    // TODO: refine how dryRun works
+    // TODO: add linting
+    // TODO: add observability for CLI directly into resources?
 
+    // we start in "init", then move to next stage
+    const workflow = this.bus.state.nextStage();
     if (workflow?.stage === "discovery") {
       // get all files by running the contributors, the event handlers know the
       // stage and put state information into the right place
-      await this.discover();
+      await this.bus.discover();
 
       // directives are able to modify files so let's do that now
-      const dh = directivesHanders(workflow.fcDiscovered.walkedSrcFiles);
+      const dh = directivesHandlers(workflow.fcDiscovered.walkedSrcFiles);
       if (!dryRun) await dh.materialize();
+
+      // now see which files are executable and materialize them appropriately
+      this.materializeFoundries(workflow.fcDiscovered.walkedFiles);
     } else {
       console.warn("should be in discovery stage now");
     }
@@ -280,6 +315,6 @@ export class MaterializationEngine extends Engine<EngineState, LintCatalog> {
     moduleHome: string,
     sprySymlinkDest: string,
   ) {
-    return new MaterializationEngine(projectId, moduleHome, sprySymlinkDest);
+    return new Engine(projectId, moduleHome, sprySymlinkDest);
   }
 }

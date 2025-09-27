@@ -3,11 +3,12 @@ import { walk, type WalkEntry, type WalkOptions } from "jsr:@std/fs@1/walk";
 import { extname, relative } from "jsr:@std/path@1";
 import { detectLanguageByPath } from "../universal/content/code.ts";
 import {
-    type EngineEvents,
-    type EngineListener,
+    type PipelineListener,
     type ResourceSupplier,
     SrcCodeLangSpecSupplier,
+    TextProducer,
     type TextSupplier,
+    type WorkflowEvents,
 } from "./core.ts";
 import { type Resource } from "./resource.ts";
 
@@ -25,18 +26,40 @@ export const isFsWalkedEncounter = (o: unknown): o is FsWalkedEncounter =>
         ? true
         : false;
 
-export type FsFileResource = Resource & TextSupplier & {
+export type FsFileResource = Resource & TextSupplier & TextProducer & {
     readonly absFsPath: string;
     readonly relFsPath: string;
     readonly webPath?: string;
-    readonly isExecutable: () => Promise<boolean>;
+    readonly extensions: ReturnType<typeof pathExtensions>;
 };
 
 export const isFsFileResource = (o: unknown): o is FsFileResource =>
-    o && typeof o === "object" && "absFsPath" in o && "isExecutable" in o &&
-        typeof o.absFsPath === "string" && typeof o.isExecutable === "function"
+    o && typeof o === "object" && "absFsPath" in o && "relFsPath" in o &&
+        typeof o.absFsPath === "string" && typeof o.relFsPath == "string"
         ? true
         : false;
+
+export function pathExtensions(path: string) {
+    const parts = path.split(".");
+    const exts = parts.slice(1).map((
+        e,
+        i,
+        a,
+    ) => (i < a.length - 1 ? `.${e}` : e));
+    const terminal = exts[exts.length - 1] ?? "";
+    return {
+        extensions: exts,
+        terminal,
+        autoMaterializable: () => {
+            if (exts.length < 2) return false;
+            const base = parts[0];
+            const penultimate = parts[parts.length - 2];
+            return `${base}.${penultimate.split(".").slice(0, -1).join(".")}${
+                penultimate ? "." : ""
+            }auto.${penultimate}`;
+        },
+    };
+}
 
 export type FsFilesContributorInit<Identity extends string> = {
     readonly identity: Identity;
@@ -48,15 +71,13 @@ export type FsFilesContributorInit<Identity extends string> = {
 
 export function fsFilesContributor<State, Identity extends string>(
     init: FsFilesContributorInit<Identity>,
-): EngineListener<EngineEvents<State, Resource>, "resource:contribute"> {
+): PipelineListener<WorkflowEvents<State, Resource>, "resource:contribute"> {
     const { identity, root, walkOptions } = init;
-    const ec = executableCandidate();
-
     const supplier: ResourceSupplier<State, Resource> = async function* (
         { signal },
     ) {
         for await (const walkEntry of walk(root, walkOptions)) {
-            const { path: absFsPath } = walkEntry;
+            const { path: absFsPath, name } = walkEntry;
             if (signal?.aborted) return;
             const srcCodeLanguage = detectLanguageByPath(absFsPath);
             yield {
@@ -65,14 +86,7 @@ export function fsFilesContributor<State, Identity extends string>(
                 relFsPath: init.relFsPath?.(absFsPath) ??
                     relative(root, absFsPath),
                 webPath: init.webPath?.(absFsPath),
-                text: async (replace) => {
-                    if (replace) {
-                        await Deno.writeTextFile(absFsPath, replace);
-                        return replace;
-                    } else {
-                        return await Deno.readTextFile(absFsPath);
-                    }
-                },
+                text: async () => await Deno.readTextFile(absFsPath),
                 walkEntry,
                 supplier: {
                     identity,
@@ -80,8 +94,11 @@ export function fsFilesContributor<State, Identity extends string>(
                 },
                 srcCodeLanguage,
                 isSystemGenerated: false,
-                isExecutable: async () =>
-                    await ec.isExecutable(absFsPath, extname(absFsPath)),
+                extensions: pathExtensions(name),
+                writeText: async (text) => {
+                    await Deno.writeTextFile(absFsPath, text);
+                    return text;
+                },
             } satisfies
                 & FsFileResource
                 & FsWalkedEncounter
@@ -103,11 +120,74 @@ export function fsFilesContributor<State, Identity extends string>(
  * - "none": skip detection (everything considered non-exec)
  * Default: "auto"
  */
-export function executableCandidate(
+export function executables(
     executableDetection: "posix" | "windows" | "none" = "posix",
 ) {
     // cache executability by absolute path to avoid repeat stat/env work
     const execCache = new Map<string, boolean>();
+
+    const execute = async (
+        path: string,
+        init?:
+            & {
+                args?: string[];
+                cwd?: string;
+                env?: Record<string, string>;
+                onError?: (error: unknown) => unknown | Promise<unknown>;
+            }
+            & (
+                | {
+                    materialize: (
+                        stdout: Uint8Array,
+                        stderr: Uint8Array,
+                    ) => unknown | Promise<unknown>;
+                }
+                | {
+                    materializeText: (
+                        stdout: string,
+                        stderr: string,
+                    ) => unknown | Promise<unknown>;
+                }
+                | {
+                    ignoreOutput: true;
+                }
+            ),
+    ) => {
+        try {
+            const cmd = new Deno.Command(path, {
+                args: init?.args ?? [],
+                cwd: init?.cwd,
+                env: init?.env,
+                stdout: "piped",
+                stderr: "piped",
+            });
+
+            const out = await cmd.output();
+
+            if (!out.success) {
+                const err = new Error(`Execution failed (${out.code}).`, {
+                    cause: out,
+                });
+                if (init?.onError) await init?.onError(err);
+                return out;
+            }
+
+            if (init && "materialize" in init) {
+                await init.materialize(out.stdout, out.stderr);
+            } else if (init && "materializeText" in init) {
+                const dec = new TextDecoder();
+                await init?.materializeText(
+                    dec.decode(out.stdout),
+                    dec.decode(out.stderr),
+                );
+            }
+
+            return out;
+        } catch (error) {
+            if (init?.onError) await init.onError(error);
+            throw error;
+        }
+    };
 
     const isExecutable = async (
         path: string,
@@ -149,5 +229,62 @@ export function executableCandidate(
         return result;
     };
 
-    return { execCache, isExecutable };
+    const materialize = async (
+        args: {
+            absFsPath: string;
+            matAbsFsPath: false | string;
+            dryRun?: boolean;
+            cwd?: string;
+            env?: Record<string, string>;
+        },
+        onError: (error: unknown) => unknown | Promise<unknown>,
+    ) => {
+        const { absFsPath, matAbsFsPath, dryRun = false, cwd, env } = args;
+        if (dryRun || !await isExecutable(absFsPath)) return;
+        if (matAbsFsPath) {
+            execute(absFsPath, {
+                cwd,
+                env,
+                onError,
+                materialize: async (stdout, _stderr) => {
+                    // TODO: figure out what to do with stderr
+                    await Deno.writeFile(matAbsFsPath, stdout);
+                },
+            });
+        } else {
+            execute(absFsPath, { cwd, env, ignoreOutput: true, onError });
+        }
+    };
+
+    const cleanMaterialized = async (
+        args: {
+            absFsPath: string;
+            matAbsFsPath: false | string;
+            dryRun?: boolean;
+        },
+        onError: (error: unknown) => unknown | Promise<unknown>,
+    ) => {
+        const { absFsPath, matAbsFsPath, dryRun = false } = args;
+        if (dryRun || !await isExecutable(absFsPath)) return;
+        if (matAbsFsPath) {
+            try {
+                // if ce.pfn.materialize.auto is true then .path! must be set
+                await Deno.remove(matAbsFsPath);
+            } catch (error) {
+                await onError(error);
+            }
+        }
+
+        // TODO:
+        // else {
+        //     const { we } = ce;
+        //     await Foundries.execute(we.entry.path, {
+        //         env: this.env("DESTROY_CLEAN", ce),
+        //         cwd: Deno.cwd(),
+        //         ignoreOutput: true,
+        //     });
+        // }
+    };
+
+    return { execCache, isExecutable, execute, materialize, cleanMaterialized };
 }

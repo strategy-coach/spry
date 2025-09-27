@@ -11,12 +11,22 @@ import { Resource, zodParsedResourceAnns } from "./resource.ts";
 type Any = any;
 
 export type TextSupplier = {
-    readonly text: (replace?: string) => string | Promise<string>;
+    readonly text: () => string | Promise<string>;
 };
 
 export const isTextSupplier = (o: unknown): o is TextSupplier =>
     o && typeof o === "object" && "text" in o &&
         typeof o.text === "function"
+        ? true
+        : false;
+
+export type TextProducer = {
+    readonly writeText: (text: string) => string | Promise<string>;
+};
+
+export const isTextProducer = (o: unknown): o is TextProducer =>
+    o && typeof o === "object" && "writeText" in o &&
+        typeof o.writeText === "function"
         ? true
         : false;
 
@@ -108,11 +118,11 @@ type AttachLinter<Ev extends Record<string, unknown>, C extends LintCatalog> = {
 };
 
 /* =========================
-   Engine event maps
+   Pipeline event maps
    ========================= */
 
 // ---------- Event payloads (parameterized by Resource R and Annotation A) ----------
-type EngineEventPayloads<R extends Resource> = {
+type PipelineEventPayloads<R extends Resource> = {
     // Suppliers registration (collectors are specialized with State later)
     "resource:contribute": {
         contribute: ResourceContribution<unknown, R>;
@@ -126,44 +136,31 @@ type EngineEventPayloads<R extends Resource> = {
         srcCodeLanguage?: LanguageSpec;
     };
 
-    // "materialize:directive"
-    // "materialize:foundry"
+    "directive:encountered": {
+        resource: R;
+        // TODO: add directive information
+    };
 
-    // "build:prepare"
-    // "build:prepare:dev"
-
-    // "build:execute"
-    // "build:complete"
+    "directive:materialized": {
+        resource: R;
+        // TODO: add directive information
+    };
 
     // Foundry lifecycle — include related resources when applicable
-    "foundry:beforeRun": {
+    "foundry:encountered": {
         foundryName: string;
         proposed: { env?: Record<string, string>; args?: string[] };
         resources?: ReadonlyArray<R>;
     };
 
-    "foundry:afterRun": {
-        foundryName: string;
-        result: { ok: true; durationMs: number } | { ok: false; error: string };
-        artifacts: Array<{ relPath: string; hash: string }>;
-        resources?: ReadonlyArray<R>;
-    };
-
-    // Artifact lifecycle — always tie artifacts to their originating resource
-    "artifact:beforeWrite": {
+    "foundry:materialized": {
         resource: R;
-        artifact: { bytes: Uint8Array; contentType?: string };
-        proposed: { relPath: string; contentType?: string };
+        // TODO: add foundry information
     };
 
-    "artifact:written": {
-        resource: R;
-        location: { relPath: string; uri: string; hash: string };
-    };
-
-    // Build milestones (summary-level, still carry State via WithState)
-    "build:planReady": {
-        summary: { resources: number; plugins: number; graphHash: string };
+    "build:start": {
+        outcome: "success" | "failed";
+        stats: { durationMs: number; wrote: number; cached: number };
     };
 
     "build:complete": {
@@ -187,10 +184,10 @@ type LintEventMap<State, C extends LintCatalog> = WithState<State, {
 }>;
 
 // ---------- Public, generic event map ----------
-export type EngineEvents<State, R extends Resource> = WithState<
+export type PipelineEvents<State, R extends Resource> = WithState<
     State,
     Omit<
-        EngineEventPayloads<R>,
+        PipelineEventPayloads<R>,
         "resource:contribute" | "resource:encountered"
     > & {
         "resource:contribute": {
@@ -209,62 +206,54 @@ export type EngineEvents<State, R extends Resource> = WithState<
    Event helper types
    ========================= */
 
-export type EngineEventName<E> = Extract<keyof E, string>;
-export type EngineEvent<E, N extends EngineEventName<E>> = E[N];
+export type PipelineEventName<E> = Extract<keyof E, string>;
+export type PipelineEvent<E, N extends PipelineEventName<E>> = E[N];
 
-export type EngineDispatchable<E, N extends EngineEventName<E>> = Readonly<{
+export type PipelineDispatchable<E, N extends PipelineEventName<E>> = Readonly<{
     identity: N;
-    event: EngineEvent<E, N>;
+    event: PipelineEvent<E, N>;
     time: number; // ms since epoch
     cancelable?: boolean;
     defaultPrevented?: boolean;
 }>;
 
-export type EngineListener<E, N extends EngineEventName<E>> = (
-    ev: EngineDispatchable<E, N>,
+export type PipelineListener<E, N extends PipelineEventName<E>> = (
+    ev: PipelineDispatchable<E, N>,
 ) => void | Promise<void>;
 
-/* =========================
-   Engine (with per-event linter)
-   ========================= */
-
-/* =========================
-   Engine (with per-event linter) — FIXED TYPINGS
-   ========================= */
-
-type EventMap<S> = EngineEvents<S, Resource>;
+type EventMap<S> = PipelineEvents<S, Resource>;
 type EvRaw<S, C extends LintCatalog> =
     & EventMap<S>
     & LintEventMap<S, C>;
 type EvWith<S, C extends LintCatalog> = AttachLinter<EvRaw<S, C>, C>;
 type EvName<S, C extends LintCatalog> = Extract<keyof EvWith<S, C>, string>;
 
-export class Engine<State, C extends LintCatalog> {
+export class PipelineBus<State, C extends LintCatalog> {
     constructor(readonly state: State) {}
 
     private listeners = new Map<
         EvName<State, C>,
-        Set<EngineListener<EvWith<State, C>, Any>>
+        Set<PipelineListener<EvWith<State, C>, Any>>
     >();
 
     on<N extends EvName<State, C>>(
         identity: N,
-        listener: EngineListener<EvWith<State, C>, N>,
+        listener: PipelineListener<EvWith<State, C>, N>,
     ): this {
         const set = (this.listeners.get(identity) as
-            | Set<EngineListener<EvWith<State, C>, N>>
+            | Set<PipelineListener<EvWith<State, C>, N>>
             | undefined) ?? new Set();
         set.add(listener);
-        this.listeners.set(identity, set as Set<EngineListener<Any, Any>>);
+        this.listeners.set(identity, set as Set<PipelineListener<Any, Any>>);
         return this;
     }
 
     off<N extends EvName<State, C>>(
         identity: N,
-        listener: EngineListener<EvWith<State, C>, N>,
+        listener: PipelineListener<EvWith<State, C>, N>,
     ): this {
         const set = this.listeners.get(identity);
-        if (set) set.delete(listener as EngineListener<Any, Any>);
+        if (set) set.delete(listener as PipelineListener<Any, Any>);
         return this;
     }
 
@@ -278,7 +267,7 @@ export class Engine<State, C extends LintCatalog> {
                     subsystem: "lint",
                     ...issue,
                     state: this.state,
-                } as unknown as EngineEvent<
+                } as unknown as PipelineEvent<
                     EvRaw<State, C>,
                     "lint:issue"
                 >);
@@ -289,22 +278,22 @@ export class Engine<State, C extends LintCatalog> {
     private async dispatch<N extends EvName<State, C>>(
         identity: N,
         // NOTE: incoming event is the RAW map (no linter); we add linter here
-        event: EngineEvent<EvRaw<State, C>, N>,
+        event: PipelineEvent<EvRaw<State, C>, N>,
         cancelable = false,
     ): Promise<void> {
         const set = this.listeners.get(identity) as
-            | Set<EngineListener<EvWith<State, C>, N>>
+            | Set<PipelineListener<EvWith<State, C>, N>>
             | undefined;
         if (!set?.size) return;
 
         const linter = this.makeLinter();
 
-        const dispatchable: EngineDispatchable<EvWith<State, C>, N> = {
+        const dispatchable: PipelineDispatchable<EvWith<State, C>, N> = {
             identity,
             event: {
                 ...(event as unknown as object),
                 linter,
-            } as EngineEvent<EvWith<State, C>, N>,
+            } as PipelineEvent<EvWith<State, C>, N>,
             time: Date.now(),
             cancelable,
             defaultPrevented: false,
@@ -335,7 +324,7 @@ export class Engine<State, C extends LintCatalog> {
         await this.dispatch<"resource:contribute">("resource:contribute", {
             contribute: contribution,
             state: this.state,
-        } as EngineEvent<Raw, "resource:contribute">);
+        } as PipelineEvent<Raw, "resource:contribute">);
 
         // Drain suppliers and emit encountered events
         let count = 0;
@@ -392,57 +381,11 @@ export class Engine<State, C extends LintCatalog> {
                         supplier,
                         annsCatalog,
                         srcCodeLanguage,
-                    } as EngineEvent<Raw, "resource:encountered">,
+                    } as PipelineEvent<Raw, "resource:encountered">,
                 );
                 count++;
             }
         }
         return count;
-    }
-}
-
-export class ResourcesCollection<State> {
-    readonly suppliers = new Set<ResourceSupplier<State, Resource>>();
-    readonly resources: readonly Resource[] = [];
-
-    constructor() {
-        this.listen = this.onEncountered.bind(this);
-    }
-
-    /** Pass to engine.on("resource:encountered", collector.listen) */
-    readonly listen: EngineListener<
-        EngineEvents<State, Resource>,
-        "resource:encountered"
-    >;
-
-    groupBy<K extends string | number | symbol>(
-        keyFn: (r: Resource) => K,
-    ) {
-        const m = new Map<K, Resource[]>();
-        for (const r of this.resources) {
-            const k = keyFn(r);
-            const arr = m.get(k);
-            if (arr) arr.push(r);
-            else m.set(k, [r]);
-        }
-        return m;
-    }
-
-    // deno-lint-ignore require-await
-    protected async onEncountered(
-        ev: Parameters<
-            EngineListener<
-                EngineEvents<State, Resource>,
-                "resource:encountered"
-            >
-        >[0],
-    ) {
-        const { resource, supplier } = ev.event;
-        if (supplier) {
-            this.suppliers.add(
-                supplier as ResourceSupplier<State, Resource>,
-            );
-        }
-        (this.resources as Resource[]).push(resource);
     }
 }

@@ -8,7 +8,7 @@ import {
     ReplaceStreamEvents,
     textToShellArgv,
 } from "../universal/directive.ts";
-import { SrcCodeLangSpecSupplier, TextSupplier } from "./core.ts";
+import { SrcCodeLangSpecSupplier, TextProducer, TextSupplier } from "./core.ts";
 
 export type IncludeDirective<Payload> = CandidateDefn<Payload> & {
     blockName: string;
@@ -96,7 +96,10 @@ export function includeDirective<Payload>() {
 
 export function directives(
     srcFiles: Iterable<
-        TextSupplier & SrcCodeLangSpecSupplier & { absFsPath: string }
+        & TextSupplier
+        & SrcCodeLangSpecSupplier
+        & { absFsPath: string }
+        & TextProducer
     >,
 ) {
     type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
@@ -196,7 +199,7 @@ export function directives(
                 contentState: "unmodified",
             });
             if (result.changed && result.after != result.before) {
-                await resource.text(result.after);
+                await resource.writeText(result.after);
                 console.info("Materialized", resource.absFsPath);
             }
         }
