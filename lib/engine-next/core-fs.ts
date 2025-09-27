@@ -1,6 +1,7 @@
 // core-fs.ts
-import { extname, relative } from "jsr:@std/path@1";
 import { walk, type WalkEntry, type WalkOptions } from "jsr:@std/fs@1/walk";
+import { extname, relative } from "jsr:@std/path@1";
+import { detectLanguageByPath } from "../universal/content/code.ts";
 import {
     type EngineEvents,
     type EngineListener,
@@ -9,7 +10,6 @@ import {
     type TextSupplier,
 } from "./core.ts";
 import { type Resource } from "./resource.ts";
-import { detectLanguageByPath } from "../universal/content/code.ts";
 
 export type FsWalkedEncounter = {
     readonly supplier: {

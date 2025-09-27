@@ -1,13 +1,13 @@
 import { z } from "jsr:@zod/zod@4";
 import {
+    extractAnnotationsFromText,
+} from "../universal/content/code-comments.ts";
+import {
     forestToEdges,
     pathTree,
     pathTreeNavigation,
     pathTreeSerializers,
 } from "../universal/path-tree.ts";
-import {
-    extractAnnotationsFromText,
-} from "../universal/content/code-comments.ts";
 
 export const routeAnnSchema = z.object({
     path: z.string().describe(

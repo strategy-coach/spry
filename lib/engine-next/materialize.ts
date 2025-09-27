@@ -1,11 +1,6 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
-import {
-  Engine,
-  EngineEvents,
-  EngineListener,
-  LintCatalog,
-  ResourceSupplier,
-} from "./core.ts";
+import { detectLanguageByPath } from "../universal/content/code.ts";
+import * as d from "../universal/directive.ts";
 import {
   executableCandidate,
   FsFileResource,
@@ -14,10 +9,15 @@ import {
   isFsFileResource,
   isFsWalkedEncounter,
 } from "./core-fs.ts";
-import { Resource } from "./resource.ts";
-import * as d from "../universal/directive.ts";
+import {
+  Engine,
+  EngineEvents,
+  EngineListener,
+  LintCatalog,
+  ResourceSupplier,
+} from "./core.ts";
 import { IncludeDirective, includeDirective } from "./include.ts";
-import { detectLanguageByPath } from "../universal/content/code.ts";
+import { Resource } from "./resource.ts";
 
 const stages = ["init", "discovery", "materialization"] as const;
 
