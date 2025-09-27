@@ -1,391 +1,320 @@
-// core-fs.ts
-import z from "jsr:@zod/zod@4";
+import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
+import { directives as directivesHandlers } from "./directives.ts";
 import {
-    AnnotationCatalog,
-    extractAnnotationsFromText,
-} from "../universal/content/code-comments.ts";
-import { LanguageSpec } from "../universal/content/code.ts";
-import { Resource, zodParsedResourceAnns } from "./resource.ts";
+  executables,
+  FsFileResource,
+  fsFilesContributor,
+  FsWalkedEncounter,
+  isFsFileResource,
+  isFsWalkedEncounter,
+} from "./fs.ts";
+import {
+  isSrcCodeLangSpecSupplier,
+  LintCatalog,
+  PipelineBus,
+  PipelineEvents,
+  PipelineListener,
+  ResourceSupplier,
+  SrcCodeLangSpecSupplier,
+} from "./pipeline.ts";
+import { Resource } from "./resource.ts";
 
-// deno-lint-ignore no-explicit-any
-type Any = any;
+type PipelineStage =
+  | { stage: "init" }
+  | {
+    stage: "discovery";
+    fcDiscovered: FsFilesCollection<EngineState>;
+    registerDiscovery: (
+      ev: Parameters<
+        PipelineListener<
+          PipelineEvents<EngineState, Resource>,
+          "resource:encountered"
+        >
+      >[0],
+    ) => Promise<void>;
+  }
+  | {
+    stage: "materialization";
+    fcDiscovered: FsFilesCollection<EngineState>;
+    fcMaterialized: FsFilesCollection<EngineState>;
+    registerRediscovery: (
+      ev: Parameters<
+        PipelineListener<
+          PipelineEvents<EngineState, Resource>,
+          "resource:encountered"
+        >
+      >[0],
+    ) => Promise<void>;
+  };
 
-export type TextSupplier = {
-    readonly text: () => string | Promise<string>;
-};
+class EngineState {
+  #workflow: PipelineStage;
 
-export const isTextSupplier = (o: unknown): o is TextSupplier =>
-    o && typeof o === "object" && "text" in o &&
-        typeof o.text === "function"
-        ? true
-        : false;
+  constructor() {
+    this.#workflow = { stage: "init" };
+  }
 
-export type TextProducer = {
-    readonly writeText: (text: string) => string | Promise<string>;
-};
+  get workflow() {
+    return this.#workflow;
+  }
 
-export const isTextProducer = (o: unknown): o is TextProducer =>
-    o && typeof o === "object" && "writeText" in o &&
-        typeof o.writeText === "function"
-        ? true
-        : false;
-
-export type SrcCodeLangSpecSupplier = {
-    srcCodeLanguage: LanguageSpec;
-};
-
-export const isSrcCodeLangSpecSupplier = (
-    o: unknown,
-): o is SrcCodeLangSpecSupplier =>
-    o && typeof o === "object" && "srcCodeLanguage" in o &&
-        typeof o.srcCodeLanguage === "object"
-        ? true
-        : false;
-
-export type ResourceSupplier<State, R extends Resource> = (
-    args: { state: State; signal?: AbortSignal },
-) => AsyncIterable<R> | AsyncGenerator<R, void, unknown>;
-
-export interface ResourceContribution<State, R extends Resource> {
-    register: (...suppliers: ReadonlyArray<ResourceSupplier<State, R>>) => void;
-    list: () => ReadonlyArray<ResourceSupplier<State, R>>;
+  nextStage() {
+    switch (this.#workflow.stage) {
+      case "init": {
+        const fcDiscovered = new FsFilesCollection<EngineState>();
+        this.#workflow = {
+          stage: "discovery",
+          fcDiscovered,
+          registerDiscovery: async (ev) =>
+            await fcDiscovered.onEncountered(ev.event),
+        };
+        return this.#workflow;
+      }
+    }
+  }
 }
 
-// Utility: add `state` to every payload in a map
-type WithState<State, M extends Record<string, object>> = {
-    [K in keyof M]: M[K] & { state: State };
-};
+export const resourceSupplierIdentity = ["PROJECT_HOME"] as const;
+export type ResourceSupplierIdentity = typeof resourceSupplierIdentity[number];
 
-/* =========================
-   Lean Lint infrastructure
-   ========================= */
+export class FsFilesCollection<State> {
+  readonly suppliers = new Set<ResourceSupplier<State, Resource>>();
+  readonly resources: readonly Resource[] = [];
+  readonly fsFiles: readonly FsFileResource[] = [];
+  readonly walkedFiles: readonly (FsFileResource & FsWalkedEncounter)[] = [];
+  readonly walkedSrcFiles:
+    readonly (FsFileResource & FsWalkedEncounter & SrcCodeLangSpecSupplier)[] =
+      [];
+  readonly execCandidate = executables();
+  readonly isExecutable = this.execCandidate.isExecutable;
 
-// Severity across all rules
-export type LintSeverity = "info" | "warn" | "error";
+  constructor() {
+  }
 
-// A generic catalog shape. Each rule has a codes map; each code has an elaboration type.
-export type LintCatalog = Record<
-    string, // rule id
-    {
-        description?: string;
-        codes: Record<
-            string, // code id
-            {
-                message: string;
-                // Each code can define its own elaboration payload type
-                elaboration: unknown;
-            }
-        >;
+  // deno-lint-ignore require-await
+  async onEncountered(
+    ev: Parameters<
+      PipelineListener<
+        PipelineEvents<State, Resource>,
+        "resource:encountered"
+      >
+    >[0]["event"],
+  ) {
+    const { resource, supplier } = ev;
+    if (supplier) {
+      this.suppliers.add(
+        supplier as ResourceSupplier<State, Resource>,
+      );
     }
->;
 
-// Helpers to extract types out of the catalog
-export type LintRuleIds<C extends LintCatalog> = Extract<keyof C, string>;
-export type LintCodeIds<C extends LintCatalog, R extends LintRuleIds<C>> =
-    Extract<keyof C[R]["codes"], string>;
-export type LintElaboration<
-    C extends LintCatalog,
-    R extends LintRuleIds<C>,
-    K extends LintCodeIds<C, R>,
-> = C[R]["codes"][K]["elaboration"];
-
-// A strongly-typed lint issue for a given rule+code pair
-export type LintIssue<
-    C extends LintCatalog,
-    R extends LintRuleIds<C>,
-    K extends LintCodeIds<C, R>,
-> = {
-    subsystem: "lint";
-    rule: R;
-    code: K;
-    severity: LintSeverity;
-    message?: string; // can override catalog message
-    elaboration: LintElaboration<C, R, K>;
-    where?: unknown; // optionally tie to context
-    cause?: unknown; // optional correlation / causality
-};
-
-// Minimal per-event linter facade attached to payloads
-export interface Linter<C extends LintCatalog> {
-    issue<R extends LintRuleIds<C>, K extends LintCodeIds<C, R>>(
-        issue: Omit<LintIssue<C, R, K>, "subsystem">,
-    ): void;
+    (this.resources as Resource[]).push(resource);
+    if (isFsFileResource(resource)) {
+      (this.fsFiles as FsFileResource[]).push(resource);
+      if (isFsWalkedEncounter(resource)) {
+        (this.walkedFiles as (FsFileResource & FsWalkedEncounter)[])
+          .push(resource);
+        if (isSrcCodeLangSpecSupplier(resource)) {
+          (this.walkedSrcFiles as (
+            & FsFileResource
+            & FsWalkedEncounter
+            & SrcCodeLangSpecSupplier
+          )[]).push(resource);
+        }
+      }
+    }
+  }
 }
 
-// Attach a typed linter to every event payload in Ev
-type AttachLinter<Ev extends Record<string, unknown>, C extends LintCatalog> = {
-    [K in keyof Ev]: Ev[K] & { linter: Linter<C> };
-};
+export class Engine {
+  readonly bus: PipelineBus<EngineState, LintCatalog>;
+  readonly paths: ReturnType<Engine["projectPaths"]>;
+  readonly executables = executables();
 
-/* =========================
-   Pipeline event maps
-   ========================= */
+  protected constructor(
+    readonly projectId: string,
+    readonly moduleHome: string, // import.meta.resolve('./') from module
+    readonly stdlibSymlinkDest: string, // relative dest to stdlib
+  ) {
+    this.bus = new PipelineBus(new EngineState());
+    this.paths = this.projectPaths();
 
-// ---------- Event payloads (parameterized by Resource R and Annotation A) ----------
-type PipelineEventPayloads<R extends Resource> = {
-    // Suppliers registration (collectors are specialized with State later)
-    "resource:contribute": {
-        contribute: ResourceContribution<unknown, R>;
-    };
+    // register our resource contributors, thse are called when "discover"
+    // event is fired
+    this.bus.on(
+      "resource:contribute",
+      fsFilesContributor<EngineState, ResourceSupplierIdentity>({
+        identity: "PROJECT_HOME",
+        root: this.paths.projectSrcHome,
+        walkOptions: {
+          includeDirs: false,
+          includeFiles: true,
+          includeSymlinks: false,
+          followSymlinks: true, // important for "src/spry"
+          canonicalize: true,
+        },
+        relFsPath: (path) => this.relToPrjOrStd(path),
+        webPath: (path) => this.relToPrjOrStd(path).replace(/^.*src\//, ""),
+      }),
+    );
 
-    // Emitted when a resource is yielded by a supplier iteration
-    "resource:encountered": {
-        resource: R;
-        supplier?: ResourceSupplier<unknown, R>;
-        annsCatalog?: AnnotationCatalog;
-        srcCodeLanguage?: LanguageSpec;
-    };
+    this.bus.on("resource:encountered", (ev) => {
+      const { workflow } = this.bus.state;
+      switch (workflow.stage) {
+        case "discovery":
+          workflow.registerDiscovery(ev);
+      }
+    });
+  }
 
-    "directive:encountered": {
-        resource: R;
-        // TODO: add directive information
-    };
-
-    "directive:materialized": {
-        resource: R;
-        // TODO: add directive information
-    };
-
-    // Foundry lifecycle — include related resources when applicable
-    "foundry:encountered": {
-        foundryName: string;
-        proposed: { env?: Record<string, string>; args?: string[] };
-        resources?: ReadonlyArray<R>;
-    };
-
-    "foundry:materialized": {
-        resource: R;
-        // TODO: add foundry information
-    };
-
-    "build:start": {
-        outcome: "success" | "failed";
-        stats: { durationMs: number; wrote: number; cached: number };
-    };
-
-    "build:complete": {
-        outcome: "success" | "failed";
-        stats: { durationMs: number; wrote: number; cached: number };
-    };
-
-    // Diagnostics may reference a specific resource
-    "diagnostic": {
-        level: "info" | "warn" | "error";
-        code: string;
-        message: string;
-        resource?: R;
-        at?: { file?: string; line?: number; column?: number };
-    };
-};
-
-// Dedicated lint event channel (state-bearing, for aggregation/reporting)
-type LintEventMap<State, C extends LintCatalog> = WithState<State, {
-    "lint:issue": LintIssue<C, LintRuleIds<C>, Any>;
-}>;
-
-// ---------- Public, generic event map ----------
-export type PipelineEvents<State, R extends Resource> = WithState<
-    State,
-    Omit<
-        PipelineEventPayloads<R>,
-        "resource:contribute" | "resource:encountered"
-    > & {
-        "resource:contribute": {
-            contribute: ResourceContribution<State, R>;
-        };
-        "resource:encountered": {
-            resource: R;
-            supplier?: ResourceSupplier<State, R>;
-            annsCatalog?: AnnotationCatalog;
-            srcCodeLanguage?: LanguageSpec;
-        };
+  relToPrjOrStd(supplied: string) {
+    const result = relative(this.paths.projectHome, supplied);
+    if (result.startsWith(this.stdlibSymlinkDest)) {
+      return relative(
+        Deno.cwd(), // assume that CWD is the project home
+        join("src", "spry", relative(this.stdlibSymlinkDest, supplied)),
+      );
     }
->;
+    return result;
+  }
 
-/* =========================
-   Event helper types
-   ========================= */
+  projectPaths(
+    projectHome = this.moduleHome.startsWith("file:")
+      ? fromFileUrl(this.moduleHome)
+      : this.moduleHome,
+  ) {
+    const projectSrcHome = resolve(projectHome, "src");
+    const absPathToSpryLocal = join(projectSrcHome, "spry");
 
-export type PipelineEventName<E> = Extract<keyof E, string>;
-export type PipelineEvent<E, N extends PipelineEventName<E>> = E[N];
+    // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
+    // so we watch the physical Spry because the symlink won't be watched
+    // even though it's under the "src".
+    const spryStdLibAbs = fromFileUrl(import.meta.resolve("../std"));
+    const devWatchRoots = [
+      relative(Deno.cwd(), projectSrcHome),
+      relative(Deno.cwd(), spryStdLibAbs),
+    ];
+    return {
+      projectHome,
+      projectSrcHome,
+      spryDropIn: {
+        fsHome: resolve(projectSrcHome, "spry.d"),
+        fsAuto: resolve(projectSrcHome, "spry.d", "auto"),
+        webHome: join("spry.d"),
+        webAuto: join("spry.d", "auto"),
+      },
+      spryStd: {
+        homeFromSymlink: relative(
+          dirname(absPathToSpryLocal),
+          spryStdLibAbs,
+        ),
+        absPathToLocal: absPathToSpryLocal,
+        relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),
+      },
+      sqlPage: {
+        absPathToConfDir: join(projectHome, "sqlpage"),
+      },
+      devWatchRoots,
+    };
+  }
 
-export type PipelineDispatchable<E, N extends PipelineEventName<E>> = Readonly<{
-    identity: N;
-    event: PipelineEvent<E, N>;
-    time: number; // ms since epoch
-    cancelable?: boolean;
-    defaultPrevented?: boolean;
-}>;
-
-export type PipelineListener<E, N extends PipelineEventName<E>> = (
-    ev: PipelineDispatchable<E, N>,
-) => void | Promise<void>;
-
-type EventMap<S> = PipelineEvents<S, Resource>;
-type EvRaw<S, C extends LintCatalog> =
-    & EventMap<S>
-    & LintEventMap<S, C>;
-type EvWith<S, C extends LintCatalog> = AttachLinter<EvRaw<S, C>, C>;
-type EvName<S, C extends LintCatalog> = Extract<keyof EvWith<S, C>, string>;
-
-export class PipelineBus<State, C extends LintCatalog> {
-    constructor(readonly state: State) {}
-
-    private listeners = new Map<
-        EvName<State, C>,
-        Set<PipelineListener<EvWith<State, C>, Any>>
-    >();
-
-    on<N extends EvName<State, C>>(
-        identity: N,
-        listener: PipelineListener<EvWith<State, C>, N>,
-    ): this {
-        const set = (this.listeners.get(identity) as
-            | Set<PipelineListener<EvWith<State, C>, N>>
-            | undefined) ?? new Set();
-        set.add(listener);
-        this.listeners.set(identity, set as Set<PipelineListener<Any, Any>>);
-        return this;
+  projectStateEnv(
+    init?: { projectVarPrefix?: string; pathVarPrefix?: string },
+  ) {
+    const paths = this.projectPaths();
+    const {
+      pathVarPrefix = "FOUNDRY_PROJECT_PATH_",
+      projectVarPrefix = "FOUNDRY_PROJECT_",
+    } = init ?? {};
+    const projectVars = {
+      "ID": this.projectId,
+    };
+    const pathVars = {
+      "HOME": paths.projectHome,
+      "SRC_HOME": paths.projectSrcHome,
+      "SQLPAGE_HOME": paths.sqlPage.absPathToConfDir,
+      "SPRY_STD_HOME": paths.spryStd.absPathToLocal,
+      "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.homeFromSymlink,
+      "SPRY_STD_HOME_REL": paths.spryStd.relPathToHome,
+      "SPRYD_HOME": paths.spryDropIn.fsHome,
+      "SPRYD_AUTO": paths.spryDropIn.fsAuto,
+      "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
+      "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
+    };
+    const result: Record<string, string> = {};
+    result[`${projectVarPrefix}ID`] = this.projectId;
+    result[`${projectVarPrefix}PATHS_JSON`] = JSON.stringify(paths);
+    for (const [k, v] of Object.entries(projectVars)) {
+      if (typeof k === "string") result[`${projectVarPrefix}${k}`] = String(v);
     }
-
-    off<N extends EvName<State, C>>(
-        identity: N,
-        listener: PipelineListener<EvWith<State, C>, N>,
-    ): this {
-        const set = this.listeners.get(identity);
-        if (set) set.delete(listener as PipelineListener<Any, Any>);
-        return this;
+    for (const [k, v] of Object.entries(pathVars)) {
+      if (typeof k === "string") result[`${pathVarPrefix}${k}`] = String(v);
     }
+    return result;
+  }
 
-    private makeLinter(): Linter<C> {
-        return {
-            issue: <Rr extends LintRuleIds<C>, Kk extends LintCodeIds<C, Rr>>(
-                issue: Omit<LintIssue<C, Rr, Kk>, "subsystem">,
-            ) => {
-                // Re-dispatch through dedicated lint channel
-                this.dispatch("lint:issue" as EvName<State, C>, {
-                    subsystem: "lint",
-                    ...issue,
-                    state: this.state,
-                } as unknown as PipelineEvent<
-                    EvRaw<State, C>,
-                    "lint:issue"
-                >);
-            },
-        };
-    }
+  async materializeFoundries(
+    candidates: Iterable<FsFileResource>,
+    args?: { readonly dryRun?: boolean },
+  ) {
+    // now see which files are executable and materialize them appropriately
+    const { isExecutable, materialize } = this.executables;
+    const env = this.projectStateEnv();
+    const cwd = Deno.cwd();
 
-    private async dispatch<N extends EvName<State, C>>(
-        identity: N,
-        // NOTE: incoming event is the RAW map (no linter); we add linter here
-        event: PipelineEvent<EvRaw<State, C>, N>,
-        cancelable = false,
-    ): Promise<void> {
-        const set = this.listeners.get(identity) as
-            | Set<PipelineListener<EvWith<State, C>, N>>
-            | undefined;
-        if (!set?.size) return;
-
-        const linter = this.makeLinter();
-
-        const dispatchable: PipelineDispatchable<EvWith<State, C>, N> = {
-            identity,
-            event: {
-                ...(event as unknown as object),
-                linter,
-            } as PipelineEvent<EvWith<State, C>, N>,
-            time: Date.now(),
-            cancelable,
-            defaultPrevented: false,
-        };
-
-        for (const fn of set) {
-            await fn(dispatchable);
+    for await (const wf of candidates) {
+      if (wf.nature === "foundry") {
+        if (!isExecutable(wf.absFsPath)) {
+          console.error("foundry", wf.relFsPath, "is not executable");
+        } else {
+          materialize({
+            absFsPath: wf.absFsPath,
+            matAbsFsPath: wf.extensions.autoMaterializable(),
+            env,
+            cwd,
+            dryRun: args?.dryRun,
+          }, (error) => console.error(error));
         }
+      }
+    }
+  }
+
+  async materialize(args?: { readonly dryRun?: boolean }) {
+    const { dryRun = false } = args ?? {};
+
+    // TODO: publish events before/after/etc. stage changes and other works
+    // TODO: refine how dryRun works
+    // TODO: add linting
+    // TODO: add observability for CLI directly into resources?
+
+    // we start in "init", then move to next stage
+    const workflow = this.bus.state.nextStage();
+    if (workflow?.stage === "discovery") {
+      // get all files by running the contributors, the event handlers know the
+      // stage and put state information into the right place
+      await this.bus.discover();
+
+      // directives are able to modify files so let's do that now
+      const dh = directivesHandlers(workflow.fcDiscovered.walkedSrcFiles);
+      if (!dryRun) await dh.materialize();
+
+      // now see which files are executable and materialize them appropriately
+      this.materializeFoundries(workflow.fcDiscovered.walkedFiles);
+    } else {
+      console.warn("should be in discovery stage now");
     }
 
-    /**
-     * Fires "resource:contribute", collects suppliers, iterates them,
-     * and emits "resource:encountered" for each yielded resource.
-     *
-     * All dispatched payloads include a typed `linter` for listeners to report issues inline.
-     */
-    async discover(signal?: AbortSignal): Promise<number> {
-        type Raw = EvRaw<State, C>;
-        type R = Resource;
-        const suppliers: ResourceSupplier<State, R>[] = [];
+    // we were in "discovery", now move to next stage
+    // get all files again by running the contributors, the event handlers know the
+    // stage and put state information into the right place
+    // this.state.nextStage();
+    // await this.discover();
+  }
 
-        const contribution: ResourceContribution<State, R> = {
-            register: (...ss) => suppliers.push(...ss),
-            list: () => suppliers.slice(),
-        };
-
-        // Let listeners register suppliers
-        await this.dispatch<"resource:contribute">("resource:contribute", {
-            contribute: contribution,
-            state: this.state,
-        } as PipelineEvent<Raw, "resource:contribute">);
-
-        // Drain suppliers and emit encountered events
-        let count = 0;
-        for (const supplier of suppliers) {
-            if (signal?.aborted) break;
-            for await (
-                const resource of supplier({ state: this.state, signal })
-            ) {
-                if (signal?.aborted) break;
-
-                let resAnnParseResult:
-                    | ReturnType<typeof zodParsedResourceAnns>
-                    | undefined;
-                let resAnn: Resource | undefined;
-                let annsCatalog:
-                    | Awaited<ReturnType<typeof extractAnnotationsFromText>>
-                    | undefined;
-                let srcCodeLanguage: LanguageSpec | undefined;
-                if (
-                    isTextSupplier(resource) &&
-                    isSrcCodeLangSpecSupplier(resource)
-                ) {
-                    srcCodeLanguage = resource.srcCodeLanguage;
-                    annsCatalog = await extractAnnotationsFromText(
-                        await resource.text(),
-                        srcCodeLanguage,
-                        {
-                            tags: { multi: true, valueMode: "json" },
-                            kv: false,
-                            yaml: false,
-                            json: false,
-                        },
-                    );
-                    resAnnParseResult = zodParsedResourceAnns(annsCatalog, {
-                        isSystemGenerated: false,
-                    });
-                    resAnn = resAnnParseResult?.success
-                        ? resAnnParseResult.data
-                        : undefined;
-                }
-
-                if (resAnnParseResult?.error) {
-                    console.error(
-                        "TODO: lint this",
-                        z.prettifyError(resAnnParseResult.error),
-                    );
-                }
-
-                await this.dispatch<"resource:encountered">(
-                    "resource:encountered",
-                    {
-                        resource: { ...resource, ...resAnn },
-                        state: this.state,
-                        supplier,
-                        annsCatalog,
-                        srcCodeLanguage,
-                    } as PipelineEvent<Raw, "resource:encountered">,
-                );
-                count++;
-            }
-        }
-        return count;
-    }
+  static instance(
+    projectId: string,
+    moduleHome: string,
+    sprySymlinkDest: string,
+  ) {
+    return new Engine(projectId, moduleHome, sprySymlinkDest);
+  }
 }

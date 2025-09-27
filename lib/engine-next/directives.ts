@@ -8,7 +8,11 @@ import {
     ReplaceStreamEvents,
     textToShellArgv,
 } from "../universal/directive.ts";
-import { SrcCodeLangSpecSupplier, TextProducer, TextSupplier } from "./core.ts";
+import {
+    SrcCodeLangSpecSupplier,
+    TextProducer,
+    TextSupplier,
+} from "./pipeline.ts";
 
 export type IncludeDirective<Payload> = CandidateDefn<Payload> & {
     blockName: string;

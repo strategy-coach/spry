@@ -3,13 +3,13 @@ import { walk, type WalkEntry, type WalkOptions } from "jsr:@std/fs@1/walk";
 import { extname, relative } from "jsr:@std/path@1";
 import { detectLanguageByPath } from "../universal/content/code.ts";
 import {
+    type PipelineEvents,
     type PipelineListener,
     type ResourceSupplier,
     SrcCodeLangSpecSupplier,
     TextProducer,
     type TextSupplier,
-    type WorkflowEvents,
-} from "./core.ts";
+} from "./pipeline.ts";
 import { type Resource } from "./resource.ts";
 
 export type FsWalkedEncounter = {
@@ -71,7 +71,7 @@ export type FsFilesContributorInit<Identity extends string> = {
 
 export function fsFilesContributor<State, Identity extends string>(
     init: FsFilesContributorInit<Identity>,
-): PipelineListener<WorkflowEvents<State, Resource>, "resource:contribute"> {
+): PipelineListener<PipelineEvents<State, Resource>, "resource:contribute"> {
     const { identity, root, walkOptions } = init;
     const supplier: ResourceSupplier<State, Resource> = async function* (
         { signal },
