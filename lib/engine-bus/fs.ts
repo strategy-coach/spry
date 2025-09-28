@@ -78,7 +78,7 @@ export function fsFilesContributor<R extends Resource, Identity extends string>(
     const { identity, root, walkOptions } = init;
     return async function* ({ signal }) {
         for await (const walkEntry of walk(root, walkOptions)) {
-            const { path: absFsPath, name } = walkEntry;
+            const { path: absFsPath } = walkEntry;
             if (signal?.aborted) return;
             const srcCodeLanguage = detectLanguageByPath(absFsPath);
             yield {
