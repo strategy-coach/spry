@@ -11,7 +11,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { join, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
-import { Engine, ResourceEvents, WorkflowStep } from "./engine.ts";
+import { Engine, ResourceEvents } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
 
@@ -73,27 +73,46 @@ export class CLI {
         return { spryStd, sqlPage, created, removed, linked };
     }
 
-    lsWorkflowStepField<Row extends { step: WorkflowStep["step"] }>():
-        | Partial<ColumnDef<Row, WorkflowStep["step"]>>
+    lsWorkflowStepField<
+        Row extends { step: { discovery: boolean; materialize: boolean } },
+    >():
+        | Partial<ColumnDef<Row, Row["step"]>>
         | undefined {
         return {
             header: "Step",
             defaultColor: gray,
-            format: (v) => {
-                switch (v) {
-                    case "discovery":
-                        return "🔍";
-                    case "materialization":
-                        return "📦";
-                    default:
-                        return "❓";
-                }
-            },
+            format: (v) =>
+                `${v.discovery ? "🔍" : " "}${v.materialize ? "📦" : " "}`,
+        };
+    }
+
+    lsImpactField<
+        Row extends {
+            impact: {
+                foundry: boolean;
+                autoMaterialize: boolean;
+                directives: number;
+            };
+        },
+    >():
+        | Partial<ColumnDef<Row, Row["impact"]>>
+        | undefined {
+        return {
+            header: "Impact",
+            defaultColor: gray,
+            format: (v) =>
+                `${
+                    brightYellow(
+                        v.foundry && v.autoMaterialize
+                            ? "FA"
+                            : (v.foundry ? "F " : "  "),
+                    )
+                } ${v.directives ? "D" : " "}`,
         };
     }
 
     lsNatureField<Row extends { nature: Resource["nature"] }>(): Partial<
-        ColumnDef<Row, Resource["nature"]>
+        ColumnDef<Row, Row["nature"]>
     > {
         return {
             header: "Nature",
@@ -151,10 +170,8 @@ export class CLI {
     }
 
     async ls() {
-        const resources = new Map<
-            string,
-            ResourceEvents<Resource>["resource"]
-        >();
+        const dResources: ResourceEvents<Resource>["resource"][] = [];
+        const mResources: ResourceEvents<Resource>["resource"][] = [];
         const directives = new Map<
             string,
             ResourceEvents<Resource>["materializedInclude"]
@@ -165,10 +182,15 @@ export class CLI {
         >();
 
         this.engine.resourceBus.on.resource((ev) => {
-            if (isFsFileResource(ev.resource)) {
-                resources.set(ev.resource.absFsPath, ev);
-            } else {
-                console.warn(`not sure what to do with`, { ev });
+            switch (ev.engineState.workflow.step) {
+                case "discovery":
+                    dResources.push(ev);
+                    break;
+                case "materialization":
+                    mResources.push(ev);
+                    break;
+                default:
+                    console.warn(`not sure what to do with`, { ev });
             }
         });
 
@@ -188,26 +210,61 @@ export class CLI {
 
         await this.engine.materialize({ dryRun: true });
 
+        const paths = new Set<string>();
+        for (const dr of dResources) {
+            if (isFsFileResource(dr.resource)) paths.add(dr.resource.absFsPath);
+        }
+        for (const mr of mResources) {
+            if (isFsFileResource(mr.resource)) paths.add(mr.resource.absFsPath);
+        }
+
         type Row = {
-            step: WorkflowStep["step"];
-            impact: string;
+            step: { discovery: boolean; materialize: boolean };
+            impact: {
+                foundry: boolean;
+                autoMaterialize: boolean;
+                directives: number;
+            };
             nature: Resource["nature"];
-            annotations: number;
+            annotations: [number, number];
             path: string;
             issue: string;
         };
         const list = Array.from(
-            resources.entries().map(([_, v]) => {
-                let path = "??";
-                if (isFsFileResource(v.resource)) {
-                    path = v.resource.absFsPath;
-                }
+            paths.values().map((path) => {
+                const inD = dResources.find((r) =>
+                    isFsFileResource(r.resource) && r.resource.absFsPath == path
+                        ? true
+                        : false
+                );
+                const inM = mResources.find((r) =>
+                    isFsFileResource(r.resource) && r.resource.absFsPath == path
+                        ? true
+                        : false
+                );
                 return {
-                    step: v.engineState.workflow.step,
-                    impact: "?",
-                    nature: v.resource.nature,
+                    step: {
+                        discovery: inD ? true : false,
+                        materialize: inM ? true : false,
+                    },
+                    impact: {
+                        foundry: foundries.has(path),
+                        autoMaterialize: foundries.get(path)?.matAbsFsPath
+                            ? true
+                            : false,
+                        directives: directives.has(path) ? 1 : 0,
+                    },
+                    nature: inD?.resource.nature && inM?.resource.nature &&
+                            (inD?.resource.nature == inM?.resource.nature)
+                        ? inD.resource.nature
+                        : `${inD?.resource.nature}:${inD?.resource.nature}` as Resource[
+                            "nature"
+                        ],
                     path,
-                    annotations: v.annsCatalog?.items.length ?? 0,
+                    annotations: [
+                        inD?.annsCatalog?.items.length ?? 0,
+                        inM?.annsCatalog?.items.length ?? 0,
+                    ],
                     issue: "",
                 } satisfies Row;
             }),
@@ -217,9 +274,9 @@ export class CLI {
             .declareColumns("step", "impact", "nature", "path", "issue")
             .from(list)
             .field("step", "step", this.lsWorkflowStepField())
-            .field("impact", "impact")
             .field("nature", "nature", this.lsNatureField())
             .field("path", "path", this.lsNaturePathField())
+            .field("impact", "impact", this.lsImpactField())
             .field("issue", "issue", this.lsLintField())
             .sortBy("path").sortDir("asc")
             .build()
