@@ -1,0 +1,447 @@
+import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
+import {
+    AnnotationCatalog,
+    extractAnnotationsFromText,
+} from "../universal/content/code-comments.ts";
+import { LanguageSpec } from "../universal/content/code.ts";
+import { eventBus, EventMap } from "../universal/event-bus.ts";
+import {
+    executables,
+    FsFileResource,
+    FsFilesCollection,
+    fsFilesContributor,
+} from "./fs.ts";
+import {
+    isSrcCodeLangSpecSupplier,
+    isTextSupplier,
+    Resource,
+    ResourceSupplier,
+    zodParsedResourceAnns,
+} from "./resource.ts";
+import { directives as directivesHandlers } from "./directives.ts";
+
+export interface DiagnosticEvents<R extends Resource> extends EventMap {
+    resourceAnnsIssue: {
+        engineState: EngineState;
+        resource: R;
+        supplier: ResourceSupplier<R>;
+        annsCatalog?: AnnotationCatalog;
+        srcCodeLanguage?: LanguageSpec;
+        annsParseResult: ReturnType<typeof zodParsedResourceAnns>;
+    };
+}
+
+export interface ResourceEvents<R extends Resource> extends EventMap {
+    annotations: {
+        engineState: EngineState;
+        resource: R;
+        supplier: ResourceSupplier<R>;
+        annsCatalog: AnnotationCatalog;
+        srcCodeLanguage?: LanguageSpec;
+    };
+    resource: {
+        engineState: EngineState;
+        resource: R;
+        supplier: ResourceSupplier<R>;
+        annsCatalog?: AnnotationCatalog;
+        srcCodeLanguage?: LanguageSpec;
+        annsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
+    };
+}
+
+type WorkflowStep =
+    | { step: "init" }
+    | {
+        step: "discovery";
+        fcDiscovering: FsFilesCollection<Resource>;
+        discovered: (resource: Resource) => Promise<void>;
+    }
+    | {
+        step: "materialization";
+        fcDiscovered: FsFilesCollection<Resource>;
+        fcMaterializing: FsFilesCollection<Resource>;
+        materialized: (resource: Resource) => Promise<void>;
+    };
+
+class EngineState {
+    #workflow: WorkflowStep;
+
+    constructor() {
+        this.#workflow = { step: "init" };
+    }
+
+    get workflow() {
+        return this.#workflow;
+    }
+
+    isTerminal() {
+        return this.#workflow.step === "materialization";
+    }
+
+    hasNext() {
+        const { step } = this.#workflow;
+        return step === "init" || step === "discovery" ? true : false;
+    }
+
+    nextStep() {
+        switch (this.#workflow.step) {
+            case "init": {
+                const fcDiscovering = new FsFilesCollection<Resource>();
+                this.#workflow = {
+                    step: "discovery",
+                    fcDiscovering,
+                    discovered: async (ev) => await fcDiscovering.register(ev),
+                };
+                return this.#workflow;
+            }
+
+            case "discovery": {
+                const fcMaterializing = new FsFilesCollection<Resource>();
+                this.#workflow = {
+                    step: "materialization",
+                    fcDiscovered: this.#workflow.fcDiscovering,
+                    fcMaterializing,
+                    materialized: async (ev) =>
+                        await fcMaterializing.register(ev),
+                };
+                return this.#workflow;
+            }
+
+            case "materialization":
+                console.error({ workflow: this.#workflow });
+                throw new Error(`At terminal stage (${this.#workflow.step})`);
+
+            default:
+                console.error({ workflow: this.#workflow });
+                throw new Error(`Invalid state`);
+        }
+    }
+}
+
+export interface EngineBusesInit<R extends Resource> {
+    resources: ReturnType<typeof eventBus<ResourceEvents<R>>>;
+    diagnostics: ReturnType<typeof eventBus<DiagnosticEvents<R>>>;
+}
+
+export function engineBusesInit<R extends Resource>(
+    defaults?: Partial<EngineBusesInit<R>>,
+): EngineBusesInit<R> {
+    const resources = eventBus<ResourceEvents<R>>();
+    const diagnostics = eventBus<DiagnosticEvents<R>>();
+
+    resources.on.resource((ev) => {
+        if (ev.annsCatalog) {
+            resources.emit.annotations({
+                engineState: ev.engineState,
+                resource: ev.resource,
+                supplier: ev.supplier,
+                annsCatalog: ev.annsCatalog!,
+                srcCodeLanguage: ev.srcCodeLanguage,
+            });
+            if (ev.annsParseResult?.error) diagnostics.emit.resource(ev);
+        }
+
+        const { workflow } = ev.engineState;
+        switch (workflow.step) {
+            case "discovery":
+                workflow.discovered(ev.resource);
+                break;
+
+            case "materialization":
+                workflow.materialized(ev.resource);
+                break;
+
+            default:
+                console.warn("Not sure why we're here?");
+        }
+    });
+
+    return { ...defaults, resources, diagnostics };
+}
+
+export class Engine<R extends Resource> {
+    #state: EngineState;
+    #suppliersSignal?: AbortSignal;
+    #suppliers: ResourceSupplier<R>[] = [];
+
+    readonly paths: ReturnType<Engine<R>["projectPaths"]>;
+    readonly executables = executables();
+
+    constructor(
+        readonly projectId: string,
+        readonly moduleHome: string, // import.meta.resolve('./') from module
+        readonly stdlibSymlinkDest: string,
+        readonly engineBuses: EngineBusesInit<R>,
+    ) {
+        this.#state = new EngineState();
+        this.paths = this.projectPaths();
+    }
+
+    get resourceBus() {
+        return this.engineBuses.resources;
+    }
+
+    withSupplierSignal(signal: AbortSignal) {
+        this.#suppliersSignal = signal;
+    }
+
+    withSuppliers(...suppliers: ResourceSupplier<R>[]) {
+        this.#suppliers.push(...suppliers);
+        return this;
+    }
+
+    // deno-lint-ignore require-await
+    protected async initDefaults() {
+        const resourceSupplierIdentity = ["PROJECT_HOME"] as const;
+        type ResourceSupplierIdentity = typeof resourceSupplierIdentity[number];
+
+        if (this.#suppliers.length == 0) {
+            this.withSuppliers(fsFilesContributor<R, ResourceSupplierIdentity>({
+                identity: "PROJECT_HOME",
+                root: this.paths.projectSrcHome,
+                walkOptions: {
+                    includeDirs: false,
+                    includeFiles: true,
+                    includeSymlinks: false,
+                    followSymlinks: true, // important for "src/spry"
+                    canonicalize: true,
+                },
+                relFsPath: (path) => this.relToPrjOrStd(path),
+                webPath: (path) =>
+                    this.relToPrjOrStd(path).replace(/^.*src\//, ""),
+            }));
+        }
+    }
+
+    async supply() {
+        for await (const supplier of this.#suppliers) {
+            for await (
+                const resource of supplier({ signal: this.#suppliersSignal })
+            ) {
+                if (this.#suppliersSignal?.aborted) break;
+
+                let annsParseResult:
+                    | ReturnType<typeof zodParsedResourceAnns>
+                    | undefined;
+                let resAnn: Resource | undefined;
+                let annsCatalog:
+                    | Awaited<ReturnType<typeof extractAnnotationsFromText>>
+                    | undefined;
+                let srcCodeLanguage: LanguageSpec | undefined;
+                if (
+                    isTextSupplier(resource) &&
+                    isSrcCodeLangSpecSupplier(resource)
+                ) {
+                    srcCodeLanguage = resource.srcCodeLanguage;
+                    annsCatalog = await extractAnnotationsFromText(
+                        await resource.text(),
+                        srcCodeLanguage,
+                        {
+                            tags: { multi: true, valueMode: "json" },
+                            kv: false,
+                            yaml: false,
+                            json: false,
+                        },
+                    );
+                    annsParseResult = zodParsedResourceAnns(annsCatalog, {
+                        isSystemGenerated: false,
+                    });
+                    resAnn = annsParseResult?.success
+                        ? annsParseResult.data
+                        : undefined;
+                }
+
+                this.engineBuses.resources.emit.resource({
+                    engineState: this.#state,
+                    resource: { ...resource, ...resAnn },
+                    supplier,
+                    annsCatalog,
+                    srcCodeLanguage,
+                    annsParseResult,
+                });
+            }
+        }
+        return this;
+    }
+
+    relToPrjOrStd(supplied: string) {
+        const result = relative(this.paths.projectHome, supplied);
+        if (result.startsWith(this.stdlibSymlinkDest)) {
+            return relative(
+                Deno.cwd(), // assume that CWD is the project home
+                join("src", "spry", relative(this.stdlibSymlinkDest, supplied)),
+            );
+        }
+        return result;
+    }
+
+    projectPaths(
+        projectHome = this.moduleHome.startsWith("file:")
+            ? fromFileUrl(this.moduleHome)
+            : this.moduleHome,
+    ) {
+        const projectSrcHome = resolve(projectHome, "src");
+        const absPathToSpryLocal = join(projectSrcHome, "spry");
+
+        // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
+        // so we watch the physical Spry because the symlink won't be watched
+        // even though it's under the "src".
+        const spryStdLibAbs = fromFileUrl(import.meta.resolve("../std"));
+        const devWatchRoots = [
+            relative(Deno.cwd(), projectSrcHome),
+            relative(Deno.cwd(), spryStdLibAbs),
+        ];
+        return {
+            projectHome,
+            projectSrcHome,
+            spryDropIn: {
+                fsHome: resolve(projectSrcHome, "spry.d"),
+                fsAuto: resolve(projectSrcHome, "spry.d", "auto"),
+                webHome: join("spry.d"),
+                webAuto: join("spry.d", "auto"),
+            },
+            spryStd: {
+                homeFromSymlink: relative(
+                    dirname(absPathToSpryLocal),
+                    spryStdLibAbs,
+                ),
+                absPathToLocal: absPathToSpryLocal,
+                relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),
+            },
+            sqlPage: {
+                absPathToConfDir: join(projectHome, "sqlpage"),
+            },
+            devWatchRoots,
+        };
+    }
+
+    projectStateEnv(
+        init?: { projectVarPrefix?: string; pathVarPrefix?: string },
+    ) {
+        const paths = this.projectPaths();
+        const {
+            pathVarPrefix = "FOUNDRY_PROJECT_PATH_",
+            projectVarPrefix = "FOUNDRY_PROJECT_",
+        } = init ?? {};
+        const projectVars = {
+            "ID": this.projectId,
+        };
+        const pathVars = {
+            "HOME": paths.projectHome,
+            "SRC_HOME": paths.projectSrcHome,
+            "SQLPAGE_HOME": paths.sqlPage.absPathToConfDir,
+            "SPRY_STD_HOME": paths.spryStd.absPathToLocal,
+            "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.homeFromSymlink,
+            "SPRY_STD_HOME_REL": paths.spryStd.relPathToHome,
+            "SPRYD_HOME": paths.spryDropIn.fsHome,
+            "SPRYD_AUTO": paths.spryDropIn.fsAuto,
+            "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
+            "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
+        };
+        const result: Record<string, string> = {};
+        result[`${projectVarPrefix}ID`] = this.projectId;
+        result[`${projectVarPrefix}WORKFLOW_STEP`] = this.#state.workflow.step;
+        result[`${projectVarPrefix}PATHS_JSON`] = JSON.stringify(paths);
+        for (const [k, v] of Object.entries(projectVars)) {
+            if (typeof k === "string") {
+                result[`${projectVarPrefix}${k}`] = String(v);
+            }
+        }
+        for (const [k, v] of Object.entries(pathVars)) {
+            if (typeof k === "string") {
+                result[`${pathVarPrefix}${k}`] = String(v);
+            }
+        }
+        return result;
+    }
+
+    async materializeFoundries(
+        candidates: Iterable<FsFileResource>,
+        args?: { readonly dryRun?: boolean },
+    ) {
+        // now see which files are executable and materialize them appropriately
+        const { isExecutable, materialize } = this.executables;
+        const env = this.projectStateEnv();
+        const cwd = Deno.cwd();
+
+        for await (const wf of candidates) {
+            if (wf.nature === "foundry") {
+                if (!isExecutable(wf.absFsPath)) {
+                    console.error("foundry", wf.relFsPath, "is not executable");
+                } else {
+                    materialize({
+                        absFsPath: wf.absFsPath,
+                        matAbsFsPath: wf.extensions.autoMaterializable(),
+                        env,
+                        cwd,
+                        dryRun: args?.dryRun,
+                    }, (error) => console.error(error));
+                }
+            }
+        }
+    }
+
+    async materialize(args?: { readonly dryRun?: boolean }) {
+        const { dryRun = false } = args ?? {};
+
+        // TODO: publish events before/after/etc. stage changes and other works
+        // TODO: refine how dryRun works
+        // TODO: add linting
+        // TODO: add observability for CLI directly into resources?
+
+        // in the caller did not setup any suppliers or other options, use sane defaults
+        await this.initDefaults();
+
+        // we start in "init", then move to next stage
+        let workflow = this.#state.nextStep();
+        if (workflow?.step === "discovery") {
+            // start the resources events bus
+            await this.supply();
+
+            // directives are able to modify files so let's do that now
+            const dh = directivesHandlers(
+                workflow.fcDiscovering.walkedSrcFiles,
+            );
+            if (!dryRun) await dh.materialize();
+
+            // now see which files are executable and materialize them appropriately
+            this.materializeFoundries(workflow.fcDiscovering.walkedFiles);
+        } else {
+            console.warn("should be in discovery stage now");
+        }
+
+        // we were in "discovery", now move to next stage
+        // get all files again by running the suppliers, the event handlers know the
+        // stage and put state information into the right place
+        workflow = this.#state.nextStep();
+        if (workflow?.step === "materialization") {
+            // restart the resources events bus
+            await this.supply();
+
+            // directives are able to modify files so let's do that now
+            const dh = directivesHandlers(
+                workflow.fcMaterializing.walkedSrcFiles,
+            );
+            if (!dryRun) await dh.materialize();
+
+            // now see which files are executable and materialize them appropriately
+            this.materializeFoundries(workflow.fcMaterializing.walkedFiles);
+        } else {
+            console.warn("should be in materialization stage now");
+        }
+    }
+
+    static instance(
+        projectId: string,
+        moduleHome: string,
+        sprySymlinkDest: string,
+        engineBuses = engineBusesInit(),
+    ) {
+        return new Engine(
+            projectId,
+            moduleHome,
+            sprySymlinkDest,
+            engineBuses,
+        );
+    }
+}
