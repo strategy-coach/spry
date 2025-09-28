@@ -1,3 +1,5 @@
+// event-bus.ts
+
 /**
  * A tiny, **type-safe layer on top of the native `EventTarget`**.
  *
@@ -48,377 +50,361 @@
  * ```
  */
 
+export type EventMap = Record<string, Event>;
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Type utilities                                                            */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-/** Constrain a map so all values are `Event` subclasses. */
-export type ValueIsEvent<T> = { [K in keyof T]: Event };
-
-/** Extract `detail` from `CustomEvent<Detail>`, else `never`. */
 type DetailOf<E> = E extends CustomEvent<infer D> ? D : never;
-
-/**
- * Normalize payload type for DX:
- * - `Event`         → never (payloadless)
- * - `CustomEvent<void | undefined>` → never (treated as payloadless)
- * - `CustomEvent<D>` where D is anything else → D
- */
 type PayloadOf<E> = DetailOf<E> extends void | undefined ? never : DetailOf<E>;
+type InitOf<E> = E extends CustomEvent<infer D>
+  ? Omit<CustomEventInit<D>, "detail">
+  : EventInit;
 
-/** Initialization options: `Event` → `EventInit`; `CustomEvent<D>` → `Omit<CustomEventInit<D>, "detail">`. */
-type InitOf<E> = E extends CustomEvent<infer D> ? Omit<CustomEventInit<D>, "detail"> : EventInit;
-
-/** Keys for payloadless events. */
-type PayloadlessKeys<M extends ValueIsEvent<M>> = {
+type PayloadlessKeys<M extends EventMap> = {
   [K in keyof M & string]: PayloadOf<M[K]> extends never ? K : never;
 }[keyof M & string];
 
-/** Keys for payloadful (CustomEvent with real payload) events. */
-type PayloadfulKeys<M extends ValueIsEvent<M>> = Exclude<keyof M & string, PayloadlessKeys<M>>;
+type PayloadfulKeys<M extends EventMap> = Exclude<
+  keyof M & string,
+  PayloadlessKeys<M>
+>;
 
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Namespaced helper method shapes                                           */
-/* ────────────────────────────────────────────────────────────────────────── */
+/* Namespaced helper method shapes */
 
-/** `on.xyz(listener, options?) -> () => void` */
-export type OnMethods<M extends ValueIsEvent<M>> = {
-  [K in keyof M & string]: (
-    listener: (evt: M[K]) => void,
-    options?: boolean | AddEventListenerOptions
-  ) => () => void;
-} & {
-  /** Native, abort-friendly subscription: returns an AbortController. */
-  withAbort: {
+export type OnMethods<M extends EventMap> =
+  & {
     [K in keyof M & string]: (
       listener: (evt: M[K]) => void,
-      options?: Omit<AddEventListenerOptions, "signal">
-    ) => AbortController;
+      options?: boolean | AddEventListenerOptions,
+    ) => () => void;
+  }
+  & {
+    withAbort: {
+      [K in keyof M & string]: (
+        listener: (evt: M[K]) => void,
+        options?: Omit<AddEventListenerOptions, "signal">,
+      ) => AbortController;
+    };
   };
-};
 
-/** `await once.xyz(options?) -> Promise<Event>` */
-export type OnceMethods<M extends ValueIsEvent<M>> = {
-  [K in keyof M & string]: (
-    options?: AddEventListenerOptions
-  ) => Promise<M[K]>;
-} & {
-  /** `await once.withTimeout.xyz(ms, options?)` → rejects if not received in time. */
-  withTimeout: {
+export type OnceMethods<M extends EventMap> =
+  & {
     [K in keyof M & string]: (
-      ms: number,
-      options?: AddEventListenerOptions
+      options?: AddEventListenerOptions,
     ) => Promise<M[K]>;
+  }
+  & {
+    withTimeout: {
+      [K in keyof M & string]: (
+        ms: number,
+        options?: AddEventListenerOptions,
+      ) => Promise<M[K]>;
+    };
   };
+
+export type EmitMethods<M extends EventMap> = {
+  [K in keyof M & string]: PayloadOf<M[K]> extends never
+    ? (init?: InitOf<M[K]>) => boolean
+    : (detail: PayloadOf<M[K]>, init?: InitOf<M[K]>) => boolean;
 };
 
-/** Ergonomic `emit` union: payloadless → (init?), payloadful → (detail, init?). */
-export type EmitMethods<M extends ValueIsEvent<M>> = {
-  [K in keyof M & string]:
-    PayloadOf<M[K]> extends never
-      ? (init?: InitOf<M[K]>) => boolean
-      : (detail: PayloadOf<M[K]>, init?: InitOf<M[K]>) => boolean;
-};
-
-/** Explicit payloadless emit: `emitEvent.xyz(init?)`. */
-export type EmitEventMethods<M extends ValueIsEvent<M>> = {
+export type EmitEventMethods<M extends EventMap> = {
   [K in PayloadlessKeys<M>]: (init?: InitOf<M[K]>) => boolean;
 };
 
-/** Explicit payloadful emit: `emitCustom.xyz(detail, init?)`. */
-export type EmitCustomMethods<M extends ValueIsEvent<M>> = {
+export type EmitCustomMethods<M extends EventMap> = {
   [K in PayloadfulKeys<M>]: (
     detail: PayloadOf<M[K]>,
-    init?: InitOf<M[K]>
+    init?: InitOf<M[K]>,
   ) => boolean;
 };
 
-/** `stream.xyz()` returns `AsyncIterable<Event>`; no polling, purely event-driven. */
-export type StreamMethods<M extends ValueIsEvent<M>> = {
+export type StreamMethods<M extends EventMap> = {
   [K in keyof M & string]: () => AsyncIterable<M[K]>;
 };
 
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Optional runtime registry                                                 */
-/* ────────────────────────────────────────────────────────────────────────── */
+/* Optional runtime registry to build native events per key */
 
-/**
- * Optional registry letting you **declare how to construct native events per name**.
- * This preserves 100% native semantics while eliminating any runtime ambiguity.
- *
- * If provided, `emit` delegates to the registry; if omitted, `emit` uses a conservative
- * rule: 0 args → `Event`, 2 args → `CustomEvent(detail, init)`, and 1 arg is **ambiguous**
- * and will throw with guidance to use `emitEvent` or `emitCustom`.
- */
-export type EventFactoryRegistry<M extends ValueIsEvent<M>> = {
-  [K in keyof M & string]: (...args: any[]) => M[K];
+export type EventFactoryRegistry<M extends EventMap> = {
+  [K in keyof M & string]: (...args: unknown[]) => M[K];
 };
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* EventBus                                                                  */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Strongly-typed event bus built on top of **native `EventTarget`**.
- *
- * - Retains native methods (typed) for maximal interop.
- * - Adds namespaced helpers:
- *   - `on`, `on.withAbort`
- *   - `once`, `once.withTimeout`
- *   - `emit` (ergonomic), `emitEvent` (payloadless), `emitCustom` (payloadful)
- *   - `stream` (async iterable)
- */
-export class EventBus<M extends ValueIsEvent<M>> extends EventTarget {
-  /** Namespaced subscription helpers. */
+export class EventBus<M extends EventMap> extends EventTarget {
   public readonly on: OnMethods<M>;
-
-  /** Namespaced one-shot helpers. */
   public readonly once: OnceMethods<M>;
-
-  /**
-   * Ergonomic emitter.
-   *
-   * - If a **registry** is provided, `emit` will always construct the correct native class.
-   * - If **no registry** is provided:
-   *     - 0 args → `new Event(name)`
-   *     - 2 args → `new CustomEvent(name, { detail, ...init })`
-   *     - 1 arg → **ambiguous** at runtime (types prevent mistakes), so we throw with guidance
-   *       to use `emitEvent.name(init?)` or `emitCustom.name(detail, init?)`.
-   */
   public readonly emit: EmitMethods<M>;
-
-  /** Explicit payloadless emit: `emitEvent.xyz(init?)` */
   public readonly emitEvent: EmitEventMethods<M>;
-
-  /** Explicit payloadful emit: `emitCustom.xyz(detail, init?)` */
   public readonly emitCustom: EmitCustomMethods<M>;
-
-  /** Async streams per event: `for await (const e of bus.stream.xyz())` */
   public readonly stream: StreamMethods<M>;
 
-  /**
-   * @param devThrowOnUntypedDispatch  If true, calling untyped `dispatchEvent` throws (dev safety).
-   * @param registry                    Optional per-name factory to produce native events, ensuring
-   *                                    zero runtime ambiguity for `emit`.
-   */
   constructor(
     private readonly devThrowOnUntypedDispatch = false,
-    private readonly registry?: EventFactoryRegistry<M>
+    private readonly registry?: EventFactoryRegistry<M>,
   ) {
     super();
     this.on = this.#makeOn();
     this.once = this.#makeOnce();
     this.emitEvent = this.#makeEmitEvent();
     this.emitCustom = this.#makeEmitCustom();
-    this.emit = this.#makeEmit();        // delegates to registry or explicit emitters
+    this.emit = this.#makeEmit();
     this.stream = this.#makeStream();
   }
 
-  /* ——— Native methods, kept and typed ———————————————————————————————— */
+  /* Native methods, kept and typed */
 
-  /** Typed `addEventListener` (fully native semantics). */
   public override addEventListener<K extends keyof M & string>(
     type: K,
     listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-    options?: boolean | AddEventListenerOptions
+    options?: boolean | AddEventListenerOptions,
   ): void {
-    super.addEventListener(type, listener as any, options);
+    super.addEventListener(
+      type,
+      listener as unknown as EventListenerOrEventListenerObject | null,
+      options,
+    );
   }
 
-  /** Typed `removeEventListener` (fully native semantics). */
   public override removeEventListener<K extends keyof M & string>(
     type: K,
     listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-    options?: boolean | EventListenerOptions
+    options?: boolean | EventListenerOptions,
   ): void {
-    super.removeEventListener(type, listener as any, options);
+    super.removeEventListener(
+      type,
+      listener as unknown as EventListenerOrEventListenerObject | null,
+      options,
+    );
   }
 
-  /**
-   * Untyped dispatch remains available for interop.
-   * Set `devThrowOnUntypedDispatch=true` to catch accidental usage in development.
-   */
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore — keep native signature
+  // @ts-ignore — keep native signature for interop
   public override dispatchEvent(event: Event): boolean {
     if (this.devThrowOnUntypedDispatch) {
       throw new Error(
-        "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`."
+        "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`.",
       );
     }
     return super.dispatchEvent(event);
   }
 
-  /* ——— Namespaced helpers ———————————————————————————————————————— */
+  /* Namespaced helpers */
 
-  /** `on.xyz(listener, options?) -> () => void` and `on.withAbort.xyz(...) -> AbortController` */
   #makeOn(): OnMethods<M> {
     const base = new Proxy({} as OnMethods<M>, {
       get: (_t, name: string) => {
-        return ((listener: (e: Event) => void, options?: boolean | AddEventListenerOptions) => {
-          this.addEventListener(name as any, listener as any, options);
-          return () => this.removeEventListener(name as any, listener as any, options as any);
-        }) as any;
+        return (
+          listener: (e: Event) => void,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          this.addEventListener(
+            name as keyof M & string,
+            listener as unknown as (evt: M[keyof M & string]) => void,
+            options,
+          );
+          return () =>
+            this.removeEventListener(
+              name as keyof M & string,
+              listener as unknown as (evt: M[keyof M & string]) => void,
+              options as EventListenerOptions | boolean | undefined,
+            );
+        };
       },
     });
 
     const withAbort = new Proxy({} as OnMethods<M>["withAbort"], {
       get: (_t, name: string) => {
-        return ((listener: (e: Event) => void, options?: Omit<AddEventListenerOptions, "signal">) => {
+        return (
+          listener: (e: Event) => void,
+          options?: Omit<AddEventListenerOptions, "signal">,
+        ) => {
           const ac = new AbortController();
-          this.addEventListener(name as any, listener as any, { ...(options ?? {}), signal: ac.signal });
+          this.addEventListener(
+            name as keyof M & string,
+            listener as unknown as (evt: M[keyof M & string]) => void,
+            { ...(options ?? {}), signal: ac.signal },
+          );
           return ac;
-        }) as any;
+        };
       },
     });
 
-    (base as any).withAbort = withAbort;
+    (base as unknown as { withAbort: OnMethods<M>["withAbort"] }).withAbort =
+      withAbort;
     return base;
   }
 
-  /** `once.xyz(options?) -> Promise<Event>` and `once.withTimeout.xyz(ms, options?)` */
   #makeOnce(): OnceMethods<M> {
     const base = new Proxy({} as OnceMethods<M>, {
       get: (_t, name: string) => {
-        return ((options?: AddEventListenerOptions) =>
+        return (options?: AddEventListenerOptions) =>
           new Promise<Event>((resolve) => {
-            this.addEventListener(name as any, resolve as any, { ...(options ?? {}), once: true });
-          })) as any;
+            this.addEventListener(
+              name as keyof M & string,
+              resolve as (evt: M[keyof M & string]) => void,
+              { ...(options ?? {}), once: true },
+            );
+          }) as Promise<M[keyof M & string]>;
       },
     });
 
     const withTimeout = new Proxy({} as OnceMethods<M>["withTimeout"], {
       get: (_t, name: string) => {
-        return ((ms: number, options?: AddEventListenerOptions) =>
+        return (ms: number, options?: AddEventListenerOptions) =>
           new Promise<Event>((resolve, reject) => {
             const ac = new AbortController();
             const timer = setTimeout(() => {
               ac.abort();
-              reject(new Error(`Timeout waiting for "${String(name)}" after ${ms}ms`));
+              reject(
+                new Error(
+                  `Timeout waiting for "${String(name)}" after ${ms}ms`,
+                ),
+              );
             }, ms);
             this.addEventListener(
-              name as any,
-              (e) => { clearTimeout(timer); resolve(e as Event); },
+              name as keyof M & string,
+              (e: Event) => {
+                clearTimeout(timer);
+                resolve(e);
+              },
               { ...(options ?? {}), signal: ac.signal, once: true },
             );
-          })) as any;
+          }) as Promise<M[keyof M & string]>;
       },
     });
 
-    (base as any).withTimeout = withTimeout;
+    (base as unknown as { withTimeout: OnceMethods<M>["withTimeout"] })
+      .withTimeout = withTimeout;
     return base;
   }
 
-  /** Explicit payloadless emit namespace: `emitEvent.xyz(init?)` → `new Event(name, init)` */
   #makeEmitEvent(): EmitEventMethods<M> {
     return new Proxy({} as EmitEventMethods<M>, {
       get: (_t, name: string) => {
         const eventName = String(name);
-        return ((init?: EventInit) =>
-          super.dispatchEvent(new Event(eventName, init))) as any;
+        return (init?: EventInit) =>
+          super.dispatchEvent(new Event(eventName, init));
       },
     });
   }
 
-  /** Explicit payloadful emit namespace: `emitCustom.xyz(detail, init?)` → `new CustomEvent(name, {detail, ...init})` */
   #makeEmitCustom(): EmitCustomMethods<M> {
     return new Proxy({} as EmitCustomMethods<M>, {
       get: (_t, name: string) => {
         const eventName = String(name);
-        return ((detail: unknown, init?: Record<string, unknown>) =>
-          super.dispatchEvent(new CustomEvent(eventName, { ...(init ?? {}), detail }))) as any;
+        return (detail: unknown, init?: Record<string, unknown>) =>
+          super.dispatchEvent(
+            new CustomEvent(eventName, { ...(init ?? {}), detail }),
+          );
       },
     });
   }
 
-  /**
-   * Ergonomic emit namespace.
-   *
-   * Behavior:
-   * - If a **registry** is provided, we delegate to it for construction (always correct).
-   * - Without a registry:
-   *    - 0 args  → `Event`
-   *    - 2 args  → `CustomEvent(detail, init)`
-   *    - 1 arg   → **ambiguous** (types prevent mistakes at compile time, but at runtime we
-   *                cannot know if it's `EventInit` or `detail`). To keep correctness, we
-   *                throw with instructions to call `emitEvent.<name>(init?)` or `emitCustom.<name>(detail, init?)`.
-   */
   #makeEmit(): EmitMethods<M> {
     if (this.registry) {
-      // Zero-ambiguity path using the registry.
       const factories = this.registry;
       return new Proxy({} as EmitMethods<M>, {
         get: (_t, name: string) => {
           const key = name as keyof typeof factories;
-          const make = factories[key] as any;
-          return ((...args: any[]) => super.dispatchEvent(make(...args))) as any;
+          const make = factories[key] as
+            | ((...args: unknown[]) => Event)
+            | undefined;
+          return (...args: unknown[]) => {
+            if (!make) {
+              throw new Error(
+                `No event factory registered for "${String(name)}".`,
+              );
+            }
+            const ev = make(...args);
+            return super.dispatchEvent(ev);
+          };
         },
       });
     }
 
-    // Conservative, ambiguity-free default (with guidance).
+    // No registry: avoid heuristics. Only 0 or 2 args are accepted at runtime.
     return new Proxy({} as EmitMethods<M>, {
       get: (_t, name: string) => {
         const eventName = String(name);
-        return ((a?: unknown, b?: unknown) => {
+        return (a?: unknown, b?: unknown) => {
           const argc = arguments.length;
           if (argc === 0) {
             return super.dispatchEvent(new Event(eventName));
           }
           if (argc === 2) {
-            return super.dispatchEvent(new CustomEvent(eventName, { ...(b as object), detail: a }));
+            return super.dispatchEvent(
+              new CustomEvent(eventName, {
+                ...(b as Record<string, unknown>),
+                detail: a,
+              }),
+            );
           }
-          // argc === 1 is ambiguous at runtime; throw with guidance.
           throw new Error(
             `Ambiguous single-argument emit for "${eventName}". ` +
-            `Use explicit emitters: emitEvent.${eventName}(init?) or emitCustom.${eventName}(detail, init?).`
+              `Use explicit emitters: emitEvent.${eventName}(init?) or emitCustom.${eventName}(detail, init?).`,
           );
-        }) as any;
+        };
       },
     });
   }
 
-  /** `stream.xyz()` → AsyncIterable with no polling (purely event-driven). */
   #makeStream(): StreamMethods<M> {
     return new Proxy({} as StreamMethods<M>, {
       get: (_t, name: string) => {
         const eventName = String(name);
-        const self = this;
-
-        return (function streamFactory(): AsyncIterable<M[keyof M & string]> {
+        return function (
+          this: EventBus<M>,
+        ): AsyncIterable<M[keyof M & string]> {
           return {
-            [Symbol.asyncIterator]() {
+            [Symbol.asyncIterator]: () => {
               const queue: Event[] = [];
               let notify: (() => void) | null = null;
 
               const onEvent = (e: Event) => {
                 queue.push(e);
-                if (notify) { const n = notify; notify = null; n(); }
+                if (notify) {
+                  const n = notify;
+                  notify = null;
+                  n();
+                }
               };
 
               const ac = new AbortController();
-              self.addEventListener(eventName as any, onEvent as any, { signal: ac.signal });
+              this.addEventListener(
+                eventName as keyof M & string,
+                onEvent as (evt: M[keyof M & string]) => void,
+                { signal: ac.signal },
+              );
 
               return {
-                async next() {
+                next: async () => {
                   if (queue.length === 0) {
-                    await new Promise<void>((resolve) => { notify = resolve; });
+                    await new Promise<void>((resolve) => {
+                      notify = resolve;
+                    });
                   }
-                  const value = queue.shift() as any;
+                  const value = queue.shift() as M[keyof M & string];
                   return { done: false, value };
                 },
-                async return() {
+                return: () => {
                   ac.abort();
-                  return { done: true, value: undefined as any };
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as unknown as M[keyof M & string],
+                  });
                 },
-                async throw(err?: unknown) {
+                throw: (err?: unknown) => {
                   ac.abort();
-                  throw err;
+                  return Promise.reject(err);
                 },
               };
             },
-          } as AsyncIterable<any>;
-        }) as any;
+          };
+        }.bind(this);
       },
     });
   }
@@ -428,42 +414,42 @@ export class EventBus<M extends ValueIsEvent<M>> extends EventTarget {
 /* Safe wrapper for an existing native EventTarget                           */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Wrap an existing native `EventTarget` (e.g., `window`, `document`, `HTMLElement`, `MessagePort`)
- * with the **typed** `EventBus` helpers — without mutating its prototype or behavior.
- *
- * Interop: listeners you add/remove through the wrapper are added/removed on the underlying target.
- *
- * @example
- * ```ts
- * interface WinEvents {
- *   resize: Event;
- *   message: MessageEvent<any>;
- * }
- * const tw = wrapEventTarget<WinEvents>(window);
- * tw.on.resize(() => console.log("resized"));
- * tw.emit.resize(); // equivalent to dispatching `new Event("resize")`
- * ```
- */
-export function wrapEventTarget<M extends ValueIsEvent<M>>(
+export function wrapEventTarget<M extends EventMap>(
   target: EventTarget,
   devThrowOnUntypedDispatch = false,
-  registry?: EventFactoryRegistry<M>
+  registry?: EventFactoryRegistry<M>,
 ): EventBus<M> {
   class DelegatingBus extends EventBus<M> {
-    public override addEventListener(...args: Parameters<EventBus<M>["addEventListener"]>): void {
-      (target as any).addEventListener(...(args as any));
+    public override addEventListener<K extends keyof M & string>(
+      type: K,
+      listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
+      options?: boolean | AddEventListenerOptions,
+    ): void {
+      target.addEventListener(
+        type,
+        listener as unknown as EventListenerOrEventListenerObject | null,
+        options,
+      );
     }
-    public override removeEventListener(...args: Parameters<EventBus<M>["removeEventListener"]>): void {
-      (target as any).removeEventListener(...(args as any));
+    public override removeEventListener<K extends keyof M & string>(
+      type: K,
+      listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
+      options?: boolean | EventListenerOptions,
+    ): void {
+      target.removeEventListener(
+        type,
+        listener as unknown as EventListenerOrEventListenerObject | null,
+        options,
+      );
     }
+    // @ts-ignore — keep native signature for interop
     public override dispatchEvent(event: Event): boolean {
       if (devThrowOnUntypedDispatch) {
         throw new Error(
-          "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`."
+          "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`.",
         );
       }
-      return (target as any).dispatchEvent(event);
+      return target.dispatchEvent(event);
     }
   }
   return new DelegatingBus(devThrowOnUntypedDispatch, registry);
