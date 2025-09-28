@@ -1,456 +1,116 @@
-// event-bus.ts
+/**
+ * A function that can be passed to the `listener` parameter of {@link TypedEventTarget.addEventListener} and {@link TypedEventTarget.removeEventListener}.
+ *
+ * @template M A map of event types to their respective event classes.
+ * @template T The type of event to listen for (has to be keyof `M`).
+ */
+export type TypedEventListener<M, T extends keyof M> = (
+  evt: M[T],
+) => void | Promise<void>;
 
 /**
- * A tiny, **type-safe layer on top of the native `EventTarget`**.
+ * An object that can be passed to the `listener` parameter of {@link TypedEventTarget.addEventListener} and {@link TypedEventTarget.removeEventListener}.
  *
- * Design principles
- * - **Do not invent a new event system.** This file only wraps `EventTarget` and native `Event`/`CustomEvent`.
- * - **Maximize type-safety**: event names and payloads are checked at compile time.
- * - **Junior-friendly DX**: namespaced helpers (`on`, `once`, `emit`, `stream`) with auto-unsubscribe and timeouts.
- * - **Interop-first**: keep native methods (`addEventListener`, `removeEventListener`, `dispatchEvent`) intact.
- *
- * Highlights
- * - `bus.on.xyz(listener, options?) -> () => void` (unsubscribe function)
- * - `bus.on.withAbort.xyz(listener, options?) -> AbortController` (idiomatic native unsubscribe)
- * - `await bus.once.xyz(options?)` and `await bus.once.withTimeout.xyz(ms, options?)`
- * - `bus.emit.xyz(...)` (ergonomic) plus explicit `bus.emitEvent.xyz(init?)` and `bus.emitCustom.xyz(detail, init?)`
- *   to avoid any runtime ambiguity while staying purely native.
- * - `for await (const e of bus.stream.xyz()) { ... }` (async iterator, no polling)
- *
- * Example
- * ```ts
- * interface AppEvents {
- *   start: Event;                                    // payloadless (Event)
- *   progress: CustomEvent<{ pct: number }>;          // payloadful (CustomEvent<{pct:number}>)
- *   done: CustomEvent<void>;                         // treated as payloadless for DX
- * }
- *
- * const bus = new EventBus<AppEvents>();
- *
- * // Subscribe
- * const off = bus.on.progress(e => console.log(e.detail.pct));
- * const ac = bus.on.withAbort.start(() => console.log("start"), { passive: true });
- * // Later:
- * off();
- * ac.abort();
- *
- * // Emit (ergonomic)
- * bus.emit.start({ bubbles: true });                 // EventInit
- * bus.emit.progress({ pct: 50 }, { bubbles: true }); // detail + CustomEventInit (minus detail)
- * bus.emit.done();                                   // payloadless (treated like Event)
- *
- * // One-shot
- * await bus.once.done();
- * await bus.once.withTimeout.progress(2000);
- *
- * // Streams
- * for await (const e of bus.stream.progress()) {
- *   if (e.detail.pct >= 100) break;
- * }
- * ```
+ * @template M A map of event types to their respective event classes.
+ * @template T The type of event to listen for (has to be keyof `M`).
  */
-
-export type EventMap = Record<string, Event>;
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Type utilities                                                            */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-type DetailOf<E> = E extends CustomEvent<infer D> ? D : never;
-type PayloadOf<E> = DetailOf<E> extends void | undefined ? never : DetailOf<E>;
-type InitOf<E> = E extends CustomEvent<infer D>
-  ? Omit<CustomEventInit<D>, "detail">
-  : EventInit;
-
-type PayloadlessKeys<M extends EventMap> = {
-  [K in keyof M & string]: PayloadOf<M[K]> extends never ? K : never;
-}[keyof M & string];
-
-type PayloadfulKeys<M extends EventMap> = Exclude<
-  keyof M & string,
-  PayloadlessKeys<M>
->;
-
-/* Namespaced helper method shapes */
-
-export type OnMethods<M extends EventMap> =
-  & {
-    [K in keyof M & string]: (
-      listener: (evt: M[K]) => void,
-      options?: boolean | AddEventListenerOptions,
-    ) => () => void;
-  }
-  & {
-    withAbort: {
-      [K in keyof M & string]: (
-        listener: (evt: M[K]) => void,
-        options?: Omit<AddEventListenerOptions, "signal">,
-      ) => AbortController;
-    };
-  };
-
-export type OnceMethods<M extends EventMap> =
-  & {
-    [K in keyof M & string]: (
-      options?: AddEventListenerOptions,
-    ) => Promise<M[K]>;
-  }
-  & {
-    withTimeout: {
-      [K in keyof M & string]: (
-        ms: number,
-        options?: AddEventListenerOptions,
-      ) => Promise<M[K]>;
-    };
-  };
-
-export type EmitMethods<M extends EventMap> = {
-  [K in keyof M & string]: PayloadOf<M[K]> extends never
-    ? (init?: InitOf<M[K]>) => boolean
-    : (detail: PayloadOf<M[K]>, init?: InitOf<M[K]>) => boolean;
-};
-
-export type EmitEventMethods<M extends EventMap> = {
-  [K in PayloadlessKeys<M>]: (init?: InitOf<M[K]>) => boolean;
-};
-
-export type EmitCustomMethods<M extends EventMap> = {
-  [K in PayloadfulKeys<M>]: (
-    detail: PayloadOf<M[K]>,
-    init?: InitOf<M[K]>,
-  ) => boolean;
-};
-
-export type StreamMethods<M extends EventMap> = {
-  [K in keyof M & string]: () => AsyncIterable<M[K]>;
-};
-
-/* Optional runtime registry to build native events per key */
-
-export type EventFactoryRegistry<M extends EventMap> = {
-  [K in keyof M & string]: (...args: unknown[]) => M[K];
-};
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/* EventBus                                                                  */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-export class EventBus<M extends EventMap> extends EventTarget {
-  public readonly on: OnMethods<M>;
-  public readonly once: OnceMethods<M>;
-  public readonly emit: EmitMethods<M>;
-  public readonly emitEvent: EmitEventMethods<M>;
-  public readonly emitCustom: EmitCustomMethods<M>;
-  public readonly stream: StreamMethods<M>;
-
-  constructor(
-    private readonly devThrowOnUntypedDispatch = false,
-    private readonly registry?: EventFactoryRegistry<M>,
-  ) {
-    super();
-    this.on = this.#makeOn();
-    this.once = this.#makeOnce();
-    this.emitEvent = this.#makeEmitEvent();
-    this.emitCustom = this.#makeEmitCustom();
-    this.emit = this.#makeEmit();
-    this.stream = this.#makeStream();
-  }
-
-  /* Native methods, kept and typed */
-
-  public override addEventListener<K extends keyof M & string>(
-    type: K,
-    listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-    options?: boolean | AddEventListenerOptions,
-  ): void {
-    super.addEventListener(
-      type,
-      listener as unknown as EventListenerOrEventListenerObject | null,
-      options,
-    );
-  }
-
-  public override removeEventListener<K extends keyof M & string>(
-    type: K,
-    listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-    options?: boolean | EventListenerOptions,
-  ): void {
-    super.removeEventListener(
-      type,
-      listener as unknown as EventListenerOrEventListenerObject | null,
-      options,
-    );
-  }
-
-  // @ts-ignore — keep native signature for interop
-  public override dispatchEvent(event: Event): boolean {
-    if (this.devThrowOnUntypedDispatch) {
-      throw new Error(
-        "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`.",
-      );
-    }
-    return super.dispatchEvent(event);
-  }
-
-  /* Namespaced helpers */
-
-  #makeOn(): OnMethods<M> {
-    const base = new Proxy({} as OnMethods<M>, {
-      get: (_t, name: string) => {
-        return (
-          listener: (e: Event) => void,
-          options?: boolean | AddEventListenerOptions,
-        ) => {
-          this.addEventListener(
-            name as keyof M & string,
-            listener as unknown as (evt: M[keyof M & string]) => void,
-            options,
-          );
-          return () =>
-            this.removeEventListener(
-              name as keyof M & string,
-              listener as unknown as (evt: M[keyof M & string]) => void,
-              options as EventListenerOptions | boolean | undefined,
-            );
-        };
-      },
-    });
-
-    const withAbort = new Proxy({} as OnMethods<M>["withAbort"], {
-      get: (_t, name: string) => {
-        return (
-          listener: (e: Event) => void,
-          options?: Omit<AddEventListenerOptions, "signal">,
-        ) => {
-          const ac = new AbortController();
-          this.addEventListener(
-            name as keyof M & string,
-            listener as unknown as (evt: M[keyof M & string]) => void,
-            { ...(options ?? {}), signal: ac.signal },
-          );
-          return ac;
-        };
-      },
-    });
-
-    (base as unknown as { withAbort: OnMethods<M>["withAbort"] }).withAbort =
-      withAbort;
-    return base;
-  }
-
-  #makeOnce(): OnceMethods<M> {
-    const base = new Proxy({} as OnceMethods<M>, {
-      get: (_t, name: string) => {
-        return (options?: AddEventListenerOptions) =>
-          new Promise<Event>((resolve) => {
-            this.addEventListener(
-              name as keyof M & string,
-              resolve as (evt: M[keyof M & string]) => void,
-              { ...(options ?? {}), once: true },
-            );
-          }) as Promise<M[keyof M & string]>;
-      },
-    });
-
-    const withTimeout = new Proxy({} as OnceMethods<M>["withTimeout"], {
-      get: (_t, name: string) => {
-        return (ms: number, options?: AddEventListenerOptions) =>
-          new Promise<Event>((resolve, reject) => {
-            const ac = new AbortController();
-            const timer = setTimeout(() => {
-              ac.abort();
-              reject(
-                new Error(
-                  `Timeout waiting for "${String(name)}" after ${ms}ms`,
-                ),
-              );
-            }, ms);
-            this.addEventListener(
-              name as keyof M & string,
-              (e: Event) => {
-                clearTimeout(timer);
-                resolve(e);
-              },
-              { ...(options ?? {}), signal: ac.signal, once: true },
-            );
-          }) as Promise<M[keyof M & string]>;
-      },
-    });
-
-    (base as unknown as { withTimeout: OnceMethods<M>["withTimeout"] })
-      .withTimeout = withTimeout;
-    return base;
-  }
-
-  #makeEmitEvent(): EmitEventMethods<M> {
-    return new Proxy({} as EmitEventMethods<M>, {
-      get: (_t, name: string) => {
-        const eventName = String(name);
-        return (init?: EventInit) =>
-          super.dispatchEvent(new Event(eventName, init));
-      },
-    });
-  }
-
-  #makeEmitCustom(): EmitCustomMethods<M> {
-    return new Proxy({} as EmitCustomMethods<M>, {
-      get: (_t, name: string) => {
-        const eventName = String(name);
-        return (detail: unknown, init?: Record<string, unknown>) =>
-          super.dispatchEvent(
-            new CustomEvent(eventName, { ...(init ?? {}), detail }),
-          );
-      },
-    });
-  }
-
-  #makeEmit(): EmitMethods<M> {
-    if (this.registry) {
-      const factories = this.registry;
-      return new Proxy({} as EmitMethods<M>, {
-        get: (_t, name: string) => {
-          const key = name as keyof typeof factories;
-          const make = factories[key] as
-            | ((...args: unknown[]) => Event)
-            | undefined;
-          return (...args: unknown[]) => {
-            if (!make) {
-              throw new Error(
-                `No event factory registered for "${String(name)}".`,
-              );
-            }
-            const ev = make(...args);
-            return super.dispatchEvent(ev);
-          };
-        },
-      });
-    }
-
-    // No registry: avoid heuristics. Only 0 or 2 args are accepted at runtime.
-    return new Proxy({} as EmitMethods<M>, {
-      get: (_t, name: string) => {
-        const eventName = String(name);
-        return (a?: unknown, b?: unknown) => {
-          const argc = arguments.length;
-          if (argc === 0) {
-            return super.dispatchEvent(new Event(eventName));
-          }
-          if (argc === 2) {
-            return super.dispatchEvent(
-              new CustomEvent(eventName, {
-                ...(b as Record<string, unknown>),
-                detail: a,
-              }),
-            );
-          }
-          throw new Error(
-            `Ambiguous single-argument emit for "${eventName}". ` +
-              `Use explicit emitters: emitEvent.${eventName}(init?) or emitCustom.${eventName}(detail, init?).`,
-          );
-        };
-      },
-    });
-  }
-
-  #makeStream(): StreamMethods<M> {
-    return new Proxy({} as StreamMethods<M>, {
-      get: (_t, name: string) => {
-        const eventName = String(name);
-        return function (
-          this: EventBus<M>,
-        ): AsyncIterable<M[keyof M & string]> {
-          return {
-            [Symbol.asyncIterator]: () => {
-              const queue: Event[] = [];
-              let notify: (() => void) | null = null;
-
-              const onEvent = (e: Event) => {
-                queue.push(e);
-                if (notify) {
-                  const n = notify;
-                  notify = null;
-                  n();
-                }
-              };
-
-              const ac = new AbortController();
-              this.addEventListener(
-                eventName as keyof M & string,
-                onEvent as (evt: M[keyof M & string]) => void,
-                { signal: ac.signal },
-              );
-
-              return {
-                next: async () => {
-                  if (queue.length === 0) {
-                    await new Promise<void>((resolve) => {
-                      notify = resolve;
-                    });
-                  }
-                  const value = queue.shift() as M[keyof M & string];
-                  return { done: false, value };
-                },
-                return: () => {
-                  ac.abort();
-                  return Promise.resolve({
-                    done: true,
-                    value: undefined as unknown as M[keyof M & string],
-                  });
-                },
-                throw: (err?: unknown) => {
-                  ac.abort();
-                  return Promise.reject(err);
-                },
-              };
-            },
-          };
-        }.bind(this);
-      },
-    });
-  }
+export interface TypedEventListenerObject<M, T extends keyof M> {
+  handleEvent: (evt: M[T]) => void | Promise<void>;
 }
 
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Safe wrapper for an existing native EventTarget                           */
-/* ────────────────────────────────────────────────────────────────────────── */
+/**
+ * Type of parameter `listener` in {@link TypedEventTarget.addEventListener} and {@link TypedEventTarget.removeEventListener}.
+ *
+ * The object that receives a notification (an object that implements the Event interface) when an event of the specified type occurs.
+ *
+ * Can be either an object with a handleEvent() method, or a JavaScript function.
+ *
+ * @template M A map of event types to their respective event classes.
+ * @template T The type of event to listen for (has to be keyof `M`).
+ */
+export type TypedEventListenerOrEventListenerObject<M, T extends keyof M> =
+  | TypedEventListener<M, T>
+  | TypedEventListenerObject<M, T>;
 
-export function wrapEventTarget<M extends EventMap>(
-  target: EventTarget,
-  devThrowOnUntypedDispatch = false,
-  registry?: EventFactoryRegistry<M>,
-): EventBus<M> {
-  class DelegatingBus extends EventBus<M> {
-    public override addEventListener<K extends keyof M & string>(
-      type: K,
-      listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-      options?: boolean | AddEventListenerOptions,
-    ): void {
-      target.addEventListener(
-        type,
-        listener as unknown as EventListenerOrEventListenerObject | null,
-        options,
-      );
-    }
-    public override removeEventListener<K extends keyof M & string>(
-      type: K,
-      listener: ((evt: M[K]) => void) | { handleEvent(evt: M[K]): void } | null,
-      options?: boolean | EventListenerOptions,
-    ): void {
-      target.removeEventListener(
-        type,
-        listener as unknown as EventListenerOrEventListenerObject | null,
-        options,
-      );
-    }
-    // @ts-ignore — keep native signature for interop
-    public override dispatchEvent(event: Event): boolean {
-      if (devThrowOnUntypedDispatch) {
-        throw new Error(
-          "Use typed emitters: `bus.emit.<name>(...)`, `bus.emitEvent.<name>(...)`, or `bus.emitCustom.<name>(...)`.",
-        );
-      }
-      return target.dispatchEvent(event);
-    }
+type ValueIsEvent<T> = {
+  [key in keyof T]: Event;
+};
+
+/**
+ * Typescript friendly version of {@link EventTarget}
+ *
+ * @template M A map of event types to their respective event classes.
+ *
+ * @example
+ * ```typescript
+ * interface MyEventMap {
+ *     hello: Event;
+ *     time: CustomEvent<number>;
+ * }
+ *
+ * const eventTarget = new TypedEventTarget<MyEventMap>();
+ *
+ * eventTarget.addEventListener('time', (event) => {
+ *     // event is of type CustomEvent<number>
+ * });
+ * ```
+ */
+export interface TypedEventTarget<M extends ValueIsEvent<M>> {
+  /** Appends an event listener for events whose type attribute value is type.
+   * The callback argument sets the callback that will be invoked when the event
+   * is dispatched.
+   *
+   * The options argument sets listener-specific options. For compatibility this
+   * can be a boolean, in which case the method behaves exactly as if the value
+   * was specified as options's capture.
+   *
+   * When set to true, options's capture prevents callback from being invoked
+   * when the event's eventPhase attribute value is BUBBLING_PHASE. When false
+   * (or not present), callback will not be invoked when event's eventPhase
+   * attribute value is CAPTURING_PHASE. Either way, callback will be invoked if
+   * event's eventPhase attribute value is AT_TARGET.
+   *
+   * When set to true, options's passive indicates that the callback will not
+   * cancel the event by invoking preventDefault(). This is used to enable
+   * performance optimizations described in § 2.8 Observing event listeners.
+   *
+   * When set to true, options's once indicates that the callback will only be
+   * invoked once after which the event listener will be removed.
+   *
+   * The event listener is appended to target's event listener list and is not
+   * appended if it has the same type, callback, and capture. */
+  addEventListener: <T extends keyof M & string>(
+    type: T,
+    listener: TypedEventListenerOrEventListenerObject<M, T> | null,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+
+  /** Removes the event listener in target's event listener list with the same
+   * type, callback, and options. */
+  removeEventListener: <T extends keyof M & string>(
+    type: T,
+    callback: TypedEventListenerOrEventListenerObject<M, T> | null,
+    options?: EventListenerOptions | boolean,
+  ) => void;
+
+  /**
+   * Dispatches a synthetic event event to target and returns true if either
+   * event's cancelable attribute value is false or its preventDefault() method
+   * was not invoked, and false otherwise.
+   * @deprecated To ensure type safety use `dispatchTypedEvent` instead.
+   */
+  dispatchEvent: (event: Event) => boolean;
+}
+export class TypedEventTarget<M extends ValueIsEvent<M>> extends EventTarget {
+  /**
+   * Dispatches a synthetic event event to target and returns true if either
+   * event's cancelable attribute value is false or its preventDefault() method
+   * was not invoked, and false otherwise.
+   */
+  public dispatchTypedEvent<T extends keyof M>(
+    _type: T,
+    event: M[T],
+  ): boolean {
+    return super.dispatchEvent(event);
   }
-  return new DelegatingBus(devThrowOnUntypedDispatch, registry);
 }
