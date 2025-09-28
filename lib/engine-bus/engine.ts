@@ -78,7 +78,7 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
     };
 }
 
-type WorkflowStep =
+export type WorkflowStep =
     | { step: "init" }
     | {
         step: "discovery";
@@ -92,7 +92,7 @@ type WorkflowStep =
         materialized: (resource: Resource) => Promise<void>;
     };
 
-class EngineState {
+export class EngineState {
     #workflow: WorkflowStep;
 
     constructor() {
@@ -487,7 +487,7 @@ export class Engine<R extends Resource> {
             );
 
             // now see which files are executable and materialize them appropriately
-            this.materializeFoundries(workflow.fcDiscovering.walkedFiles);
+            this.materializeFoundries(workflow.fcDiscovering.walkedFiles, args);
         } else {
             console.warn("should be in discovery stage now");
         }
@@ -507,7 +507,10 @@ export class Engine<R extends Resource> {
             );
 
             // now see which files are executable and materialize them appropriately
-            this.materializeFoundries(workflow.fcMaterializing.walkedFiles);
+            this.materializeFoundries(
+                workflow.fcMaterializing.walkedFiles,
+                args,
+            );
         } else {
             console.warn("should be in materialization stage now");
         }

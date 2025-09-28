@@ -1,3 +1,4 @@
+export * from "./cli.ts";
 export * from "./directives.ts";
 export * from "./engine.ts";
 export * from "./fs.ts";
