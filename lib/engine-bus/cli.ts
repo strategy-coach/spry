@@ -11,9 +11,17 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { join, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
-import { Engine, ResourceEvents } from "./engine.ts";
+import { Engine } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
+
+export type LsCommandRow = {
+    step: { discovery: boolean; materialize: boolean };
+    impact: { foundry: boolean; autoMaterialize: boolean; directives: number };
+    nature: Resource["nature"] | `${Resource["nature"]}:${Resource["nature"]}`;
+    path: string;
+    issue: string;
+};
 
 export class CLI {
     constructor(readonly engine: Engine<Resource>) {
@@ -73,9 +81,7 @@ export class CLI {
         return { spryStd, sqlPage, created, removed, linked };
     }
 
-    lsWorkflowStepField<
-        Row extends { step: { discovery: boolean; materialize: boolean } },
-    >():
+    lsWorkflowStepField<Row extends LsCommandRow>():
         | Partial<ColumnDef<Row, Row["step"]>>
         | undefined {
         return {
@@ -86,15 +92,7 @@ export class CLI {
         };
     }
 
-    lsImpactField<
-        Row extends {
-            impact: {
-                foundry: boolean;
-                autoMaterialize: boolean;
-                directives: number;
-            };
-        },
-    >():
+    lsImpactField<Row extends LsCommandRow>():
         | Partial<ColumnDef<Row, Row["impact"]>>
         | undefined {
         return {
@@ -111,7 +109,7 @@ export class CLI {
         };
     }
 
-    lsNatureField<Row extends { nature: Resource["nature"] }>(): Partial<
+    lsNatureField<Row extends LsCommandRow>(): Partial<
         ColumnDef<Row, Row["nature"]>
     > {
         return {
@@ -145,9 +143,9 @@ export class CLI {
         };
     }
 
-    lsNaturePathField<
-        Row extends { nature: Resource["nature"]; issue?: string },
-    >(): Partial<ColumnDef<Row, string>> {
+    lsNaturePathField<Row extends LsCommandRow>(): Partial<
+        ColumnDef<Row, string>
+    > {
         const lscpf = this.lsColorPathField();
         return {
             ...lscpf,
@@ -158,7 +156,7 @@ export class CLI {
         };
     }
 
-    lsLintField<Row extends { issue: string }>():
+    lsLintField<Row extends LsCommandRow>():
         | Partial<ColumnDef<Row, string>>
         | undefined {
         return {
@@ -169,110 +167,73 @@ export class CLI {
         };
     }
 
-    async ls() {
-        const dResources: ResourceEvents<Resource>["resource"][] = [];
-        const mResources: ResourceEvents<Resource>["resource"][] = [];
-        const directives = new Map<
-            string,
-            ResourceEvents<Resource>["materializedInclude"]
-        >();
-        const foundries = new Map<
-            string,
-            ResourceEvents<Resource>["materializedFoundry"]
-        >();
-
-        this.engine.resourceBus.on.resource((ev) => {
-            switch (ev.engineState.workflow.step) {
-                case "discovery":
-                    dResources.push(ev);
-                    break;
-                case "materialization":
-                    mResources.push(ev);
-                    break;
-                default:
-                    console.warn(`not sure what to do with`, { ev });
-            }
-        });
-
-        this.engine.resourceBus.on.materializedInclude((ev) => {
-            if (ev.contentState === "modified") {
-                if (isFsFileResource(ev.resource)) {
-                    directives.set(ev.resource.absFsPath, ev);
-                } else {
-                    console.warn(`not sure what to do with this event`, { ev });
-                }
-            }
-        });
-
-        this.engine.resourceBus.on.materializedFoundry((ev) => {
-            foundries.set(ev.cmd, ev);
-        });
-
-        await this.engine.materialize({ dryRun: true });
-
-        const paths = new Set<string>();
-        for (const dr of dResources) {
-            if (isFsFileResource(dr.resource)) paths.add(dr.resource.absFsPath);
-        }
-        for (const mr of mResources) {
-            if (isFsFileResource(mr.resource)) paths.add(mr.resource.absFsPath);
-        }
-
-        type Row = {
-            step: { discovery: boolean; materialize: boolean };
-            impact: {
-                foundry: boolean;
-                autoMaterialize: boolean;
-                directives: number;
-            };
-            nature: Resource["nature"];
-            annotations: [number, number];
-            path: string;
-            issue: string;
-        };
-        const list = Array.from(
-            paths.values().map((path) => {
-                const inD = dResources.find((r) =>
-                    isFsFileResource(r.resource) && r.resource.absFsPath == path
-                        ? true
-                        : false
-                );
-                const inM = mResources.find((r) =>
-                    isFsFileResource(r.resource) && r.resource.absFsPath == path
-                        ? true
-                        : false
-                );
-                return {
-                    step: {
-                        discovery: inD ? true : false,
-                        materialize: inM ? true : false,
-                    },
+    summaryHooks(engine: Engine<Resource>) {
+        const rows = new Map<string, LsCommandRow>();
+        const get = (path: string, n?: Resource["nature"]) =>
+            rows.get(path) ??
+                (rows.set(path, {
+                    step: { discovery: false, materialize: false },
                     impact: {
-                        foundry: foundries.has(path),
-                        autoMaterialize: foundries.get(path)?.matAbsFsPath
-                            ? true
-                            : false,
-                        directives: directives.has(path) ? 1 : 0,
+                        foundry: false,
+                        autoMaterialize: false,
+                        directives: 0,
                     },
-                    nature: inD?.resource.nature && inM?.resource.nature &&
-                            (inD?.resource.nature == inM?.resource.nature)
-                        ? inD.resource.nature
-                        : `${inD?.resource.nature}:${inD?.resource.nature}` as Resource[
-                            "nature"
-                        ],
+                    nature: (n ?? "unknown") as LsCommandRow["nature"],
                     path,
-                    annotations: [
-                        inD?.annsCatalog?.items.length ?? 0,
-                        inM?.annsCatalog?.items.length ?? 0,
-                    ],
                     issue: "",
-                } satisfies Row;
-            }),
-        );
+                }),
+                    rows.get(path)!);
 
-        await new ListerBuilder<typeof list[number]>()
+        // resource events → mark step, annotations, reconcile nature
+        engine.resourceBus.on.resource((ev) => {
+            if (!isFsFileResource(ev.resource)) return;
+            const path = ev.resource.absFsPath;
+            const n = ev.resource.nature;
+            const r = get(path, n);
+            const idx = ev.engineState.workflow.step === "discovery"
+                ? 0
+                : ev.engineState.workflow.step === "materialization"
+                ? 1
+                : -1;
+            if (idx < 0) return;
+            idx === 0 ? (r.step.discovery = true) : (r.step.materialize = true);
+            r.nature = r.nature && r.nature !== n
+                ? `${r.nature}:${n}` as LsCommandRow["nature"]
+                : n;
+        });
+
+        // include events → count directives (only modified fs files)
+        engine.resourceBus.on.materializedInclude((ev) => {
+            if (
+                ev.contentState !== "modified" || !isFsFileResource(ev.resource)
+            ) {
+                return;
+            }
+            get(ev.resource.absFsPath).impact.directives++;
+        });
+
+        // foundry events → flags (you keyed by ev.cmd)
+        engine.resourceBus.on.materializedFoundry((ev) => {
+            const r = get(ev.cmd);
+            r.impact.foundry = true;
+            r.impact.autoMaterialize = !!ev.matAbsFsPath;
+        });
+
+        return {
+            toList: (() => {
+                return [...rows.values()].sort((a, b) =>
+                    a.path.localeCompare(b.path)
+                );
+            }),
+        };
+    }
+
+    async ls() {
+        const summary = this.summaryHooks(this.engine);
+        await this.engine.materialize({ dryRun: true });
+        await new ListerBuilder<LsCommandRow>()
             .declareColumns("step", "impact", "nature", "path", "issue")
-            .from(list)
+            .from(summary.toList())
             .field("step", "step", this.lsWorkflowStepField())
             .field("nature", "nature", this.lsNatureField())
             .field("path", "path", this.lsNaturePathField())

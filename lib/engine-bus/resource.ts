@@ -126,9 +126,26 @@ export const isSrcCodeLangSpecSupplier = (
         ? true
         : false;
 
+export type SrcCodeSupplier =
+    & TextSupplier
+    & TextProducer
+    & SrcCodeLangSpecSupplier;
+
+export const isSrcCodeSupplier = (
+    o: unknown,
+): o is SrcCodeSupplier =>
+    isTextSupplier(o) && isTextProducer(o) && isSrcCodeLangSpecSupplier(o);
+
+// acquires sources and yields or "supplies" them (usually from disk)
 export type ResourceSupplier<R extends Resource> = (
     args: { signal?: AbortSignal },
 ) => AsyncIterable<R> | AsyncGenerator<R, void, unknown>;
+
+// collects resources after they are acquired (usually in memory)
+export type ResourcesCollection<R extends Resource> = {
+    readonly resources: readonly R[];
+    readonly register: (resource: R) => void | Promise<void>;
+};
 
 // finds all "spry.*" annotations and returns them a single parsed Zod object
 export function zodParsedResourceAnns(

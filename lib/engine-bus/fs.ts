@@ -3,10 +3,10 @@ import { walk, type WalkEntry, type WalkOptions } from "jsr:@std/fs@1/walk";
 import { basename, dirname, extname, join, relative } from "jsr:@std/path@1";
 import { detectLanguageByPath } from "../universal/content/code.ts";
 import {
-    isSrcCodeLangSpecSupplier,
+    isSrcCodeSupplier,
     type Resource,
     ResourceSupplier,
-    SrcCodeLangSpecSupplier,
+    SrcCodeSupplier,
     type TextProducer,
     type TextSupplier,
 } from "./resource.ts";
@@ -37,6 +37,14 @@ export const isFsFileResource = (o: unknown): o is FsFileResource =>
         typeof o.absFsPath === "string" && typeof o.relFsPath == "string"
         ? true
         : false;
+
+export type FsSrcCodeFileSupplier =
+    & SrcCodeSupplier
+    & FsFileResource;
+
+export const isFsSrcCodeFileSupplier = (
+    o: unknown,
+): o is FsSrcCodeFileSupplier => isFsFileResource(o) && isSrcCodeSupplier(o);
 
 export function pathExtensions(path: string) {
     const name = basename(path);
@@ -103,41 +111,6 @@ export function fsFilesContributor<R extends Resource, Identity extends string>(
             } as unknown as R;
         }
     };
-}
-
-export class FsFilesCollection<R extends Resource> {
-    readonly resources: readonly R[] = [];
-    readonly fsFiles: readonly FsFileResource[] = [];
-    readonly walkedFiles: readonly (FsFileResource & FsWalkedEncounter)[] = [];
-    readonly walkedSrcFiles: readonly (
-        & FsFileResource
-        & FsWalkedEncounter
-        & SrcCodeLangSpecSupplier
-    )[] = [];
-    readonly execCandidate = executables();
-    readonly isExecutable = this.execCandidate.isExecutable;
-
-    constructor() {
-    }
-
-    // deno-lint-ignore require-await
-    async register(resource: R) {
-        (this.resources as R[]).push(resource);
-        if (isFsFileResource(resource)) {
-            (this.fsFiles as FsFileResource[]).push(resource);
-            if (isFsWalkedEncounter(resource)) {
-                (this.walkedFiles as (FsFileResource & FsWalkedEncounter)[])
-                    .push(resource);
-                if (isSrcCodeLangSpecSupplier(resource)) {
-                    (this.walkedSrcFiles as (
-                        & FsFileResource
-                        & FsWalkedEncounter
-                        & SrcCodeLangSpecSupplier
-                    )[]).push(resource);
-                }
-            }
-        }
-    }
 }
 
 /**

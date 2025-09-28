@@ -9,13 +9,15 @@ import { includeDirective } from "./directives.ts";
 import {
     executables,
     FsFileResource,
-    FsFilesCollection,
     fsFilesContributor,
+    isFsFileResource,
+    isFsSrcCodeFileSupplier,
 } from "./fs.ts";
 import {
     isSrcCodeLangSpecSupplier,
     isTextSupplier,
     Resource,
+    ResourcesCollection,
     ResourceSupplier,
     SrcCodeLangSpecSupplier,
     TextProducer,
@@ -42,13 +44,6 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         annsCatalog?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
         annsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
-    };
-    annotations: {
-        engineState: EngineState;
-        resource: R;
-        supplier: ResourceSupplier<R>;
-        annsCatalog: AnnotationCatalog;
-        srcCodeLanguage?: LanguageSpec;
     };
     materializedInclude: {
         engineState: EngineState;
@@ -79,17 +74,26 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
 }
 
 export type WorkflowStep =
-    | { step: "init" }
+    | { readonly step: "init" }
     | {
-        step: "discovery";
-        fcDiscovering: FsFilesCollection<Resource>;
-        discovered: (resource: Resource) => Promise<void>;
+        readonly step: "discovery";
+        readonly discovering: ResourcesCollection<Resource>;
+        readonly discovered: (resource: Resource) => Promise<void>;
     }
     | {
-        step: "materialization";
-        fcDiscovered: FsFilesCollection<Resource>;
-        fcMaterializing: FsFilesCollection<Resource>;
-        materialized: (resource: Resource) => Promise<void>;
+        readonly step: "materialization";
+        readonly discovered: ResourcesCollection<Resource>;
+        readonly materializing: ResourcesCollection<Resource>;
+        readonly materialized: (resource: Resource) => Promise<void>;
+    }
+    | {
+        readonly step: "final";
+        readonly discovered: ResourcesCollection<Resource>;
+        readonly materialized: ResourcesCollection<Resource>;
+        readonly summarize: (
+            discovered: ResourcesCollection<Resource>,
+            materialized: ResourcesCollection<Resource>,
+        ) => Promise<void>;
     };
 
 export class EngineState {
@@ -104,41 +108,60 @@ export class EngineState {
     }
 
     isTerminal() {
-        return this.#workflow.step === "materialization";
+        return this.#workflow.step === "final";
     }
 
     hasNext() {
         const { step } = this.#workflow;
-        return step === "init" || step === "discovery" ? true : false;
+        return step === "init" || step === "discovery" ||
+                step === "materialization"
+            ? true
+            : false;
+    }
+
+    createCollection<R extends Resource>() {
+        const resources: R[] = [];
+        return {
+            resources,
+            // deno-lint-ignore require-await
+            register: async (resource) => {
+                resources.push(resource);
+            },
+        } satisfies ResourcesCollection<R>;
     }
 
     nextStep() {
         switch (this.#workflow.step) {
             case "init": {
-                const fcDiscovering = new FsFilesCollection<Resource>();
+                const fcDiscovering = this.createCollection<Resource>();
                 this.#workflow = {
                     step: "discovery",
-                    fcDiscovering,
+                    discovering: fcDiscovering,
                     discovered: async (ev) => await fcDiscovering.register(ev),
                 };
                 return this.#workflow;
             }
 
             case "discovery": {
-                const fcMaterializing = new FsFilesCollection<Resource>();
+                const materializing = this.createCollection<Resource>();
                 this.#workflow = {
                     step: "materialization",
-                    fcDiscovered: this.#workflow.fcDiscovering,
-                    fcMaterializing,
+                    discovered: this.#workflow.discovering,
+                    materializing,
                     materialized: async (ev) =>
-                        await fcMaterializing.register(ev),
+                        await materializing.register(ev),
                 };
                 return this.#workflow;
             }
 
             case "materialization":
-                console.error({ workflow: this.#workflow });
-                throw new Error(`At terminal stage (${this.#workflow.step})`);
+                this.#workflow = {
+                    step: "final",
+                    discovered: this.#workflow.discovered,
+                    materialized: this.#workflow.materializing,
+                    summarize: async () => {},
+                };
+                return this.#workflow;
 
             default:
                 console.error({ workflow: this.#workflow });
@@ -482,12 +505,17 @@ export class Engine<R extends Resource> {
 
             // directives are able to modify files so let's do that now
             await this.materializeDirectives(
-                workflow.fcDiscovering.walkedSrcFiles,
+                workflow.discovering.resources.filter(
+                    isFsSrcCodeFileSupplier,
+                ),
                 args,
             );
 
             // now see which files are executable and materialize them appropriately
-            this.materializeFoundries(workflow.fcDiscovering.walkedFiles, args);
+            this.materializeFoundries(
+                workflow.discovering.resources.filter(isFsFileResource),
+                args,
+            );
         } else {
             console.warn("should be in discovery stage now");
         }
@@ -502,13 +530,15 @@ export class Engine<R extends Resource> {
 
             // directives are able to modify files so let's do that now
             await this.materializeDirectives(
-                workflow.fcMaterializing.walkedSrcFiles,
+                workflow.materializing.resources.filter(
+                    isFsSrcCodeFileSupplier,
+                ),
                 args,
             );
 
             // now see which files are executable and materialize them appropriately
             this.materializeFoundries(
-                workflow.fcMaterializing.walkedFiles,
+                workflow.materializing.resources.filter(isFsFileResource),
                 args,
             );
         } else {
