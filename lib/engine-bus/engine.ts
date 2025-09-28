@@ -35,13 +35,6 @@ export interface DiagnosticEvents<R extends Resource> extends EventMap {
 }
 
 export interface ResourceEvents<R extends Resource> extends EventMap {
-    annotations: {
-        engineState: EngineState;
-        resource: R;
-        supplier: ResourceSupplier<R>;
-        annsCatalog: AnnotationCatalog;
-        srcCodeLanguage?: LanguageSpec;
-    };
     resource: {
         engineState: EngineState;
         resource: R;
@@ -49,6 +42,39 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         annsCatalog?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
         annsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
+    };
+    annotations: {
+        engineState: EngineState;
+        resource: R;
+        supplier: ResourceSupplier<R>;
+        annsCatalog: AnnotationCatalog;
+        srcCodeLanguage?: LanguageSpec;
+    };
+    materializedInclude: {
+        engineState: EngineState;
+        resource: R & SrcCodeLangSpecSupplier;
+        contentState: "unmodified" | "modified";
+        replacerResult: {
+            before: string;
+            after: string;
+            changed: boolean;
+        } | {
+            after: string;
+            before?: undefined;
+            changed?: undefined;
+        };
+        written: boolean;
+        dryRun?: boolean;
+    };
+    materializedFoundry: {
+        engineState: EngineState;
+        resource: FsFileResource;
+        cmd: string;
+        env: Record<string, string>;
+        cwd: string;
+        matAbsFsPath: false | string;
+        error?: unknown;
+        dryRun?: boolean;
     };
 }
 
@@ -376,22 +402,27 @@ export class Engine<R extends Resource> {
 
         for await (const resource of srcFiles) {
             const original = await resource.text();
-            const result = await replacer.processToString(original, {
+            const state = {
                 resource,
                 contentState: "unmodified",
-            });
+            } satisfies SourceFile;
+            const result = await replacer.processToString(original, state);
+            let written = false;
             if (
                 !args?.dryRun &&
                 (result.changed && result.after != result.before)
             ) {
                 await resource.writeText(result.after);
-                console.info("Materialized", resource.absFsPath);
+                written = true;
             }
-            // deBus.emit.include({
-            //     resource,
-            //     directive: incDirective,
-            //     result,
-            // });
+            this.resourceBus.emit.materializedInclude({
+                engineState: this.#state,
+                resource: resource as R & ElementOfIterable<typeof srcFiles>,
+                replacerResult: result,
+                dryRun: args?.dryRun,
+                written,
+                contentState: state.contentState,
+            });
         }
     }
 
@@ -409,13 +440,25 @@ export class Engine<R extends Resource> {
                 if (!isExecutable(wf.absFsPath)) {
                     console.error("foundry", wf.relFsPath, "is not executable");
                 } else {
+                    let error: unknown | undefined;
+                    const matAbsFsPath = wf.extensions.autoMaterializable();
                     materialize({
                         absFsPath: wf.absFsPath,
-                        matAbsFsPath: wf.extensions.autoMaterializable(),
+                        matAbsFsPath,
                         env,
                         cwd,
                         dryRun: args?.dryRun,
-                    }, (error) => console.error(error));
+                    }, (err) => error = err);
+                    this.resourceBus.emit.materializedFoundry({
+                        engineState: this.#state,
+                        resource: wf,
+                        cmd: wf.absFsPath,
+                        matAbsFsPath,
+                        env,
+                        cwd,
+                        dryRun: args?.dryRun,
+                        error,
+                    });
                 }
             }
         }
