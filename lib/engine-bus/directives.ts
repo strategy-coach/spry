@@ -1,18 +1,12 @@
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { LanguageSpec } from "../universal/content/code.ts";
 import {
     type CandidateDefn,
-    Emitter,
     IsCandidate,
     lineCommentDirectiveParser,
     ReplaceStream,
-    ReplaceStreamEvents,
     textToShellArgv,
 } from "../universal/directive.ts";
-import {
-    SrcCodeLangSpecSupplier,
-    TextProducer,
-    TextSupplier,
-} from "./resource.ts";
 
 export type IncludeDirective<Payload> = CandidateDefn<Payload> & {
     blockName: string;
@@ -20,7 +14,12 @@ export type IncludeDirective<Payload> = CandidateDefn<Payload> & {
     srcLineNo: number;
 };
 
-export function includeDirective<Payload>() {
+export function includeDirective<
+    Payload extends {
+        resource: { absFsPath: string; srcCodeLanguage: LanguageSpec };
+        contentState: "unmodified" | "modified";
+    },
+>() {
     const command = new Command()
         .name("#include")
         .description(
@@ -84,7 +83,7 @@ export function includeDirective<Payload>() {
                                     endRemains == blockName;
                                 return matches;
                             },
-                        }; // TODO: why cast required?
+                        };
                     }).noExit().parse(textToShellArgv(argsText));
                     return incDirec!;
                 } catch (err) {
@@ -95,24 +94,6 @@ export function includeDirective<Payload>() {
         };
         return handler;
     };
-    return { directive, command };
-}
-
-export function directives(
-    srcFiles: Iterable<
-        & TextSupplier
-        & SrcCodeLangSpecSupplier
-        & { absFsPath: string }
-        & TextProducer
-    >,
-) {
-    type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
-    type SourceFile = {
-        resource: ElementOfIterable<typeof srcFiles>;
-        contentState: "unmodified" | "modified";
-    };
-
-    const incDirective = includeDirective<SourceFile>();
 
     const lcdParsers = new Map<
         string,
@@ -123,7 +104,7 @@ export function directives(
         directivePrefix: "#", // e.g. #include
     });
 
-    const replacer = new ReplaceStream(incDirective.directive({
+    const replacer = new ReplaceStream(directive({
         lcdParser: (payload) => {
             const { srcCodeLanguage: langSpec } = payload.resource;
             let lcdParser = lcdParsers.get(langSpec.id);
@@ -161,53 +142,5 @@ export function directives(
         },
     }));
 
-    const dryRun = async () => {
-        const modified: {
-            resource: SourceFile["resource"];
-            directive: IncludeDirective<SourceFile>;
-            beginLineNo: number;
-            endLineNo: number;
-        }[] = [];
-
-        const emitter = new Emitter<
-            ReplaceStreamEvents<IncludeDirective<SourceFile>, SourceFile>
-        >();
-        emitter.on(
-            "blockRender",
-            (i) =>
-                modified.push({
-                    resource: i.payload.resource,
-                    directive: i.directive,
-                    beginLineNo: i.beginLineNo,
-                    endLineNo: i.endLineNo,
-                }),
-        );
-        // TODO: emitter.on("error", () => events.push("error"));
-
-        for await (const resource of srcFiles) {
-            const original = await resource.text();
-            await replacer.processToString(original, {
-                resource,
-                contentState: "unmodified",
-            }, { events: emitter });
-        }
-
-        return modified;
-    };
-
-    const materialize = async () => {
-        for await (const resource of srcFiles) {
-            const original = await resource.text();
-            const result = await replacer.processToString(original, {
-                resource,
-                contentState: "unmodified",
-            });
-            if (result.changed && result.after != result.before) {
-                await resource.writeText(result.after);
-                console.info("Materialized", resource.absFsPath);
-            }
-        }
-    };
-
-    return { dryRun, materialize };
+    return { directive, command, replacer, lcdParsers, lcdDefaultParser };
 }

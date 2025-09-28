@@ -5,6 +5,7 @@ import {
 } from "../universal/content/code-comments.ts";
 import { LanguageSpec } from "../universal/content/code.ts";
 import { eventBus, EventMap } from "../universal/event-bus.ts";
+import { includeDirective } from "./directives.ts";
 import {
     executables,
     FsFileResource,
@@ -16,9 +17,11 @@ import {
     isTextSupplier,
     Resource,
     ResourceSupplier,
+    SrcCodeLangSpecSupplier,
+    TextProducer,
+    TextSupplier,
     zodParsedResourceAnns,
 } from "./resource.ts";
-import { directives as directivesHandlers } from "./directives.ts";
 
 export interface DiagnosticEvents<R extends Resource> extends EventMap {
     resourceAnnsIssue: {
@@ -213,7 +216,7 @@ export class Engine<R extends Resource> {
         }
     }
 
-    async supply() {
+    async emitResources() {
         for await (const supplier of this.#suppliers) {
             for await (
                 const resource of supplier({ signal: this.#suppliersSignal })
@@ -355,6 +358,43 @@ export class Engine<R extends Resource> {
         return result;
     }
 
+    async materializeDirectives(
+        srcFiles: Iterable<
+            & TextSupplier
+            & SrcCodeLangSpecSupplier
+            & { absFsPath: string }
+            & TextProducer
+        >,
+        args?: { readonly dryRun?: boolean },
+    ) {
+        type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
+        type SourceFile = {
+            resource: ElementOfIterable<typeof srcFiles>;
+            contentState: "unmodified" | "modified";
+        };
+        const { replacer } = includeDirective<SourceFile>();
+
+        for await (const resource of srcFiles) {
+            const original = await resource.text();
+            const result = await replacer.processToString(original, {
+                resource,
+                contentState: "unmodified",
+            });
+            if (
+                !args?.dryRun &&
+                (result.changed && result.after != result.before)
+            ) {
+                await resource.writeText(result.after);
+                console.info("Materialized", resource.absFsPath);
+            }
+            // deBus.emit.include({
+            //     resource,
+            //     directive: incDirective,
+            //     result,
+            // });
+        }
+    }
+
     async materializeFoundries(
         candidates: Iterable<FsFileResource>,
         args?: { readonly dryRun?: boolean },
@@ -382,8 +422,7 @@ export class Engine<R extends Resource> {
     }
 
     async materialize(args?: { readonly dryRun?: boolean }) {
-        const { dryRun = false } = args ?? {};
-
+        // TODO: this seems to have a lot of copy/paste of code?
         // TODO: publish events before/after/etc. stage changes and other works
         // TODO: refine how dryRun works
         // TODO: add linting
@@ -396,13 +435,13 @@ export class Engine<R extends Resource> {
         let workflow = this.#state.nextStep();
         if (workflow?.step === "discovery") {
             // start the resources events bus
-            await this.supply();
+            await this.emitResources();
 
             // directives are able to modify files so let's do that now
-            const dh = directivesHandlers(
+            await this.materializeDirectives(
                 workflow.fcDiscovering.walkedSrcFiles,
+                args,
             );
-            if (!dryRun) await dh.materialize();
 
             // now see which files are executable and materialize them appropriately
             this.materializeFoundries(workflow.fcDiscovering.walkedFiles);
@@ -416,13 +455,13 @@ export class Engine<R extends Resource> {
         workflow = this.#state.nextStep();
         if (workflow?.step === "materialization") {
             // restart the resources events bus
-            await this.supply();
+            await this.emitResources();
 
             // directives are able to modify files so let's do that now
-            const dh = directivesHandlers(
+            await this.materializeDirectives(
                 workflow.fcMaterializing.walkedSrcFiles,
+                args,
             );
-            if (!dryRun) await dh.materialize();
 
             // now see which files are executable and materialize them appropriately
             this.materializeFoundries(workflow.fcMaterializing.walkedFiles);
