@@ -1,28 +1,111 @@
 /**
- * # event-bus.ts
+ * event-bus.ts
  *
- * A **type-safe EventBus** built on top of `EventTarget` and `CustomEvent`.
+ * A tiny, type-safe event bus utility built on top of the native EventTarget
+ * and CustomEvent APIs. It hides DOM classes from everyday usage so junior
+ * developers only see a simple API, but internally it delegates to the browser
+ * standard semantics that senior developers will recognize.
  *
- * ## Purpose
+ * Purpose:
+ * - Provide a safe, ergonomic way to publish and subscribe to events in Deno or
+ *   other TypeScript runtimes without exposing EventTarget or CustomEvent.
+ * - Give juniors familiar patterns like `on`, `once`, `off`, and `emit` with
+ *   both string-style (`bus.on("tick", ...)`) and property-style
+ *   (`bus.on.tick(...)`) APIs.
+ * - Give seniors confidence that this is not a reinvention of event systems,
+ *   just a typed convenience wrapper.
  *
- * - **For juniors:** provide a simple, strongly typed API (`on`, `once`, `off`, `emit`)
- *   without exposing `EventTarget` or `CustomEvent`.
- * - **For seniors:** no reinvention — all functionality delegates directly
- *   to `EventTarget` and `CustomEvent`, ensuring familiar, predictable semantics.
+ * Capabilities:
+ * - Typed event maps: developers define an interface mapping event names to
+ *   their payloads. Example: `{ tick: number; ready: void; user: { id: string } }`.
+ * - Two API styles:
+ *   • String-style: `bus.on("tick", handler)` and `bus.emit("tick", 42)`.
+ *   • Property-style: `bus.on.tick(handler)` and `bus.emit.tick(42)`.
+ * - Core operations: `on`, `once`, `off`, `emit`.
+ * - Helpers for better DX: `listenerCount`, `hasListener`,
+ *   `removeAllListeners`.
+ * - Promise helpers: `waitFor("event")` resolves with the next payload,
+ *   `timeoutWaitFor("event", ms)` rejects if timeout expires first.
+ * - Catch-all listener: `bus.all((type, detail) => { ... })`.
+ * - Introspection: `eventNames()` lists events with listeners,
+ *   `rawListeners("event")` returns attached handlers,
+ *   `debugListeners()` shows counts per event.
+ * - Async emission modes:
+ *   • `emitParallel("event", payload)` runs listeners concurrently.
+ *   • `emitSerial("event", payload)` runs listeners sequentially in order.
+ *   • `emitSafe("event", payload)` runs all listeners and collects errors
+ *     without throwing.
+ * - Controls: `mute("event")` disables a single event, `unmute("event")` re-enables,
+ *   `suspend()` pauses all events globally, `resume()` resumes them.
+ * - Disposer return values: calling the function returned by `on` or `once`
+ *   unsubscribes that specific listener.
  *
- * ## Features
+ * Usage example:
+ * ```ts
+ * interface AppEvents {
+ *   ready: void;
+ *   tick: number;
+ *   user: { id: string; name: string };
+ * }
  *
- * - Two styles of API:
- *   - **String-style:** `bus.on("tick", handler)` / `bus.emit("tick", 42)`
- *   - **Property-style:** `bus.on.tick(handler)` / `bus.emit.tick(42)`
- * - Typed payloads (`detail`) for each event.
- * - Utilities for developer ergonomics:
- *   - `listenerCount`, `hasListener`, `removeAllListeners`
- *   - `waitFor`, `timeoutWaitFor`
- *   - `all` (catch-all listener), `eventNames`, `rawListeners`
- *   - `emitParallel`, `emitSerial`, `emitSafe`
- *   - `mute` / `unmute` (per-event), `suspend` / `resume` (global)
- *   - `debugListeners` (introspection)
+ * const bus = eventBus<AppEvents>();
+ * bus.on.ready(() => console.log("Ready!"));
+ * bus.emit.tick(42);
+ * const user = await bus.waitFor("user");
+ * ```
+ *
+ * Notes for humans and AI:
+ * - Do not invent new semantics; this module strictly layers on top of
+ *   EventTarget and CustomEvent.
+ * - Focus is on type safety, developer ergonomics, and ease of learning.
+ * - Implementation is minimal; most complexity is in type definitions and
+ *   Proxy-based property access.
+ */
+
+/**
+ * EventMap
+ *
+ * The central type definition that applications use to describe their event
+ * contracts. An EventMap is an interface where each key is the name of an event
+ * and the value is the type of the `detail` payload carried by that event.
+ *
+ * How it works:
+ * - Keys must be strings (the event names).
+ * - Values define the payload type for the event:
+ *   • If the type is `void`, the event carries no payload and `emit` requires
+ *     no arguments.
+ *   • If the type is any other type, that is the payload type passed to
+ *     listeners and required when emitting.
+ *
+ * Why it matters:
+ * - This is the main entry point for applications using the event bus.
+ * - By defining a custom interface that extends `EventMap`, developers declare
+ *   all possible events and their associated payloads in one place.
+ * - The event bus then uses this interface to enforce type safety for
+ *   subscribing, emitting, and handling events.
+ *
+ * Example:
+ * ```ts
+ * // Define the application’s events by extending EventMap.
+ * interface AppEvents extends EventMap {
+ *   ready: void; // no payload
+ *   tick: number; // payload is a number
+ *   user: { id: string; name: string }; // complex payload
+ * }
+ *
+ * // Create the bus typed to the AppEvents map.
+ * const bus = eventBus<AppEvents>();
+ *
+ * // Subscribe to events with full type safety.
+ * bus.on.ready(() => console.log("ready!"));
+ * bus.on.tick((n) => console.log("tick", n.toFixed(2)));
+ * bus.on.user((u) => console.log("user", u.id));
+ *
+ * // Emit events with correctly typed payloads.
+ * bus.emit.ready();
+ * bus.emit.tick(42);
+ * bus.emit.user({ id: "u1", name: "Alice" });
+ * ```
  */
 export interface EventMap {
   [event: string]: unknown | void;
@@ -34,6 +117,78 @@ export type EventBusListener<M extends EventMap, K extends keyof M> =
 
 export type EventBusDisposer = () => void;
 
+/**
+ * EventBusStringly<M>
+ *
+ * The core event bus interface that provides a **string-based API** for
+ * subscribing, unsubscribing, and emitting events. It is called *stringly*
+ * because all operations reference events by string keys, e.g.
+ * `bus.on("tick", handler)` and `bus.emit("user", payload)`.
+ *
+ * Why "stringly":
+ * - Event names are provided as strings rather than properties.
+ * - This style is familiar to developers coming from Node.js EventEmitter,
+ *   browser addEventListener, or other event systems that use string event
+ *   names.
+ * - TypeScript still enforces correctness: event names must be valid keys of
+ *   the `EventMap` type `M`, and payload types are checked against the event
+ *   definition.
+ *
+ * Companion factory: `eventBusStringly<M>()`
+ * - Applications should not construct this interface manually.
+ * - Use the `eventBusStringly` factory function to create a bus instance typed
+ *   to your `EventMap`.
+ * - The returned object implements this interface and provides all the methods
+ *   described below.
+ *
+ * Main methods:
+ * - `on("event", listener)` subscribe
+ * - `once("event", listener)` subscribe once
+ * - `off("event", listener)` unsubscribe
+ * - `emit("event", payload?)` publish
+ * - Helpers: `listenerCount`, `hasListener`, `removeAllListeners`,
+ *   `waitFor`, `timeoutWaitFor`
+ * - Advanced: `all`, `eventNames`, `rawListeners`,
+ *   `emitParallel`, `emitSerial`, `emitSafe`
+ * - Controls: `mute`, `unmute`, `suspend`, `resume`
+ * - Diagnostics: `debugListeners`
+ *
+ * Example usage:
+ * ```ts
+ * // Define event map
+ * interface AppEvents extends EventMap {
+ *   ready: void;
+ *   tick: number;
+ *   user: { id: string; name: string };
+ * }
+ *
+ * // Create stringly bus
+ * const bus = eventBusStringly<AppEvents>();
+ *
+ * // Subscribe using string keys
+ * bus.on("tick", (n) => console.log("tick", n));
+ * bus.on("user", (u) => console.log("user", u.name));
+ *
+ * // Emit events
+ * bus.emit("tick", 42);
+ * bus.emit("user", { id: "u1", name: "Alice" });
+ *
+ * // Unsubscribe
+ * const off = bus.on("ready", () => console.log("ready"));
+ * off(); // removes listener
+ *
+ * // Wait for the next event
+ * const user = await bus.waitFor("user");
+ * console.log("waitFor resolved with", user.id);
+ * ```
+ *
+ * When to use:
+ * - Prefer `EventBusStringly` when you want a familiar, Node.js-like API that
+ *   uses string event names.
+ * - If you want property-style autocomplete (`bus.on.tick`), use the
+ *   higher-level `eventBus<M>()` wrapper instead, which internally builds on
+ *   this interface.
+ */
 export interface EventBusStringly<M extends EventMap> {
   readonly on: <K extends keyof M>(
     type: K,
@@ -100,6 +255,73 @@ export interface EventBusStringly<M extends EventMap> {
   readonly target: EventTarget;
 }
 
+/**
+ * EventBus<M>
+ *
+ * The higher-level event bus interface that extends `EventBusStringly<M>` and
+ * adds a **property-style API** for subscribing, unsubscribing, and emitting.
+ *
+ * Why it exists:
+ * - While `EventBusStringly` provides string-based methods like
+ *   `bus.on("tick", handler)`, this interface enhances the developer experience
+ *   by exposing strongly typed properties like `bus.on.tick(handler)`.
+ * - Property access gives **editor autocomplete** for event names, reducing
+ *   typos and making it easier for juniors to discover available events.
+ * - It is purely a **convenience layer**: the implementation delegates all
+ *   logic to the underlying `EventBusStringly` while adding `Proxy` wrappers to
+ *   support property-style usage.
+ *
+ * Companion factory: `eventBus<M>()`
+ * - Applications should not construct this interface directly.
+ * - Use the `eventBus` factory function to create a typed bus instance.
+ * - The returned bus supports **both styles**:
+ *   • String-style: `bus.on("tick", ...)`
+ *   • Property-style: `bus.on.tick(...)`
+ *
+ * Main methods:
+ * - `on.eventName(listener)` or `on("eventName", listener)`
+ * - `once.eventName(listener)` or `once("eventName", listener)`
+ * - `off.eventName(listener)` or `off("eventName", listener)`
+ * - `emit.eventName(payload?)` or `emit("eventName", payload?)`
+ * - Inherits all helpers from `EventBusStringly`:
+ *   `listenerCount`, `hasListener`, `removeAllListeners`, `waitFor`,
+ *   `timeoutWaitFor`, `all`, `eventNames`, `rawListeners`,
+ *   `emitParallel`, `emitSerial`, `emitSafe`, `mute`, `unmute`,
+ *   `suspend`, `resume`, `debugListeners`
+ *
+ * Example usage:
+ * ```ts
+ * // Define event map
+ * interface AppEvents extends EventMap {
+ *   ready: void;
+ *   tick: number;
+ *   user: { id: string; name: string };
+ * }
+ *
+ * // Create property-style bus
+ * const bus = eventBus<AppEvents>();
+ *
+ * // Property-style subscriptions
+ * bus.on.ready(() => console.log("Ready!"));
+ * bus.on.tick((n) => console.log("Tick", n));
+ * bus.on.user((u) => console.log("User", u.name));
+ *
+ * // Property-style emits
+ * bus.emit.ready();
+ * bus.emit.tick(42);
+ * bus.emit.user({ id: "u1", name: "Alice" });
+ *
+ * // Equivalent string-style calls also work
+ * bus.on("tick", (n) => console.log("tick again", n));
+ * bus.emit("tick", 99);
+ * ```
+ *
+ * When to use:
+ * - Prefer `EventBus` when you want **maximum type safety and autocomplete**,
+ *   especially for junior developers.
+ * - It builds on `EventBusStringly`, so you can always fall back to string
+ *   style if you need dynamic event names.
+ */
 export interface EventBus<M extends EventMap> extends EventBusStringly<M> {
   readonly on:
     & EventBusStringly<M>["on"]
