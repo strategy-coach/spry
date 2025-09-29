@@ -9,8 +9,8 @@ import {
     red,
     yellow,
 } from "jsr:@std/fmt@1/colors";
-import { join, relative } from "jsr:@std/path@1";
-import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
+import { basename, join, relative } from "jsr:@std/path@1";
+import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
 import { Engine } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
@@ -26,8 +26,44 @@ export type LsCommandRow = {
     };
     nature: Resource["nature"] | `${Resource["nature"]}:${Resource["nature"]}`;
     path: string;
+    name: string;
     issue: string;
 };
+
+/**
+ * Ensure all ancestor directories exist as rows.
+ * - items: your existing rows (any shape)
+ * - pathOf: how to extract a path string from a row
+ * - makeRow: how to create a row for a missing directory, given its path
+ * - isFile (optional): how to decide if a path is a file; defaults to "last segment contains a dot"
+ */
+export function upsertMissingAncestors<T>(
+    items: T[],
+    pathOf: (item: T) => string,
+    makeRow: (dirPath: string) => T,
+    isFile: (path: string) => boolean = (p) => {
+        const segs = p.split("/").filter(Boolean);
+        return segs.length > 0 && segs[segs.length - 1].includes(".");
+    },
+): T[] {
+    const seen = new Set(items.map(pathOf));
+    const out = [...items];
+
+    for (const item of items) {
+        const p = pathOf(item);
+        const segs = p.split("/").filter(Boolean);
+        const max = isFile(p) ? segs.length - 1 : segs.length;
+
+        for (let i = 1; i <= max; i++) {
+            const dirPath = segs.slice(0, i).join("/");
+            if (!seen.has(dirPath)) {
+                out.push(makeRow(dirPath));
+                seen.add(dirPath);
+            }
+        }
+    }
+    return out;
+}
 
 export class CLI {
     constructor(readonly engine: Engine<Resource>) {
@@ -87,7 +123,7 @@ export class CLI {
         return { spryStd, sqlPage, created, removed, linked };
     }
 
-    lsWorkflowStepField<Row extends LsCommandRow>():
+    lsWorkflowStepsField<Row extends LsCommandRow>():
         | Partial<ColumnDef<Row, Row["step"]>>
         | undefined {
         return {
@@ -149,6 +185,20 @@ export class CLI {
         };
     }
 
+    // deno-lint-ignore no-explicit-any
+    lsColorNameField(): Partial<ColumnDef<any, string>> {
+        return {
+            header: "Name",
+            rules: [{
+                when: (_v, r) => (r.error?.trim().length ?? 0) > 0,
+                color: red,
+            }, {
+                when: (_v, r) => (r.nature === "foundry"),
+                color: brightYellow,
+            }],
+        };
+    }
+
     lsNaturePathField<Row extends LsCommandRow>(): Partial<
         ColumnDef<Row, string>
     > {
@@ -187,6 +237,7 @@ export class CLI {
                     },
                     nature: (n ?? "unknown") as LsCommandRow["nature"],
                     path,
+                    name: basename(path),
                     issue: "",
                 }),
                     rows.get(path)!);
@@ -238,28 +289,79 @@ export class CLI {
 
     async ls(opts: {
         dbName: string;
-        all?: true | undefined;
+        known?: true | undefined;
         long?: true | undefined;
-        routesTree?: true | undefined;
+        tree?: true | undefined;
+        routes?: true | undefined;
     }) {
         const summary = this.summaryHooks(this.engine);
         await this.engine.materialize({ dryRun: true });
-        const list = opts?.all
-            ? summary.toList()
-            : summary.toList().filter((r) =>
-                r.nature === "unknown" ? false : true
+        let list = summary.toList();
+        if (opts?.known) {
+            list = list.filter((r) => r.nature === "unknown" ? false : true);
+        }
+        if (opts?.routes) {
+            list = list.filter((r) => r.impact.isRoutable);
+        }
+
+        if (opts.tree) {
+            list = upsertMissingAncestors<LsCommandRow>(
+                list.map((r) => ({
+                    ...r,
+                    path: relative(Deno.cwd(), r.path),
+                })),
+                (r) => r.path,
+                (path) => ({
+                    path,
+                    name: basename(path),
+                    impact: {
+                        autoMaterialize: false,
+                        directives: 0,
+                        foundry: false,
+                        isRoutable: false,
+                    },
+                    issue: "",
+                    // deno-lint-ignore no-explicit-any
+                    nature: "" as any,
+                    step: { discovery: true, materialize: true },
+                }),
             );
-        await new ListerBuilder<LsCommandRow>()
-            .declareColumns("step", "impact", "nature", "path", "issue")
-            .from(list)
-            .field("step", "step", this.lsWorkflowStepField())
-            .field("nature", "nature", this.lsNatureField())
-            .field("path", "path", this.lsNaturePathField())
-            .field("impact", "impact", this.lsImpactField())
-            .field("issue", "issue", this.lsLintField())
-            .sortBy("path").sortDir("asc")
-            .build()
-            .ls(true);
+
+            const base = new ListerBuilder<LsCommandRow>()
+                .declareColumns(
+                    "name",
+                    "step",
+                    "impact",
+                    "nature",
+                    "path",
+                    "issue",
+                )
+                .from(list)
+                .field("name", "name", this.lsColorNameField())
+                .field("step", "step", this.lsWorkflowStepsField())
+                .field("nature", "nature", this.lsNatureField())
+                .field("impact", "impact", this.lsImpactField())
+                // IMPORTANT: make the tree column first so glyphs appear next to it
+                .select("name", "nature", "impact", "step");
+            const tree = TreeLister
+                .wrap(base)
+                .from(list)
+                .byPath({ pathKey: "path", separator: "/" })
+                .treeOn("name");
+            await tree.ls(true);
+        } else {
+            await new ListerBuilder<LsCommandRow>()
+                .declareColumns("step", "impact", "nature", "path", "issue")
+                .from(list)
+                .field("path", "path", this.lsNaturePathField())
+                .field("step", "step", this.lsWorkflowStepsField())
+                .field("nature", "nature", this.lsNatureField())
+                .field("impact", "impact", this.lsImpactField())
+                .field("issue", "issue", this.lsLintField())
+                .sortBy("path").sortDir("asc")
+                .build()
+                .ls(true);
+        }
     }
 
     async lsRoutes(opts?: { json?: boolean }) {
@@ -330,13 +432,11 @@ export class CLI {
             .command("ls", "List files consumed or impacted during the build.")
             .option("-k, --known", "Show only known resources, hide 'unknown'")
             .option("-l, --long", "Longer listing")
-            .option("-t, --routes-tree", "Simple tree of annotated routes")
-            .action(async (opts) => {
-                if (opts.routesTree) {
-                    await this.lsRoutes();
-                } else {
-                    await this.ls(opts);
-                }
-            });
+            .option("-t, --tree", "Simple tree of annotated routes")
+            .option(
+                "-r, --routes",
+                "Show only resources which have @route annotations",
+            )
+            .action(async (opts) => await this.ls(opts));
     }
 }
