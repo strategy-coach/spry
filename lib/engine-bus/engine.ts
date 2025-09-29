@@ -82,6 +82,7 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         env: Record<string, string>;
         cwd: string;
         matAbsFsPath: false | string;
+        isCleanable: boolean;
         error?: unknown;
         dryRun?: boolean;
     };
@@ -201,6 +202,64 @@ export class EngineState {
                 throw new Error(`Invalid state`);
         }
     }
+}
+
+// TODO: remove console.log in favor of EventBus
+export function cleaner() {
+    const rmDirIfEmpty = async (path: string) => {
+        try {
+            if ((await Array.fromAsync(Deno.readDir(path))).length === 0) {
+                await Deno.remove(path);
+            }
+            console.log("removed empty directory", path);
+        } catch (error) {
+            if (error instanceof Deno.errors.NotFound) { /**ignore */ }
+        }
+    };
+
+    const rmDirRecursive = async (path: string) => {
+        try {
+            await Deno.remove(path, { recursive: true });
+            console.log("removed directory recursively", path);
+        } catch (error) {
+            if (error instanceof Deno.errors.NotFound) { /**ignore */ }
+        }
+    };
+
+    const clean = async (engine: Engine<Resource>) => {
+        // we "own" the "spry.d/auto" directory so remove it
+        await rmDirRecursive(engine.paths.spryDropIn.fsAuto);
+
+        engine.resourceBus.on.materializedFoundry(async (ev) => {
+            if (ev.matAbsFsPath) {
+                if (ev.isCleanable) {
+                    try {
+                        await Deno.remove(ev.matAbsFsPath);
+                        console.log("removed", ev.matAbsFsPath);
+                    } catch (error) {
+                        if (error instanceof Deno.errors.NotFound) return;
+                        console.info(
+                            "Error cleaning isCleanable auto-materialized foundry",
+                            ev.matAbsFsPath,
+                        );
+                        console.info(ev.matAbsFsPath);
+                        console.error(error);
+                    }
+                } else {
+                    console.log("not cleanable:", ev.matAbsFsPath);
+                }
+            }
+        });
+
+        // run workflow in dryRun to catalog the resources which will call
+        // resourceBus.on.materializedFoundry
+        await engine.materialize({ dryRun: true });
+
+        // if `auto` was the only directory in `spry.d`, remove that too
+        await rmDirIfEmpty(engine.paths.spryDropIn.fsHome);
+    };
+
+    return { rmDirIfEmpty, rmDirRecursive, clean };
 }
 
 export interface EngineBusesInit<R extends Resource> {
@@ -542,6 +601,7 @@ export class Engine<R extends Resource> {
                         cwd,
                         dryRun: args?.dryRun,
                         error,
+                        isCleanable: wf.isCleanable ? true : false,
                     });
                 }
             }

@@ -11,7 +11,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { basename, join, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { Engine } from "./engine.ts";
+import { cleaner, Engine } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
@@ -417,7 +417,8 @@ export class CLI {
             .command("clean")
             .description("Clean auto-generated directories or files")
             .action(async () => {
-                // TODO
+                const task = cleaner();
+                await task.clean(this.engine);
             })
             .command("build")
             .description(
