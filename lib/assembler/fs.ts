@@ -1,4 +1,3 @@
-// core-fs.ts
 import { walk, type WalkEntry, type WalkOptions } from "jsr:@std/fs@1/walk";
 import { basename, dirname, extname, join, relative } from "jsr:@std/path@1";
 import { detectLanguageByPath } from "../universal/content/code.ts";

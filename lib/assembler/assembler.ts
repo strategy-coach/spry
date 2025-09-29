@@ -4,7 +4,7 @@ import {
     extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
 import { LanguageSpec } from "../universal/content/code.ts";
-import { eventBus, EventMap } from "../universal/event-bus.ts";
+import { eventBus } from "../universal/event-bus.ts";
 import { includeDirective } from "./directives.ts";
 import {
     executables,
@@ -25,7 +25,7 @@ import {
 } from "./resource.ts";
 import { Route } from "./route.ts";
 
-export interface DiagnosticEvents<R extends Resource> extends EventMap {
+export type DiagnosticEvents<R extends Resource> = {
     resourceAnnsIssue: {
         assemblerState: AssemblerState;
         resource: R;
@@ -42,9 +42,9 @@ export interface DiagnosticEvents<R extends Resource> extends EventMap {
         srcCodeLanguage?: LanguageSpec;
         routeParseResult: ReturnType<typeof Route.zodParsedAnnsCatalog>;
     };
-}
+};
 
-export interface ResourceEvents<R extends Resource> extends EventMap {
+export type ResourceEvents<R extends Resource> = {
     resource: {
         assemblerState: AssemblerState;
         resource: R;
@@ -90,7 +90,7 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         current: WorkflowStep;
         previous: WorkflowStep;
     };
-}
+};
 
 export type WorkflowStep =
     | { readonly step: "init" }
@@ -146,8 +146,7 @@ export class AssemblerState {
     }
 
     nextStep(
-        // deno-lint-ignore no-explicit-any
-        resourceBus: ReturnType<typeof eventBus<ResourceEvents<any>>>,
+        resourceBus: ReturnType<typeof eventBus<ResourceEvents<Resource>>>,
     ) {
         const previous = this.#workflow;
         switch (this.#workflow.step) {
@@ -158,7 +157,7 @@ export class AssemblerState {
                     discovering: fcDiscovering,
                     discovered: async (ev) => await fcDiscovering.register(ev),
                 };
-                resourceBus.emit.assemblerStateChange({
+                resourceBus.emit("assemblerStateChange", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -175,7 +174,7 @@ export class AssemblerState {
                     materialized: async (ev) =>
                         await materializing.register(ev),
                 };
-                resourceBus.emit.assemblerStateChange({
+                resourceBus.emit("assemblerStateChange", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -189,7 +188,7 @@ export class AssemblerState {
                     discovered: this.#workflow.discovered,
                     materialized: this.#workflow.materializing,
                 };
-                resourceBus.emit.assemblerStateChange({
+                resourceBus.emit("assemblerStateChange", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -244,7 +243,7 @@ export function cleaner(
             }
         }
 
-        assembler.resourceBus.on.materializedFoundry(async (ev) => {
+        assembler.resourceBus.on("materializedFoundry", async (ev) => {
             if (ev.matAbsFsPath) {
                 if (ev.isCleanable) {
                     try {
@@ -293,10 +292,10 @@ export function assemblerBusesInit<R extends Resource>(
     const resources = eventBus<ResourceEvents<R>>();
     const diagnostics = eventBus<DiagnosticEvents<R>>();
 
-    resources.on.resource((ev) => {
+    resources.on("resource", (ev) => {
         if (ev.annsCatalog) {
             if (ev.resAnnsParseResult?.error) {
-                diagnostics.emit.resourceAnnsIssue({
+                diagnostics.emit("resourceAnnsIssue", {
                     resource: ev.resource,
                     annsParseResult: ev.resAnnsParseResult,
                     assemblerState: ev.assemblerState,
@@ -313,14 +312,14 @@ export function assemblerBusesInit<R extends Resource>(
                     // this adds resource.route so isRouteSupplier will be true
                     const route = new Route(safeParse.data, ev.annsCatalog);
                     route.mutateAsRouteSupplier(ev.resource);
-                    resources.emit.resourceMutated({
+                    resources.emit("resourceMutated", {
                         assemblerState: ev.assemblerState,
                         resource: ev.resource,
                         reason: "Route detected",
                     });
                 } else {
                     if (ev.resAnnsParseResult?.error) {
-                        diagnostics.emit.routeAnnsIssue({
+                        diagnostics.emit("routeAnnsIssue", {
                             resource: ev.resource,
                             routeParseResult: safeParse,
                             assemblerState: ev.assemblerState,
@@ -416,7 +415,7 @@ export class Assembler<R extends Resource> {
                         : undefined;
                 }
 
-                this.assemblerBuses.resources.emit.resource({
+                this.assemblerBuses.resources.emit("resource", {
                     assemblerState: this.#state,
                     resource: { ...resource, ...resAnn },
                     supplier,
@@ -520,7 +519,7 @@ export class Assembler<R extends Resource> {
                 await resource.writeText(result.after);
                 written = true;
             }
-            this.resourceBus.emit.materializedInclude({
+            this.resourceBus.emit("materializedInclude", {
                 assemblerState: this.#state,
                 resource: resource as R & ElementOfIterable<typeof srcFiles>,
                 replacerResult: result,
@@ -561,7 +560,7 @@ export class Assembler<R extends Resource> {
                         cwd,
                         dryRun: args?.dryRun,
                     }, (err) => error = err);
-                    this.resourceBus.emit.materializedFoundry({
+                    this.resourceBus.emit("materializedFoundry", {
                         assemblerState: this.#state,
                         resource: wf,
                         cmd: wf.absFsPath,
