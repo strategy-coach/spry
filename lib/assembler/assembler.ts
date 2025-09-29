@@ -25,8 +25,8 @@ import {
 } from "./resource.ts";
 import { Route } from "./route.ts";
 
-export type DiagnosticEvents<R extends Resource> = {
-    resourceAnnsIssue: {
+export type ResourceEvents<R extends Resource> = {
+    "diag:issue:annotations:resource": {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
@@ -34,7 +34,7 @@ export type DiagnosticEvents<R extends Resource> = {
         srcCodeLanguage?: LanguageSpec;
         annsParseResult: ReturnType<typeof zodParsedResourceAnns>;
     };
-    routeAnnsIssue: {
+    "diag:issue:annotations:route": {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
@@ -42,9 +42,6 @@ export type DiagnosticEvents<R extends Resource> = {
         srcCodeLanguage?: LanguageSpec;
         routeParseResult: ReturnType<typeof Route.zodParsedAnnsCatalog>;
     };
-};
-
-export type ResourceEvents<R extends Resource> = {
     resource: {
         assemblerState: AssemblerState;
         resource: R;
@@ -283,19 +280,17 @@ export function cleaner(
 
 export interface AssemblerBusesInit<R extends Resource> {
     resources: ReturnType<typeof eventBus<ResourceEvents<R>>>;
-    diagnostics: ReturnType<typeof eventBus<DiagnosticEvents<R>>>;
 }
 
 export function assemblerBusesInit<R extends Resource>(
     defaults?: Partial<AssemblerBusesInit<R>>,
 ): AssemblerBusesInit<R> {
     const resources = eventBus<ResourceEvents<R>>();
-    const diagnostics = eventBus<DiagnosticEvents<R>>();
 
     resources.on("resource", (ev) => {
         if (ev.annsCatalog) {
             if (ev.resAnnsParseResult?.error) {
-                diagnostics.emit("resourceAnnsIssue", {
+                resources.emit("diag:issue:annotations:resource", {
                     resource: ev.resource,
                     annsParseResult: ev.resAnnsParseResult,
                     assemblerState: ev.assemblerState,
@@ -319,7 +314,7 @@ export function assemblerBusesInit<R extends Resource>(
                     });
                 } else {
                     if (ev.resAnnsParseResult?.error) {
-                        diagnostics.emit("routeAnnsIssue", {
+                        resources.emit("diag:issue:annotations:route", {
                             resource: ev.resource,
                             routeParseResult: safeParse,
                             assemblerState: ev.assemblerState,
@@ -346,7 +341,7 @@ export function assemblerBusesInit<R extends Resource>(
         }
     });
 
-    return { ...defaults, resources, diagnostics };
+    return { ...defaults, resources };
 }
 
 export class Assembler<R extends Resource> {
