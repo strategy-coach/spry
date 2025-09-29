@@ -14,7 +14,7 @@ import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
 import { Engine } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
-import { isRouteSupplier } from "./route.ts";
+import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
 
 export type LsCommandRow = {
     step: { discovery: boolean; materialize: boolean };
@@ -236,12 +236,22 @@ export class CLI {
         };
     }
 
-    async ls() {
+    async ls(opts: {
+        dbName: string;
+        all?: true | undefined;
+        long?: true | undefined;
+        routesTree?: true | undefined;
+    }) {
         const summary = this.summaryHooks(this.engine);
         await this.engine.materialize({ dryRun: true });
+        const list = opts?.all
+            ? summary.toList()
+            : summary.toList().filter((r) =>
+                r.nature === "unknown" ? false : true
+            );
         await new ListerBuilder<LsCommandRow>()
             .declareColumns("step", "impact", "nature", "path", "issue")
-            .from(summary.toList())
+            .from(list)
             .field("step", "step", this.lsWorkflowStepField())
             .field("nature", "nature", this.lsNatureField())
             .field("path", "path", this.lsNaturePathField())
@@ -250,6 +260,33 @@ export class CLI {
             .sortBy("path").sortDir("asc")
             .build()
             .ls(true);
+    }
+
+    async lsRoutes(opts?: { json?: boolean }) {
+        this.engine.resourceBus.on.engineStateChange(async (ev) => {
+            if (ev.current.step === "final") {
+                const routes = new Routes(
+                    ev.current.materialized.resources.filter(isRouteSupplier)
+                        .map((rs) =>
+                            isRouteSupplier(rs)
+                                ? rs.route.annotated
+                                : {} as AnnotatedRoute
+                        ),
+                );
+                const { serializers } = await routes.populate();
+                if (opts?.json) {
+                    console.log(serializers.jsonText({ space: 2 }));
+                } else {
+                    console.log(
+                        serializers.asciiTreeText({
+                            showPath: true,
+                            includeCounts: true,
+                        }),
+                    );
+                }
+            }
+        });
+        await this.engine.materialize({ dryRun: true });
     }
 
     cli(init?: { name?: string }) {
@@ -291,11 +328,15 @@ export class CLI {
             })
             .command("help", new HelpCommand().global())
             .command("ls", "List files consumed or impacted during the build.")
-            .option("-l, --long", "Longer listing", {
-                default: false,
-            })
-            .action(async () => {
-                await this.ls();
+            .option("-k, --known", "Show only known resources, hide 'unknown'")
+            .option("-l, --long", "Longer listing")
+            .option("-t, --routes-tree", "Simple tree of annotated routes")
+            .action(async (opts) => {
+                if (opts.routesTree) {
+                    await this.lsRoutes();
+                } else {
+                    await this.ls(opts);
+                }
             });
     }
 }

@@ -85,6 +85,11 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         error?: unknown;
         dryRun?: boolean;
     };
+    engineStateChange: {
+        engineState: EngineState;
+        current: WorkflowStep;
+        previous: WorkflowStep;
+    };
 }
 
 export type WorkflowStep =
@@ -104,10 +109,6 @@ export type WorkflowStep =
         readonly step: "final";
         readonly discovered: ResourcesCollection<Resource>;
         readonly materialized: ResourcesCollection<Resource>;
-        readonly summarize: (
-            discovered: ResourcesCollection<Resource>,
-            materialized: ResourcesCollection<Resource>,
-        ) => Promise<void>;
     };
 
 export class EngineState {
@@ -144,7 +145,11 @@ export class EngineState {
         } satisfies ResourcesCollection<R>;
     }
 
-    nextStep() {
+    nextStep(
+        // deno-lint-ignore no-explicit-any
+        resourceBus: ReturnType<typeof eventBus<ResourceEvents<any>>>,
+    ) {
+        const previous = this.#workflow;
         switch (this.#workflow.step) {
             case "init": {
                 const fcDiscovering = this.createCollection<Resource>();
@@ -153,6 +158,11 @@ export class EngineState {
                     discovering: fcDiscovering,
                     discovered: async (ev) => await fcDiscovering.register(ev),
                 };
+                resourceBus.emit.engineStateChange({
+                    engineState: this,
+                    current: this.#workflow,
+                    previous,
+                });
                 return this.#workflow;
             }
 
@@ -165,6 +175,11 @@ export class EngineState {
                     materialized: async (ev) =>
                         await materializing.register(ev),
                 };
+                resourceBus.emit.engineStateChange({
+                    engineState: this,
+                    current: this.#workflow,
+                    previous,
+                });
                 return this.#workflow;
             }
 
@@ -173,8 +188,12 @@ export class EngineState {
                     step: "final",
                     discovered: this.#workflow.discovered,
                     materialized: this.#workflow.materializing,
-                    summarize: async () => {},
                 };
+                resourceBus.emit.engineStateChange({
+                    engineState: this,
+                    current: this.#workflow,
+                    previous,
+                });
                 return this.#workflow;
 
             default:
@@ -540,7 +559,7 @@ export class Engine<R extends Resource> {
         await this.initDefaults();
 
         // we start in "init", then move to next stage
-        let workflow = this.#state.nextStep();
+        let workflow = this.#state.nextStep(this.resourceBus);
         if (workflow?.step === "discovery") {
             // start the resources events bus
             await this.emitResources();
@@ -565,7 +584,7 @@ export class Engine<R extends Resource> {
         // we were in "discovery", now move to next stage
         // get all files again by running the suppliers, the event handlers know the
         // stage and put state information into the right place
-        workflow = this.#state.nextStep();
+        workflow = this.#state.nextStep(this.resourceBus);
         if (workflow?.step === "materialization") {
             // restart the resources events bus
             await this.emitResources();
@@ -586,6 +605,9 @@ export class Engine<R extends Resource> {
         } else {
             console.warn("should be in materialization stage now");
         }
+
+        workflow = this.#state.nextStep(this.resourceBus);
+        console.assert(this.#state.isTerminal(), "Should be in terminal state");
     }
 
     static instance(
