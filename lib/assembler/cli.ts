@@ -11,7 +11,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { basename, join, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { Assembler, cleaner } from "./materialize.ts";
+import { Assembler, cleaner } from "./assembler.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
