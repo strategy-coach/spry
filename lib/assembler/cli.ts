@@ -187,7 +187,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
                     rows.get(path)!);
 
         // resource events → mark step, annotations, reconcile nature
-        assembler.resourceBus.on("resource", (ev) => {
+        assembler.resourceBus.on("resource:encountered", (ev) => {
             if (!isFsFileResource(ev.resource)) return;
             const path = ev.resource.absFsPath;
             const n = ev.resource.nature;
@@ -206,7 +206,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
         });
 
         // "include" events → count directives (only modified fs files)
-        assembler.resourceBus.on("materializedInclude", (ev) => {
+        assembler.resourceBus.on("directive:include:materialized", (ev) => {
             if (
                 ev.contentState !== "modified" || !isFsFileResource(ev.resource)
             ) {
@@ -216,7 +216,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
         });
 
         // foundry events → flags (you keyed by ev.cmd)
-        assembler.resourceBus.on("materializedFoundry", (ev) => {
+        assembler.resourceBus.on("foundry:materialized", (ev) => {
             const r = get(ev.cmd);
             r.impact.foundry = true;
             r.impact.autoMaterialize = !!ev.matAbsFsPath;
@@ -310,7 +310,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
 
     async lsRoutes(opts?: { json?: boolean }) {
         const assembler = this.freshAssembler();
-        assembler.resourceBus.on("assemblerStateChange", async (ev) => {
+        assembler.resourceBus.on("assembler:state:mutated", async (ev) => {
             if (ev.current.step === "final") {
                 const routes = new Routes(
                     ev.current.materialized.resources.filter(isRouteSupplier)

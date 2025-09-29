@@ -42,7 +42,7 @@ export type ResourceEvents<R extends Resource> = {
         srcCodeLanguage?: LanguageSpec;
         routeParseResult: ReturnType<typeof Route.zodParsedAnnsCatalog>;
     };
-    resource: {
+    "resource:encountered": {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
@@ -50,12 +50,12 @@ export type ResourceEvents<R extends Resource> = {
         srcCodeLanguage?: LanguageSpec;
         resAnnsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
     };
-    resourceMutated: {
+    "resource:mutated": {
         assemblerState: AssemblerState;
         resource: R;
         reason: string;
     };
-    materializedInclude: {
+    "directive:include:materialized": {
         assemblerState: AssemblerState;
         resource: R & SrcCodeLangSpecSupplier;
         contentState: "unmodified" | "modified";
@@ -71,7 +71,7 @@ export type ResourceEvents<R extends Resource> = {
         written: boolean;
         dryRun?: boolean;
     };
-    materializedFoundry: {
+    "foundry:materialized": {
         assemblerState: AssemblerState;
         resource: FsFileResource;
         cmd: string;
@@ -82,7 +82,7 @@ export type ResourceEvents<R extends Resource> = {
         error?: unknown;
         dryRun?: boolean;
     };
-    assemblerStateChange: {
+    "assembler:state:mutated": {
         assemblerState: AssemblerState;
         current: WorkflowStep;
         previous: WorkflowStep;
@@ -154,7 +154,7 @@ export class AssemblerState {
                     discovering: fcDiscovering,
                     discovered: async (ev) => await fcDiscovering.register(ev),
                 };
-                resourceBus.emit("assemblerStateChange", {
+                resourceBus.emit("assembler:state:mutated", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -171,7 +171,7 @@ export class AssemblerState {
                     materialized: async (ev) =>
                         await materializing.register(ev),
                 };
-                resourceBus.emit("assemblerStateChange", {
+                resourceBus.emit("assembler:state:mutated", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -185,7 +185,7 @@ export class AssemblerState {
                     discovered: this.#workflow.discovered,
                     materialized: this.#workflow.materializing,
                 };
-                resourceBus.emit("assemblerStateChange", {
+                resourceBus.emit("assembler:state:mutated", {
                     assemblerState: this,
                     current: this.#workflow,
                     previous,
@@ -240,7 +240,7 @@ export function cleaner(
             }
         }
 
-        assembler.resourceBus.on("materializedFoundry", async (ev) => {
+        assembler.resourceBus.on("foundry:materialized", async (ev) => {
             if (ev.matAbsFsPath) {
                 if (ev.isCleanable) {
                     try {
@@ -287,7 +287,7 @@ export function assemblerBusesInit<R extends Resource>(
 ): AssemblerBusesInit<R> {
     const resources = eventBus<ResourceEvents<R>>();
 
-    resources.on("resource", (ev) => {
+    resources.on("resource:encountered", (ev) => {
         if (ev.annsCatalog) {
             if (ev.resAnnsParseResult?.error) {
                 resources.emit("diag:issue:annotations:resource", {
@@ -307,7 +307,7 @@ export function assemblerBusesInit<R extends Resource>(
                     // this adds resource.route so isRouteSupplier will be true
                     const route = new Route(safeParse.data, ev.annsCatalog);
                     route.mutateAsRouteSupplier(ev.resource);
-                    resources.emit("resourceMutated", {
+                    resources.emit("resource:mutated", {
                         assemblerState: ev.assemblerState,
                         resource: ev.resource,
                         reason: "Route detected",
@@ -410,7 +410,7 @@ export class Assembler<R extends Resource> {
                         : undefined;
                 }
 
-                this.assemblerBuses.resources.emit("resource", {
+                this.assemblerBuses.resources.emit("resource:encountered", {
                     assemblerState: this.#state,
                     resource: { ...resource, ...resAnn },
                     supplier,
@@ -514,7 +514,7 @@ export class Assembler<R extends Resource> {
                 await resource.writeText(result.after);
                 written = true;
             }
-            this.resourceBus.emit("materializedInclude", {
+            this.resourceBus.emit("directive:include:materialized", {
                 assemblerState: this.#state,
                 resource: resource as R & ElementOfIterable<typeof srcFiles>,
                 replacerResult: result,
@@ -555,7 +555,7 @@ export class Assembler<R extends Resource> {
                         cwd,
                         dryRun: args?.dryRun,
                     }, (err) => error = err);
-                    this.resourceBus.emit("materializedFoundry", {
+                    this.resourceBus.emit("foundry:materialized", {
                         assemblerState: this.#state,
                         resource: wf,
                         cmd: wf.absFsPath,
