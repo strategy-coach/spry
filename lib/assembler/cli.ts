@@ -64,7 +64,7 @@ export function upsertMissingAncestors<T>(
 }
 
 export class CLI<R extends Resource, A extends Assembler<R>> {
-    constructor(readonly assemblerSupplier: () => A) {
+    constructor(readonly freshAssembler: () => A) {
     }
 
     lsWorkflowStepsField<Row extends LsCommandRow>():
@@ -237,7 +237,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
         tree?: true | undefined;
         routes?: true | undefined;
     }) {
-        const assembler = this.assemblerSupplier();
+        const assembler = this.freshAssembler();
         const summary = this.summaryHooks(assembler);
         await assembler.materialize({ dryRun: true });
         let list = summary.toList();
@@ -309,7 +309,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
     }
 
     async lsRoutes(opts?: { json?: boolean }) {
-        const assembler = this.assemblerSupplier();
+        const assembler = this.freshAssembler();
         assembler.resourceBus.on.assemblerStateChange(async (ev) => {
             if (ev.current.step === "final") {
                 const routes = new Routes(

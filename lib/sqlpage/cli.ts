@@ -5,12 +5,12 @@ import { CLI, Resource } from "../assembler/mod.ts";
 import { SqlPageAssembler } from "./assembler.ts";
 
 export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
-    constructor(assemblerSupplier: () => SqlPageAssembler<Resource>) {
-        super(assemblerSupplier);
+    constructor(freshAssembler: () => SqlPageAssembler<Resource>) {
+        super(freshAssembler);
     }
 
     async init(init: { dbName: string; clean: boolean }) {
-        const assembler = this.assemblerSupplier();
+        const assembler = this.freshAssembler();
         const { spryStd, sqlPage } = assembler.projectPaths();
 
         const exists = async (path: string) =>
@@ -74,6 +74,7 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
             .globalOption("--db-name <file>", "name of SQLite database", {
                 default: "sqlpage.db",
             })
+            .command("help", new HelpCommand().global())
             .command("init")
             .description("Setup local dev environment")
             .option("--clean", "Remove existing and recreate", {
@@ -90,20 +91,10 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
             .command("clean")
             .description("Clean auto-generated directories or files")
             .action(async () => {
-                const assembler = this.assemblerSupplier();
+                const assembler = this.freshAssembler();
                 const task = assembler.cleaner();
                 await task.clean(assembler);
             })
-            .command("build")
-            .description(
-                "Perform orchestration (annotations, routes, foundries)",
-            )
-            .action(async (_opts) => {
-                // await (await this.plan.workflow(opts)).orchestrate({
-                //     cleanAuto: true,
-                // });
-            })
-            .command("help", new HelpCommand().global())
             .command("ls", "List files consumed or impacted during the build.")
             .option("-k, --known", "Show only known resources, hide 'unknown'")
             .option("-l, --long", "Longer listing")
