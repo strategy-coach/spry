@@ -28,7 +28,7 @@ import { Route } from "./route.ts";
 
 export interface DiagnosticEvents<R extends Resource> extends EventMap {
     resourceAnnsIssue: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
         annsCatalog?: AnnotationCatalog;
@@ -36,7 +36,7 @@ export interface DiagnosticEvents<R extends Resource> extends EventMap {
         annsParseResult: ReturnType<typeof zodParsedResourceAnns>;
     };
     routeAnnsIssue: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
         annsCatalog?: AnnotationCatalog;
@@ -47,7 +47,7 @@ export interface DiagnosticEvents<R extends Resource> extends EventMap {
 
 export interface ResourceEvents<R extends Resource> extends EventMap {
     resource: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
         annsCatalog?: AnnotationCatalog;
@@ -55,12 +55,12 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         resAnnsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
     };
     resourceMutated: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: R;
         reason: string;
     };
     materializedInclude: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: R & SrcCodeLangSpecSupplier;
         contentState: "unmodified" | "modified";
         replacerResult: {
@@ -76,7 +76,7 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         dryRun?: boolean;
     };
     materializedFoundry: {
-        engineState: EngineState;
+        assemblerState: AssemblerState;
         resource: FsFileResource;
         cmd: string;
         env: Record<string, string>;
@@ -86,8 +86,8 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         error?: unknown;
         dryRun?: boolean;
     };
-    engineStateChange: {
-        engineState: EngineState;
+    assemblerStateChange: {
+        assemblerState: AssemblerState;
         current: WorkflowStep;
         previous: WorkflowStep;
     };
@@ -112,7 +112,7 @@ export type WorkflowStep =
         readonly materialized: ResourcesCollection<Resource>;
     };
 
-export class EngineState {
+export class AssemblerState {
     #workflow: WorkflowStep;
 
     constructor() {
@@ -159,8 +159,8 @@ export class EngineState {
                     discovering: fcDiscovering,
                     discovered: async (ev) => await fcDiscovering.register(ev),
                 };
-                resourceBus.emit.engineStateChange({
-                    engineState: this,
+                resourceBus.emit.assemblerStateChange({
+                    assemblerState: this,
                     current: this.#workflow,
                     previous,
                 });
@@ -176,8 +176,8 @@ export class EngineState {
                     materialized: async (ev) =>
                         await materializing.register(ev),
                 };
-                resourceBus.emit.engineStateChange({
-                    engineState: this,
+                resourceBus.emit.assemblerStateChange({
+                    assemblerState: this,
                     current: this.#workflow,
                     previous,
                 });
@@ -190,8 +190,8 @@ export class EngineState {
                     discovered: this.#workflow.discovered,
                     materialized: this.#workflow.materializing,
                 };
-                resourceBus.emit.engineStateChange({
-                    engineState: this,
+                resourceBus.emit.assemblerStateChange({
+                    assemblerState: this,
                     current: this.#workflow,
                     previous,
                 });
@@ -226,11 +226,11 @@ export function cleaner() {
         }
     };
 
-    const clean = async (engine: Engine<Resource>) => {
+    const clean = async (assembler: Assembler<Resource>) => {
         // we "own" the "spry.d/auto" directory so remove it
-        await rmDirRecursive(engine.paths.spryDropIn.fsAuto);
+        await rmDirRecursive(assembler.paths.spryDropIn.fsAuto);
 
-        engine.resourceBus.on.materializedFoundry(async (ev) => {
+        assembler.resourceBus.on.materializedFoundry(async (ev) => {
             if (ev.matAbsFsPath) {
                 if (ev.isCleanable) {
                     try {
@@ -253,23 +253,23 @@ export function cleaner() {
 
         // run workflow in dryRun to catalog the resources which will call
         // resourceBus.on.materializedFoundry
-        await engine.materialize({ dryRun: true, cleaningRequested: true });
+        await assembler.materialize({ dryRun: true, cleaningRequested: true });
 
         // if `auto` was the only directory in `spry.d`, remove that too
-        await rmDirIfEmpty(engine.paths.spryDropIn.fsHome);
+        await rmDirIfEmpty(assembler.paths.spryDropIn.fsHome);
     };
 
     return { rmDirIfEmpty, rmDirRecursive, clean };
 }
 
-export interface EngineBusesInit<R extends Resource> {
+export interface AssemblerBusesInit<R extends Resource> {
     resources: ReturnType<typeof eventBus<ResourceEvents<R>>>;
     diagnostics: ReturnType<typeof eventBus<DiagnosticEvents<R>>>;
 }
 
-export function engineBusesInit<R extends Resource>(
-    defaults?: Partial<EngineBusesInit<R>>,
-): EngineBusesInit<R> {
+export function assemblerBusesInit<R extends Resource>(
+    defaults?: Partial<AssemblerBusesInit<R>>,
+): AssemblerBusesInit<R> {
     const resources = eventBus<ResourceEvents<R>>();
     const diagnostics = eventBus<DiagnosticEvents<R>>();
 
@@ -279,7 +279,7 @@ export function engineBusesInit<R extends Resource>(
                 diagnostics.emit.resourceAnnsIssue({
                     resource: ev.resource,
                     annsParseResult: ev.resAnnsParseResult,
-                    engineState: ev.engineState,
+                    assemblerState: ev.assemblerState,
                     supplier: ev.supplier,
                     srcCodeLanguage: ev.srcCodeLanguage,
                 });
@@ -294,7 +294,7 @@ export function engineBusesInit<R extends Resource>(
                     const route = new Route(safeParse.data, ev.annsCatalog);
                     route.mutateAsRouteSupplier(ev.resource);
                     resources.emit.resourceMutated({
-                        engineState: ev.engineState,
+                        assemblerState: ev.assemblerState,
                         resource: ev.resource,
                         reason: "Route detected",
                     });
@@ -303,7 +303,7 @@ export function engineBusesInit<R extends Resource>(
                         diagnostics.emit.routeAnnsIssue({
                             resource: ev.resource,
                             routeParseResult: safeParse,
-                            engineState: ev.engineState,
+                            assemblerState: ev.assemblerState,
                             supplier: ev.supplier,
                             srcCodeLanguage: ev.srcCodeLanguage,
                         });
@@ -312,7 +312,7 @@ export function engineBusesInit<R extends Resource>(
             }
         }
 
-        const { workflow } = ev.engineState;
+        const { workflow } = ev.assemblerState;
         switch (workflow.step) {
             case "discovery":
                 workflow.discovered(ev.resource);
@@ -330,26 +330,26 @@ export function engineBusesInit<R extends Resource>(
     return { ...defaults, resources, diagnostics };
 }
 
-export class Engine<R extends Resource> {
-    #state: EngineState;
+export class Assembler<R extends Resource> {
+    #state: AssemblerState;
     #suppliersSignal?: AbortSignal;
     #suppliers: ResourceSupplier<R>[] = [];
 
-    readonly paths: ReturnType<Engine<R>["projectPaths"]>;
+    readonly paths: ReturnType<Assembler<R>["projectPaths"]>;
     readonly executables = executables();
 
     constructor(
         readonly projectId: string,
         readonly moduleHome: string, // import.meta.resolve('./') from module
         readonly stdlibSymlinkDest: string,
-        readonly engineBuses: EngineBusesInit<R>,
+        readonly assemblerBuses: AssemblerBusesInit<R>,
     ) {
-        this.#state = new EngineState();
+        this.#state = new AssemblerState();
         this.paths = this.projectPaths();
     }
 
     get resourceBus() {
-        return this.engineBuses.resources;
+        return this.assemblerBuses.resources;
     }
 
     withSupplierSignal(signal: AbortSignal) {
@@ -422,8 +422,8 @@ export class Engine<R extends Resource> {
                         : undefined;
                 }
 
-                this.engineBuses.resources.emit.resource({
-                    engineState: this.#state,
+                this.assemblerBuses.resources.emit.resource({
+                    assemblerState: this.#state,
                     resource: { ...resource, ...resAnn },
                     supplier,
                     annsCatalog,
@@ -565,7 +565,7 @@ export class Engine<R extends Resource> {
                 written = true;
             }
             this.resourceBus.emit.materializedInclude({
-                engineState: this.#state,
+                assemblerState: this.#state,
                 resource: resource as R & ElementOfIterable<typeof srcFiles>,
                 replacerResult: result,
                 dryRun: args?.dryRun,
@@ -606,7 +606,7 @@ export class Engine<R extends Resource> {
                         dryRun: args?.dryRun,
                     }, (err) => error = err);
                     this.resourceBus.emit.materializedFoundry({
-                        engineState: this.#state,
+                        assemblerState: this.#state,
                         resource: wf,
                         cmd: wf.absFsPath,
                         matAbsFsPath,
@@ -692,13 +692,13 @@ export class Engine<R extends Resource> {
         projectId: string,
         moduleHome: string,
         sprySymlinkDest: string,
-        engineBuses = engineBusesInit(),
+        assemblerBuses = assemblerBusesInit(),
     ) {
-        return new Engine(
+        return new Assembler(
             projectId,
             moduleHome,
             sprySymlinkDest,
-            engineBuses,
+            assemblerBuses,
         );
     }
 }

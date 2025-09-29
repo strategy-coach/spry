@@ -1,134 +1,134 @@
-# Spry: An Orchestration & Backend-as-a-Service Layer for SQLPage
+# Spry Assembler
 
-Spry is a lightweight backend-as-a-service (BaaS) built on top of
-[SQLPage](https://sql.ophir.dev).
+Spry Assembler is a lightweight system for organizing, transforming, and
+assembling SQL-accepting files (and other framework-light sources) into
+consistent, reproducible outputs.
 
-Think of SQLPage as an excellent framework that lets you build applications
-directly out of `.sql` files. Spry takes SQLPage further: it adds opinionated
-structure, templating, and orchestration features that make SQLPage projects
-easier to manage, scale, and integrate into larger systems.
+Think of Spry as the assembler on your project team:
 
-Spry is inspired by modern BaaS platforms like Supabase, PocketBase, and
-Trailbase. But instead of hiding your backend behind abstractions, Spry keeps
-things transparent: it scaffolds `.sql` pages directly, so your backend stays
-simple, portable, and hackable.
+- It discovers the files you already have (SQL, Markdown, HTML, scripts, AI
+  prompts, etc.).
+- It applies instructions you add inside those files (annotations and
+  directives).
+- It runs helpers (called foundries) that generate extra content when needed.
+- It assembles everything into consistent outputs that tools can use — for
+  example, a SQLite table for SQL-accepting tools like SQLPage, or a set of
+  auto-generated files you can share.
 
-## Why Spry?
+Spry is designed for situations where you don’t already have a full-blown
+framework. Languages like Java, JavaScript, and TypeScript have large ecosystems
+with many frameworks (Spring, React, Next.js, etc.). But SQL, Bash, and even
+“non-traditional” sources like AI prompts or Markdown don’t have much structure.
+Spry Assembler fills that gap.
 
-SQLPage on its own is powerful, but as projects grow it needs a companion layer
-to stay maintainable. As of v0.37, SQLPage provides templates and components but
-no strong opinion on project structure. That’s where Spry comes in.
+## What Spry Assembler Does
 
-Spry is designed for teams who want SQLPage to work like a modern BaaS platform,
-but without giving up transparency:
+- Keeps things organized — pages, prompts, or scripts can be cataloged with
+  routes and metadata.
+- Removes repetition — you can reuse layouts, headers, or snippets with a single
+  directive.
+- Runs your helpers — any script or program (Python, Bash, Rust, Node.js, etc.)
+  can act as a _foundry_ that generates SQL, JSON, or Markdown.
+- Keeps outputs in sync — your source files plus Spry’s rules always produce the
+  same results.
+- Supports dev workflow — watch files for changes, rebuild automatically, and
+  keep SQL-accepting tools up-to-date.
 
-- Inspired by BaaS platforms, built for SQLPage Spry delivers the productivity
-  of Supabase or PocketBase, but through SQLPage itself.
-- Generates type-safe `.sql` files Spry scaffolds code for you, reducing
-  boilerplate and errors while keeping everything human-readable.
-- Adds authentication and APIs out of the box Role-based access, session
-  handling, and CRUD endpoints are ready with minimal setup.
-- Portable and transparent Runs anywhere SQLPage and SQLite/Postgres can run.
-  Outputs are `.sql` files you can inspect, version, and extend.
-- Scales with your needs Works for simple dashboards, but also supports larger
-  orchestration workflows with templates, navigation trees, and generated
-  content.
+## Key Concepts
 
-## What Spry Provides
+Spry Assembler works around four ideas:
 
-### Backend as a Service
+1. Annotations (`@...`) — describe intent.
 
-- Authentication and Authorization Built-in session handling, login, and
-  role-based access control through SQLPage templates.
+   - Example: give a file a route, title, or role.
+   - They _don’t_ change your file, just add meaning.
 
-- APIs and Data Access CRUD endpoints scaffolded automatically from your
-  database schema.
+   ```sql
+   -- @route.path /reports
+   -- @route.title Monthly Reports
+   ```
 
-- Realtime subscriptions _(planned)_ Push updates directly from the database
-  into apps.
+2. Directives (`#...` or `!...`) — transform content inline.
 
-- Admin console scaffolding _(planned)_ Auto-generated management interfaces for
-  your schema.
+   - Insert layouts, snippets, or boilerplate into your files.
 
-### Orchestration and Templating
+   ```sql
+   -- #include layout default
+   SELECT 'content here';
+   ```
 
-- Annotations (`@…`) are blueprints that describe how files behave.
-- Directives (`#…`, `!…`) are assembly instructions that insert layouts,
-  headers, or other code inline.
-- Foundries are production shops — external scripts that generate
-  SQL/JSON/Markdown which Spry captures and saves into stores (`spry.d/auto/*`
-  and the `sqlpage_files` table).
-- Stores act as warehouses for reproducible outputs.
+3. Foundries — helper programs.
 
-This orchestration model gives SQLPage the consistency and build pipeline
-features you’d expect from a static site generator (SSG), but applied to
-data-driven `.sql` applications.
+   - Write a Python script, Bash file, or TypeScript module that prints SQL,
+     JSON, or Markdown.
+   - Mark it with an annotation and Spry will run it at the right time.
 
-## Who Benefits
+   ```python
+   #!/usr/bin/env python
+   # @spry.nature foundry after-sql-files
 
-- Senior Executives Gain lower-cost backends with shorter delivery times.
-  SQLPage + Spry reduces reliance on heavy frameworks while keeping systems
-  auditable and simple.
+   print("SELECT 'Hello from AI prompt' AS msg;")
+   ```
 
-- Project Leaders & Product Managers Get reproducible builds, consistent
-  navigation, and scaffolded APIs without needing extra infrastructure. It
-  reduces coordination overhead across teams.
+   Foundries can even generate outputs from AI prompts or other automated
+   sources.
 
-- Data Analysts Focus on writing SQL queries and reports. Spry handles page
-  structure, layouts, and even auto-generates endpoints when needed.
+4. Stores — where results go.
 
-- Engineering Leaders Encourage modularity and good practice: annotations for
-  metadata, directives for inline transformations, foundries for integrations.
-  Spry keeps codebases clean and projects reproducible.
+   - Filesystem: `spry.d/auto/*` (auto-generated files you can inspect or
+     commit).
+   - Database: an optional SQLite table that SQL-accepting tools (like SQLPage)
+     can read directly.
 
-## Major Benefits
+## Typical Workflow
 
-SQLPage is already superb at rendering applications directly from SQL. Spry adds
-the opinionated orchestration and BaaS features that larger projects need:
+1. Write your source file (SQL, Markdown, HTML, Bash, or even an AI prompt
+   file).
 
-- Scaffolding for authentication, APIs, and CRUD endpoints.
-- Navigation, layouts, and templating from annotations and directives.
-- Reproducible builds and outputs materialized into predictable stores.
+2. Add annotations to describe intent (titles, routes, metadata).
 
-Spry yields:
+3. Add directives to insert layouts or snippets.
 
-- Faster delivery — teams scaffold APIs, authentication, and layouts instead of
-  coding them from scratch.
-- Lower maintenance risk — reproducible builds and transparent `.sql` files make
-  systems easy to debug.
-- Greater flexibility — use SQLPage as intended, but add templating,
-  orchestration, and BaaS-like features when projects scale.
-- Portability — runs anywhere SQLPage runs (local, cloud, or embedded
-  environments).
+4. (Optional) Add a foundry to generate content.
 
-With Spry, SQLPage projects move beyond prototypes into production-ready
-applications that remain transparent, maintainable, and scalable.
+5. Run Spry Assembler:
 
-Great — here’s a business-friendly one-page comparison table that highlights the
-incremental value Spry adds on top of SQLPage. It’s written for senior execs,
-PMs, analysts, and engineering leaders.
+   ```bash
+   ./spryctl.ts build
+   ```
 
-# How SQLPage + Spry are better than SQLPage Alone
+   - It scans your files.
+   - Runs any helpers.
+   - Assembles everything into consistent stores.
 
-| Area                            | SQLPage Alone (v0.37)                                                | SQLPage + Spry                                                                                                                  |
-| ------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Core purpose                    | Build apps directly in `.sql` files with components and templates.   | Orchestration & backend-as-a-service layer that structures, extends, and scales SQLPage projects.                               |
-| Navigation & structure          | Manual — developers must define routes and breadcrumbs in each file. | Annotations (`@route`) describe navigation; Spry auto-generates routes, breadcrumbs, and consistency across all pages.          |
-| Layouts & reusability           | Limited to what is written directly into each `.sql` file.           | Directives (`#include`, `!inject`) let teams reuse layouts, headers, and snippets without copy-paste.                           |
-| Integration with external tools | Not built-in — must manually run scripts and paste outputs.          | Foundries (executable scripts in any language) generate SQL/JSON/Markdown. Spry captures and stores their output automatically. |
-| Reproducibility                 | Each developer must manage their own files; outputs may differ.      | Deterministic builds: all outputs materialized into `spry.d/auto/*` and the `sqlpage_files` table. Easy to audit and deploy.    |
-| APIs & CRUD endpoints           | Must be hand-written as `.sql` files.                                | Spry scaffolds type-safe API and CRUD endpoints directly from your database schema.                                             |
-| Authentication                  | Must be coded manually.                                              | Built-in scaffolding for authentication, session handling, and role-based access.                                               |
-| Realtime & admin console        | Not supported directly.                                              | Roadmap includes realtime subscriptions and auto-generated admin console scaffolding.                                           |
-| Deployment readiness            | `.sql` files can be deployed as-is.                                  | Spry produces deployment-ready `.sql` files plus consolidated build artifacts and reports.                                      |
-| Portability                     | Runs wherever SQLPage + SQLite/Postgres can run.                     | Same portability, but with structured outputs and reproducible builds that scale better for teams.                              |
+6. Use `./spryctl.ts dev` to watch for changes and auto-rebuild.
 
-## Key Takeaway
+## Why It Matters
 
-- SQLPage alone is excellent for small apps, dashboards, or proof-of-concepts.
-- SQLPage + Spry turns those same projects into production-ready, maintainable
-  applications by adding structure, reproducibility, reusable layouts, APIs,
-  authentication, and integrations.
+- For SQL & Bash: finally have a framework-like system for consistency.
+- For AI Prompts: treat them like source code, keep them versioned,
+  reproducible, and usable in pipelines.
+- For Business Analysts: simple tags (`@route`, `#include`) let you describe
+  what you want without writing new frameworks.
+- For Teams: deterministic outputs mean the same build runs identically across
+  machines.
 
-Spry encourages you to use SQLPage exactly as designed — but helps your team
-scale projects confidently without adding complexity.
+## Example Use Cases
+
+- A data analyst wants to keep a catalog of SQL queries and reports with
+  consistent navigation.
+- A business team wants AI prompts to be managed like source code, so outputs
+  are predictable.
+- A junior developer wants to reuse headers, layouts, or snippets across
+  multiple SQL or Markdown files.
+- A mixed team needs Python scripts and SQL queries to run in the same
+  repeatable workflow.
+
+👉 In short: Spry Assembler is a lightweight system that discovers your files,
+applies your rules, runs your helpers, and assembles everything into consistent,
+framework-like outputs — even when working with languages or sources that don’t
+have frameworks of their own.
+
+Would you like me to also draft a one-page “executive” version (very high-level,
+no code samples) that you could hand to a product manager or business analyst
+without overwhelming them?

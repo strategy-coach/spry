@@ -1,19 +1,19 @@
 #!/usr/bin/env -S deno run -A 
 
 import {
+  Assembler,
+  assemblerBusesInit,
   CLI,
-  Engine,
-  engineBusesInit,
   Resource,
-} from "../../../lib/engine-bus/mod.ts";
+} from "../../../lib/assembler/mod.ts";
 
-export class EndToEndTestPrime extends Engine<Resource> {
+export class EndToEndTestPrime extends Assembler<Resource> {
   constructor() {
     super(
       "e2e-prime",
       import.meta.resolve("./"),
       "../../../lib/std",
-      engineBusesInit(),
+      assemblerBusesInit(),
     );
   }
 }

@@ -27,16 +27,16 @@ export const resourceSchema = z.discriminatedUnion("nature", [
             "An executable which generates and materializes output",
         ),
         contributesResources: z.boolean().default(false).optional().describe(
-            "Instruct engine that this foundry generates new files which contribute to resources collection",
+            "Instruct assembler that this foundry generates new files which contribute to resources collection",
         ),
         runBeforeAnnCatalog: z.boolean().default(true).optional().describe(
-            "Instruct engine to run this before catalogging SQLPage file annotations",
+            "Instruct assembler to run this before catalogging SQLPage file annotations",
         ),
         runAfterAnnCatalog: z.boolean().default(false).optional().describe(
-            "Instruct engine to run this after catalogging SQLPage file annotations",
+            "Instruct assembler to run this after catalogging SQLPage file annotations",
         ),
         isCleanable: z.boolean().default(false).optional().describe(
-            "Instruct engine that when `clean` (delete generated artifacts) is called, call this foundry too (FOUNDRY_DESTROY_CLEAN env var will be set)",
+            "Instruct assembler that when `clean` (delete generated artifacts) is called, call this foundry too (FOUNDRY_DESTROY_CLEAN env var will be set)",
         ),
         dependsOn: z.enum(["none", "db-after-build"]).default("none").optional()
             .describe(

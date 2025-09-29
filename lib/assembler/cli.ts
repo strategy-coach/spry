@@ -11,7 +11,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { basename, join, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { cleaner, Engine } from "./engine.ts";
+import { Assembler, cleaner } from "./materialize.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
@@ -66,11 +66,11 @@ export function upsertMissingAncestors<T>(
 }
 
 export class CLI {
-    constructor(readonly engine: Engine<Resource>) {
+    constructor(readonly assembler: Assembler<Resource>) {
     }
 
     async init(init: { dbName: string; clean: boolean }) {
-        const { spryStd, sqlPage } = this.engine.paths;
+        const { spryStd, sqlPage } = this.assembler.paths;
 
         const exists = async (path: string) =>
             await Deno.stat(path).catch(() => false);
@@ -223,7 +223,7 @@ export class CLI {
         };
     }
 
-    summaryHooks(engine: Engine<Resource>) {
+    summaryHooks(assembler: Assembler<Resource>) {
         const rows = new Map<string, LsCommandRow>();
         const get = (path: string, n?: Resource["nature"]) =>
             rows.get(path) ??
@@ -243,14 +243,14 @@ export class CLI {
                     rows.get(path)!);
 
         // resource events → mark step, annotations, reconcile nature
-        engine.resourceBus.on.resource((ev) => {
+        assembler.resourceBus.on.resource((ev) => {
             if (!isFsFileResource(ev.resource)) return;
             const path = ev.resource.absFsPath;
             const n = ev.resource.nature;
             const r = get(path, n);
-            const idx = ev.engineState.workflow.step === "discovery"
+            const idx = ev.assemblerState.workflow.step === "discovery"
                 ? 0
-                : ev.engineState.workflow.step === "materialization"
+                : ev.assemblerState.workflow.step === "materialization"
                 ? 1
                 : -1;
             if (idx < 0) return;
@@ -262,7 +262,7 @@ export class CLI {
         });
 
         // "include" events → count directives (only modified fs files)
-        engine.resourceBus.on.materializedInclude((ev) => {
+        assembler.resourceBus.on.materializedInclude((ev) => {
             if (
                 ev.contentState !== "modified" || !isFsFileResource(ev.resource)
             ) {
@@ -272,7 +272,7 @@ export class CLI {
         });
 
         // foundry events → flags (you keyed by ev.cmd)
-        engine.resourceBus.on.materializedFoundry((ev) => {
+        assembler.resourceBus.on.materializedFoundry((ev) => {
             const r = get(ev.cmd);
             r.impact.foundry = true;
             r.impact.autoMaterialize = !!ev.matAbsFsPath;
@@ -294,8 +294,8 @@ export class CLI {
         tree?: true | undefined;
         routes?: true | undefined;
     }) {
-        const summary = this.summaryHooks(this.engine);
-        await this.engine.materialize({ dryRun: true });
+        const summary = this.summaryHooks(this.assembler);
+        await this.assembler.materialize({ dryRun: true });
         let list = summary.toList();
         if (opts?.known) {
             list = list.filter((r) => r.nature === "unknown" ? false : true);
@@ -365,7 +365,7 @@ export class CLI {
     }
 
     async lsRoutes(opts?: { json?: boolean }) {
-        this.engine.resourceBus.on.engineStateChange(async (ev) => {
+        this.assembler.resourceBus.on.assemblerStateChange(async (ev) => {
             if (ev.current.step === "final") {
                 const routes = new Routes(
                     ev.current.materialized.resources.filter(isRouteSupplier)
@@ -388,7 +388,7 @@ export class CLI {
                 }
             }
         });
-        await this.engine.materialize({ dryRun: true });
+        await this.assembler.materialize({ dryRun: true });
     }
 
     cli(init?: { name?: string }) {
@@ -418,7 +418,7 @@ export class CLI {
             .description("Clean auto-generated directories or files")
             .action(async () => {
                 const task = cleaner();
-                await task.clean(this.engine);
+                await task.clean(this.assembler);
             })
             .command("build")
             .description(
