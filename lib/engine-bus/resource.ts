@@ -161,7 +161,10 @@ export function zodParsedResourceAnns(
             [it.key!.slice(prefix.length), it.value ?? it.raw] as const
         );
     const found = annotations.length;
-    if (found == 0) return undefined;
+    if (found == 0) {
+        if (!defaults) return undefined;
+        if (Object.keys(defaults).length == 0) return undefined;
+    }
 
     return resourceSchema.safeParse({
         ...defaults,

@@ -1,3 +1,4 @@
+import { dirname } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import {
     extractAnnotationsFromText,
@@ -8,6 +9,8 @@ import {
     pathTreeNavigation,
     pathTreeSerializers,
 } from "../universal/path-tree.ts";
+import { FsFileResource } from "./fs.ts";
+import { Resource } from "./resource.ts";
 
 export const routeAnnSchema = z.object({
     path: z.string().describe(
@@ -25,7 +28,7 @@ export const routeAnnSchema = z.object({
     pathExtnTerminal: z.string().optional().describe(
         "The path's terminal (last) extension (like .sql, usually computed by default from path)",
     ),
-    pathExtns: z.string().optional().describe(
+    pathExtns: z.array(z.string()).optional().describe(
         "The path's full set of extensions if there multiple (like .sql.ts, usually computed by default from path)",
     ),
     caption: z.string().describe(
@@ -59,6 +62,16 @@ export const routeAnnSchema = z.object({
 
 export type AnnotatedRoute = z.infer<typeof routeAnnSchema>;
 
+export type RouteSupplier = {
+    readonly route: Route;
+};
+
+export const isRouteSupplier = (o: unknown): o is RouteSupplier =>
+    o && typeof o === "object" && "route" in o &&
+        typeof o.route === "object"
+        ? true
+        : false;
+
 export class Route {
     constructor(
         readonly annotated: AnnotatedRoute,
@@ -66,6 +79,16 @@ export class Route {
             ReturnType<typeof extractAnnotationsFromText<unknown>>
         >,
     ) {
+    }
+
+    mutateAsRouteSupplier(resource: Resource) {
+        if (resource.nature === "unknown") {
+            // deno-lint-ignore no-explicit-any
+            (resource as any).nature = "page";
+        }
+        // deno-lint-ignore no-explicit-any
+        (resource as any).route = this;
+        return resource as Resource & RouteSupplier;
     }
 
     // finds all "route.*" annotations and returns them a single parsed Zod object
@@ -87,6 +110,25 @@ export class Route {
         return routeAnnSchema.safeParse({
             ...defaults,
             ...Object.fromEntries(annotations),
+        });
+    }
+
+    static fromFsFileResource(
+        resource: FsFileResource,
+        catalog: Awaited<
+            ReturnType<typeof extractAnnotationsFromText<unknown>>
+        >,
+    ) {
+        const { extensions } = resource;
+        const pathBasename = extensions.basename;
+        const webPath = resource.webPath ?? resource.relFsPath;
+        return Route.zodParsedAnnsCatalog(catalog, {
+            path: webPath,
+            pathBasename: pathBasename,
+            pathBasenameNoExtn: pathBasename.split(".")[0],
+            pathDirname: dirname(webPath),
+            pathExtnTerminal: extensions.terminal,
+            pathExtns: extensions.extensions,
         });
     }
 

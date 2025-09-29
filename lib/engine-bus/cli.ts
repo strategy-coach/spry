@@ -14,10 +14,16 @@ import { ColumnDef, ListerBuilder } from "../universal/ls/mod.ts";
 import { Engine } from "./engine.ts";
 import { Resource } from "./resource.ts";
 import { isFsFileResource } from "./fs.ts";
+import { isRouteSupplier } from "./route.ts";
 
 export type LsCommandRow = {
     step: { discovery: boolean; materialize: boolean };
-    impact: { foundry: boolean; autoMaterialize: boolean; directives: number };
+    impact: {
+        foundry: boolean;
+        autoMaterialize: boolean;
+        directives: number;
+        isRoutable: boolean;
+    };
     nature: Resource["nature"] | `${Resource["nature"]}:${Resource["nature"]}`;
     path: string;
     issue: string;
@@ -105,7 +111,7 @@ export class CLI {
                             ? "FA"
                             : (v.foundry ? "F " : "  "),
                     )
-                } ${v.directives ? "D" : " "}`,
+                } ${v.directives ? "D" : " "} ${v.isRoutable ? "R" : " "}`,
         };
     }
 
@@ -177,6 +183,7 @@ export class CLI {
                         foundry: false,
                         autoMaterialize: false,
                         directives: 0,
+                        isRoutable: false,
                     },
                     nature: (n ?? "unknown") as LsCommandRow["nature"],
                     path,
@@ -200,9 +207,10 @@ export class CLI {
             r.nature = r.nature && r.nature !== n
                 ? `${r.nature}:${n}` as LsCommandRow["nature"]
                 : n;
+            if (isRouteSupplier(ev.resource)) r.impact.isRoutable = true;
         });
 
-        // include events → count directives (only modified fs files)
+        // "include" events → count directives (only modified fs files)
         engine.resourceBus.on.materializedInclude((ev) => {
             if (
                 ev.contentState !== "modified" || !isFsFileResource(ev.resource)

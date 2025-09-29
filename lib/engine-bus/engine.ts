@@ -24,6 +24,7 @@ import {
     TextSupplier,
     zodParsedResourceAnns,
 } from "./resource.ts";
+import { Route } from "./route.ts";
 
 export interface DiagnosticEvents<R extends Resource> extends EventMap {
     resourceAnnsIssue: {
@@ -34,6 +35,14 @@ export interface DiagnosticEvents<R extends Resource> extends EventMap {
         srcCodeLanguage?: LanguageSpec;
         annsParseResult: ReturnType<typeof zodParsedResourceAnns>;
     };
+    routeAnnsIssue: {
+        engineState: EngineState;
+        resource: R;
+        supplier: ResourceSupplier<R>;
+        annsCatalog?: AnnotationCatalog;
+        srcCodeLanguage?: LanguageSpec;
+        routeParseResult: ReturnType<typeof Route.zodParsedAnnsCatalog>;
+    };
 }
 
 export interface ResourceEvents<R extends Resource> extends EventMap {
@@ -43,7 +52,12 @@ export interface ResourceEvents<R extends Resource> extends EventMap {
         supplier: ResourceSupplier<R>;
         annsCatalog?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
-        annsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
+        resAnnsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
+    };
+    resourceMutated: {
+        engineState: EngineState;
+        resource: R;
+        reason: string;
     };
     materializedInclude: {
         engineState: EngineState;
@@ -183,14 +197,41 @@ export function engineBusesInit<R extends Resource>(
 
     resources.on.resource((ev) => {
         if (ev.annsCatalog) {
-            resources.emit.annotations({
-                engineState: ev.engineState,
-                resource: ev.resource,
-                supplier: ev.supplier,
-                annsCatalog: ev.annsCatalog!,
-                srcCodeLanguage: ev.srcCodeLanguage,
-            });
-            if (ev.annsParseResult?.error) diagnostics.emit.resource(ev);
+            if (ev.resAnnsParseResult?.error) {
+                diagnostics.emit.resourceAnnsIssue({
+                    resource: ev.resource,
+                    annsParseResult: ev.resAnnsParseResult,
+                    engineState: ev.engineState,
+                    supplier: ev.supplier,
+                    srcCodeLanguage: ev.srcCodeLanguage,
+                });
+            }
+            if (isFsFileResource(ev.resource)) {
+                const safeParse = Route.fromFsFileResource(
+                    ev.resource,
+                    ev.annsCatalog,
+                );
+                if (safeParse?.success) {
+                    // this adds resource.route so isRouteSupplier will be true
+                    const route = new Route(safeParse.data, ev.annsCatalog);
+                    route.mutateAsRouteSupplier(ev.resource);
+                    resources.emit.resourceMutated({
+                        engineState: ev.engineState,
+                        resource: ev.resource,
+                        reason: "Route detected",
+                    });
+                } else {
+                    if (ev.resAnnsParseResult?.error) {
+                        diagnostics.emit.routeAnnsIssue({
+                            resource: ev.resource,
+                            routeParseResult: safeParse,
+                            engineState: ev.engineState,
+                            supplier: ev.supplier,
+                            srcCodeLanguage: ev.srcCodeLanguage,
+                        });
+                    }
+                }
+            }
         }
 
         const { workflow } = ev.engineState;
@@ -309,7 +350,7 @@ export class Engine<R extends Resource> {
                     supplier,
                     annsCatalog,
                     srcCodeLanguage,
-                    annsParseResult,
+                    resAnnsParseResult: annsParseResult,
                 });
             }
         }
@@ -461,6 +502,7 @@ export class Engine<R extends Resource> {
         for await (const wf of candidates) {
             if (wf.nature === "foundry") {
                 if (!isExecutable(wf.absFsPath)) {
+                    // TODO: emit as a diagnostic
                     console.error("foundry", wf.relFsPath, "is not executable");
                 } else {
                     let error: unknown | undefined;

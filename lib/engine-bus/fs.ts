@@ -56,6 +56,7 @@ export function pathExtensions(path: string) {
     ) => (i < a.length - 1 ? `.${e}` : e));
     const terminal = exts[exts.length - 1] ?? "";
     return {
+        basename: name,
         extensions: exts,
         terminal,
         autoMaterializable: () => {
