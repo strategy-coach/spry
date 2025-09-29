@@ -258,35 +258,5 @@ export function executables(
         }
     };
 
-    const cleanMaterialized = async (
-        args: {
-            absFsPath: string;
-            matAbsFsPath: false | string;
-            dryRun?: boolean;
-        },
-        onError: (error: unknown) => unknown | Promise<unknown>,
-    ) => {
-        const { absFsPath, matAbsFsPath, dryRun = false } = args;
-        if (dryRun || !await isExecutable(absFsPath)) return;
-        if (matAbsFsPath) {
-            try {
-                // if ce.pfn.materialize.auto is true then .path! must be set
-                await Deno.remove(matAbsFsPath);
-            } catch (error) {
-                await onError(error);
-            }
-        }
-
-        // TODO:
-        // else {
-        //     const { we } = ce;
-        //     await Foundries.execute(we.entry.path, {
-        //         env: this.env("DESTROY_CLEAN", ce),
-        //         cwd: Deno.cwd(),
-        //         ignoreOutput: true,
-        //     });
-        // }
-    };
-
-    return { execCache, isExecutable, execute, materialize, cleanMaterialized };
+    return { execCache, isExecutable, execute, materialize };
 }

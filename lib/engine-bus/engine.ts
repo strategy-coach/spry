@@ -253,7 +253,7 @@ export function cleaner() {
 
         // run workflow in dryRun to catalog the resources which will call
         // resourceBus.on.materializedFoundry
-        await engine.materialize({ dryRun: true });
+        await engine.materialize({ dryRun: true, cleaningRequested: true });
 
         // if `auto` was the only directory in `spry.d`, remove that too
         await rmDirIfEmpty(engine.paths.spryDropIn.fsHome);
@@ -487,7 +487,11 @@ export class Engine<R extends Resource> {
     }
 
     projectStateEnv(
-        init?: { projectVarPrefix?: string; pathVarPrefix?: string },
+        init?: {
+            projectVarPrefix?: string;
+            pathVarPrefix?: string;
+            cleaningRequested?: boolean;
+        },
     ) {
         const paths = this.projectPaths();
         const {
@@ -513,6 +517,9 @@ export class Engine<R extends Resource> {
         result[`${projectVarPrefix}ID`] = this.projectId;
         result[`${projectVarPrefix}WORKFLOW_STEP`] = this.#state.workflow.step;
         result[`${projectVarPrefix}PATHS_JSON`] = JSON.stringify(paths);
+        if (init?.cleaningRequested) {
+            result[`${projectVarPrefix}DESTROY_CLEAN_REQUESTED`] = "TRUE";
+        }
         for (const [k, v] of Object.entries(projectVars)) {
             if (typeof k === "string") {
                 result[`${projectVarPrefix}${k}`] = String(v);
@@ -570,11 +577,17 @@ export class Engine<R extends Resource> {
 
     async materializeFoundries(
         candidates: Iterable<FsFileResource>,
-        args?: { readonly dryRun?: boolean },
+        args?: { readonly dryRun?: boolean; cleaningRequested?: boolean },
     ) {
         // now see which files are executable and materialize them appropriately
         const { isExecutable, materialize } = this.executables;
-        const env = this.projectStateEnv();
+
+        // when cleaning is requested, we can "auto clean" auto-materialized but
+        // foundries that create unmanaged (by Spry) files do their own cleaning
+        // by being told through the environment
+        const env = this.projectStateEnv({
+            cleaningRequested: args?.cleaningRequested,
+        });
         const cwd = Deno.cwd();
 
         for await (const wf of candidates) {
@@ -608,7 +621,12 @@ export class Engine<R extends Resource> {
         }
     }
 
-    async materialize(args?: { readonly dryRun?: boolean }) {
+    async materialize(
+        args?: {
+            readonly dryRun?: boolean;
+            readonly cleaningRequested?: boolean;
+        },
+    ) {
         // TODO: this seems to have a lot of copy/paste of code?
         // TODO: publish events before/after/etc. stage changes and other works
         // TODO: refine how dryRun works
