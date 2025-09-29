@@ -1,4 +1,4 @@
-import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
+import { fromFileUrl, resolve } from "jsr:@std/path@1";
 import {
     AnnotationCatalog,
     extractAnnotationsFromText,
@@ -9,7 +9,6 @@ import { includeDirective } from "./directives.ts";
 import {
     executables,
     FsFileResource,
-    fsFilesContributor,
     isFsFileResource,
     isFsSrcCodeFileSupplier,
 } from "./fs.ts";
@@ -205,7 +204,16 @@ export class AssemblerState {
 }
 
 // TODO: remove console.log in favor of EventBus
-export function cleaner() {
+export function cleaner(
+    init: {
+        removeDirs?: Iterable<
+            { absFsPath: string; recursive: boolean } | {
+                absFsPath: string;
+                onlyIfEmpty: boolean;
+            }
+        >;
+    },
+) {
     const rmDirIfEmpty = async (path: string) => {
         try {
             if ((await Array.fromAsync(Deno.readDir(path))).length === 0) {
@@ -227,8 +235,14 @@ export function cleaner() {
     };
 
     const clean = async (assembler: Assembler<Resource>) => {
-        // we "own" the "spry.d/auto" directory so remove it
-        await rmDirRecursive(assembler.paths.spryDropIn.fsAuto);
+        // remove any fully auto-generated directories
+        if (init?.removeDirs) {
+            for await (const rdr of init?.removeDirs) {
+                if ("recursive" in rdr && rdr.recursive) {
+                    await rmDirRecursive(rdr.absFsPath);
+                }
+            }
+        }
 
         assembler.resourceBus.on.materializedFoundry(async (ev) => {
             if (ev.matAbsFsPath) {
@@ -255,8 +269,14 @@ export function cleaner() {
         // resourceBus.on.materializedFoundry
         await assembler.materialize({ dryRun: true, cleaningRequested: true });
 
-        // if `auto` was the only directory in `spry.d`, remove that too
-        await rmDirIfEmpty(assembler.paths.spryDropIn.fsHome);
+        // now that files have been cleaned, see if there's request for any directory cleanup
+        if (init?.removeDirs) {
+            for await (const rdr of init.removeDirs) {
+                if ("onlyIfEmpty" in rdr && rdr.onlyIfEmpty) {
+                    await rmDirIfEmpty(rdr.absFsPath);
+                }
+            }
+        }
     };
 
     return { rmDirIfEmpty, rmDirRecursive, clean };
@@ -335,17 +355,14 @@ export class Assembler<R extends Resource> {
     #suppliersSignal?: AbortSignal;
     #suppliers: ResourceSupplier<R>[] = [];
 
-    readonly paths: ReturnType<Assembler<R>["projectPaths"]>;
     readonly executables = executables();
 
     constructor(
         readonly projectId: string,
         readonly moduleHome: string, // import.meta.resolve('./') from module
-        readonly stdlibSymlinkDest: string,
         readonly assemblerBuses: AssemblerBusesInit<R>,
     ) {
         this.#state = new AssemblerState();
-        this.paths = this.projectPaths();
     }
 
     get resourceBus() {
@@ -359,29 +376,6 @@ export class Assembler<R extends Resource> {
     withSuppliers(...suppliers: ResourceSupplier<R>[]) {
         this.#suppliers.push(...suppliers);
         return this;
-    }
-
-    // deno-lint-ignore require-await
-    protected async initDefaults() {
-        const resourceSupplierIdentity = ["PROJECT_HOME"] as const;
-        type ResourceSupplierIdentity = typeof resourceSupplierIdentity[number];
-
-        if (this.#suppliers.length == 0) {
-            this.withSuppliers(fsFilesContributor<R, ResourceSupplierIdentity>({
-                identity: "PROJECT_HOME",
-                root: this.paths.projectSrcHome,
-                walkOptions: {
-                    includeDirs: false,
-                    includeFiles: true,
-                    includeSymlinks: false,
-                    followSymlinks: true, // important for "src/spry"
-                    canonicalize: true,
-                },
-                relFsPath: (path) => this.relToPrjOrStd(path),
-                webPath: (path) =>
-                    this.relToPrjOrStd(path).replace(/^.*src\//, ""),
-            }));
-        }
     }
 
     async emitResources() {
@@ -435,54 +429,29 @@ export class Assembler<R extends Resource> {
         return this;
     }
 
-    relToPrjOrStd(supplied: string) {
-        const result = relative(this.paths.projectHome, supplied);
-        if (result.startsWith(this.stdlibSymlinkDest)) {
-            return relative(
-                Deno.cwd(), // assume that CWD is the project home
-                join("src", "spry", relative(this.stdlibSymlinkDest, supplied)),
-            );
-        }
-        return result;
-    }
-
     projectPaths(
         projectHome = this.moduleHome.startsWith("file:")
             ? fromFileUrl(this.moduleHome)
             : this.moduleHome,
     ) {
         const projectSrcHome = resolve(projectHome, "src");
-        const absPathToSpryLocal = join(projectSrcHome, "spry");
-
-        // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
-        // so we watch the physical Spry because the symlink won't be watched
-        // even though it's under the "src".
-        const spryStdLibAbs = fromFileUrl(import.meta.resolve("../std"));
-        const devWatchRoots = [
-            relative(Deno.cwd(), projectSrcHome),
-            relative(Deno.cwd(), spryStdLibAbs),
-        ];
         return {
             projectHome,
             projectSrcHome,
-            spryDropIn: {
-                fsHome: resolve(projectSrcHome, "spry.d"),
-                fsAuto: resolve(projectSrcHome, "spry.d", "auto"),
-                webHome: join("spry.d"),
-                webAuto: join("spry.d", "auto"),
-            },
-            spryStd: {
-                homeFromSymlink: relative(
-                    dirname(absPathToSpryLocal),
-                    spryStdLibAbs,
-                ),
-                absPathToLocal: absPathToSpryLocal,
-                relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),
-            },
-            sqlPage: {
-                absPathToConfDir: join(projectHome, "sqlpage"),
-            },
-            devWatchRoots,
+        };
+    }
+
+    projectStateProjectEnvVars() {
+        return {
+            "ID": this.projectId,
+        };
+    }
+
+    projectStatePathEnvVars() {
+        const paths = this.projectPaths();
+        return {
+            "HOME": paths.projectHome,
+            "SRC_HOME": paths.projectSrcHome,
         };
     }
 
@@ -498,21 +467,8 @@ export class Assembler<R extends Resource> {
             pathVarPrefix = "FOUNDRY_PROJECT_PATH_",
             projectVarPrefix = "FOUNDRY_PROJECT_",
         } = init ?? {};
-        const projectVars = {
-            "ID": this.projectId,
-        };
-        const pathVars = {
-            "HOME": paths.projectHome,
-            "SRC_HOME": paths.projectSrcHome,
-            "SQLPAGE_HOME": paths.sqlPage.absPathToConfDir,
-            "SPRY_STD_HOME": paths.spryStd.absPathToLocal,
-            "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.homeFromSymlink,
-            "SPRY_STD_HOME_REL": paths.spryStd.relPathToHome,
-            "SPRYD_HOME": paths.spryDropIn.fsHome,
-            "SPRYD_AUTO": paths.spryDropIn.fsAuto,
-            "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
-            "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
-        };
+        const projectVars = this.projectStateProjectEnvVars();
+        const pathVars = this.projectStatePathEnvVars();
         const result: Record<string, string> = {};
         result[`${projectVarPrefix}ID`] = this.projectId;
         result[`${projectVarPrefix}WORKFLOW_STEP`] = this.#state.workflow.step;
@@ -633,9 +589,6 @@ export class Assembler<R extends Resource> {
         // TODO: add linting
         // TODO: add observability for CLI directly into resources?
 
-        // in the caller did not setup any suppliers or other options, use sane defaults
-        await this.initDefaults();
-
         // we start in "init", then move to next stage
         let workflow = this.#state.nextStep(this.resourceBus);
         if (workflow?.step === "discovery") {
@@ -686,19 +639,5 @@ export class Assembler<R extends Resource> {
 
         workflow = this.#state.nextStep(this.resourceBus);
         console.assert(this.#state.isTerminal(), "Should be in terminal state");
-    }
-
-    static instance(
-        projectId: string,
-        moduleHome: string,
-        sprySymlinkDest: string,
-        assemblerBuses = assemblerBusesInit(),
-    ) {
-        return new Assembler(
-            projectId,
-            moduleHome,
-            sprySymlinkDest,
-            assemblerBuses,
-        );
     }
 }

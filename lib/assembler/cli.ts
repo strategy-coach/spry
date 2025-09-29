@@ -1,5 +1,3 @@
-import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
-import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import {
     bold,
     brightYellow,
@@ -9,11 +7,11 @@ import {
     red,
     yellow,
 } from "jsr:@std/fmt@1/colors";
-import { basename, join, relative } from "jsr:@std/path@1";
+import { basename, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { Assembler, cleaner } from "./assembler.ts";
-import { Resource } from "./resource.ts";
+import { Assembler } from "./assembler.ts";
 import { isFsFileResource } from "./fs.ts";
+import { Resource } from "./resource.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
 
 export type LsCommandRow = {
@@ -65,62 +63,8 @@ export function upsertMissingAncestors<T>(
     return out;
 }
 
-export class CLI {
-    constructor(readonly assembler: Assembler<Resource>) {
-    }
-
-    async init(init: { dbName: string; clean: boolean }) {
-        const { spryStd, sqlPage } = this.assembler.paths;
-
-        const exists = async (path: string) =>
-            await Deno.stat(path).catch(() => false);
-        const relativeToCWD = (path: string) => relative(Deno.cwd(), path);
-
-        const defaultSqlpageConf = {
-            allow_exec: true,
-            port: 9219,
-            database_url: `sqlite://${init?.dbName}?mode=rwc`,
-            web_root: "src",
-        };
-
-        const removed: string[] = [];
-        if (init?.clean) {
-            if (await exists(spryStd.relPathToHome)) {
-                await Deno.remove(spryStd.relPathToHome);
-                removed.push(spryStd.relPathToHome);
-            }
-
-            if (await exists(sqlPage.absPathToConfDir)) {
-                await Deno.remove(sqlPage.absPathToConfDir, {
-                    recursive: true,
-                });
-                removed.push(relativeToCWD(sqlPage.absPathToConfDir));
-            }
-        }
-
-        const created: string[] = [];
-        const linked: { from: string; to: string }[] = [];
-
-        if (!(await exists(sqlPage.absPathToConfDir))) {
-            await Deno.mkdir(sqlPage.absPathToConfDir, { recursive: true });
-            created.push(relativeToCWD(sqlPage.absPathToConfDir));
-            const sqpConf = join(sqlPage.absPathToConfDir, "sqlpage.json");
-            await Deno.writeTextFile(
-                sqpConf,
-                JSON.stringify(defaultSqlpageConf, null, 2),
-            );
-            created.push(relativeToCWD(sqpConf));
-        }
-
-        if (!(await exists(spryStd.relPathToHome))) {
-            await Deno.symlink(spryStd.homeFromSymlink, spryStd.relPathToHome);
-            linked.push({
-                from: spryStd.relPathToHome,
-                to: spryStd.homeFromSymlink,
-            });
-        }
-
-        return { spryStd, sqlPage, created, removed, linked };
+export class CLI<R extends Resource, A extends Assembler<R>> {
+    constructor(readonly assemblerSupplier: () => A) {
     }
 
     lsWorkflowStepsField<Row extends LsCommandRow>():
@@ -223,7 +167,7 @@ export class CLI {
         };
     }
 
-    summaryHooks(assembler: Assembler<Resource>) {
+    summaryHooks(assembler: A) {
         const rows = new Map<string, LsCommandRow>();
         const get = (path: string, n?: Resource["nature"]) =>
             rows.get(path) ??
@@ -288,14 +232,14 @@ export class CLI {
     }
 
     async ls(opts: {
-        dbName: string;
         known?: true | undefined;
         long?: true | undefined;
         tree?: true | undefined;
         routes?: true | undefined;
     }) {
-        const summary = this.summaryHooks(this.assembler);
-        await this.assembler.materialize({ dryRun: true });
+        const assembler = this.assemblerSupplier();
+        const summary = this.summaryHooks(assembler);
+        await assembler.materialize({ dryRun: true });
         let list = summary.toList();
         if (opts?.known) {
             list = list.filter((r) => r.nature === "unknown" ? false : true);
@@ -365,7 +309,8 @@ export class CLI {
     }
 
     async lsRoutes(opts?: { json?: boolean }) {
-        this.assembler.resourceBus.on.assemblerStateChange(async (ev) => {
+        const assembler = this.assemblerSupplier();
+        assembler.resourceBus.on.assemblerStateChange(async (ev) => {
             if (ev.current.step === "final") {
                 const routes = new Routes(
                     ev.current.materialized.resources.filter(isRouteSupplier)
@@ -388,56 +333,6 @@ export class CLI {
                 }
             }
         });
-        await this.assembler.materialize({ dryRun: true });
-    }
-
-    cli(init?: { name?: string }) {
-        return new Command()
-            .name(init?.name ?? "spryctl.ts")
-            .version("0.1.0")
-            .description(
-                "Orchestrate the content which will be supplied to SQLPage target database.",
-            )
-            .globalOption("--db-name <file>", "name of SQLite database", {
-                default: "sqlpage.db",
-            })
-            .command("init")
-            .description("Setup local dev environment")
-            .option("--clean", "Remove existing and recreate", {
-                default: false,
-            })
-            .action(async (opts) => {
-                const { created, removed, linked } = await this.init(opts);
-                removed.forEach((r) => console.warn(`❌ Removed ${r}`));
-                created.forEach((c) => console.info(`📄 Created ${c}`));
-                linked.forEach((l) =>
-                    console.info("🔗 Linked", l.from, "to", l.to)
-                );
-            })
-            .command("clean")
-            .description("Clean auto-generated directories or files")
-            .action(async () => {
-                const task = cleaner();
-                await task.clean(this.assembler);
-            })
-            .command("build")
-            .description(
-                "Perform orchestration (annotations, routes, foundries)",
-            )
-            .action(async (_opts) => {
-                // await (await this.plan.workflow(opts)).orchestrate({
-                //     cleanAuto: true,
-                // });
-            })
-            .command("help", new HelpCommand().global())
-            .command("ls", "List files consumed or impacted during the build.")
-            .option("-k, --known", "Show only known resources, hide 'unknown'")
-            .option("-l, --long", "Longer listing")
-            .option("-t, --tree", "Simple tree of annotated routes")
-            .option(
-                "-r, --routes",
-                "Show only resources which have @route annotations",
-            )
-            .action(async (opts) => await this.ls(opts));
+        await assembler.materialize({ dryRun: true });
     }
 }

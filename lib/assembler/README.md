@@ -45,9 +45,6 @@ frameworks out of the box.
   your source files within the regions you specify.
 - Foundries are production shops (executable files in any language) Spry can run
   to generate SQL/JSON/Markdown.
-- Stores are warehouses where Spry materializes or forges outputs (for example,
-  `spry.d/auto/*`, and optionally a SQLite or other database tables that
-  SQL-accepting tools can read).
 
 Spry works in two phases:
 
@@ -105,15 +102,6 @@ Foundries are language-agnostic generators. They are particularly useful when
 your primary sources (SQL, Bash) lack native plugin systems. Spry discovers
 foundries by annotation, invokes them in the right phase, and materializes their
 outputs in a consistent way.
-
-## Stores
-
-Spry writes generated files and can keep a database in sync using stores:
-
-- Filesystem store: `spry.d/auto/*`—generated SQL/JSON/Markdown you can inspect
-  or commit.
-- Database store: an optional SQLite table that SQL-accepting tools (for
-  example, tools like SQLPage) can read to render pages or views.
 
 ## Positioning: where Spry fits
 
