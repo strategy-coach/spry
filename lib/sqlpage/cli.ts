@@ -1,6 +1,6 @@
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
-import { join, relative } from "jsr:@std/path@1";
+import { dirname, join, relative } from "jsr:@std/path@1";
 import { CLI, Resource } from "../assembler/mod.ts";
 import { SqlPageAssembler } from "./assembler.ts";
 
@@ -61,6 +61,11 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
         }
 
         if (!(await exists(spryStd.relPathToHome))) {
+            const spryStdLinkDest = dirname(spryStd.relPathToHome);
+            if (!(await exists(spryStdLinkDest))) {
+                await Deno.mkdir(spryStdLinkDest, { recursive: true });
+                created.push(relativeToCWD(spryStdLinkDest));
+            }
             await Deno.symlink(spryStd.homeFromSymlink, spryStd.relPathToHome);
             linked.push({
                 from: spryStd.relPathToHome,
