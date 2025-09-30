@@ -130,10 +130,9 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
         // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
         // so we watch the physical Spry because the symlink won't be watched
         // even though it's under the "src".
-        const spryStdLibAbs = fromFileUrl(import.meta.resolve("../std"));
         const devWatchRoots = [
             relative(Deno.cwd(), projectSrcHome),
-            relative(Deno.cwd(), spryStdLibAbs),
+            relative(Deno.cwd(), this.stdlibSymlinkDest),
         ];
         return {
             ...super.projectPaths(projectHome),
@@ -146,7 +145,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
             spryStd: {
                 homeFromSymlink: relative(
                     dirname(absPathToSpryLocal),
-                    spryStdLibAbs,
+                    this.stdlibSymlinkDest,
                 ),
                 absPathToLocal: absPathToSpryLocal,
                 relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),

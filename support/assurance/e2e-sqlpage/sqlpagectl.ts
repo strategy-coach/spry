@@ -3,13 +3,16 @@
 import { assemblerBusesInit, Resource } from "../../../lib/assembler/mod.ts";
 import { SqlPageAssembler, SqlPageCLI } from "../../../lib/sqlpage/mod.ts";
 
-export class EndToEndTestPrime extends SqlPageAssembler<Resource> {
+// rename SqlPageStarter class to your project name
+// change line 12 from `e2e-sqlpage` to your own project ID
+
+export class SqlPageStarter extends SqlPageAssembler<Resource> {
   constructor(init: { dryRun: boolean; cleaningRequested: boolean }) {
     super(
-      "e2e-prime",
+      "e2e-sqlpage",
       import.meta.resolve("./"),
       assemblerBusesInit(),
-      "../../../lib/std",
+      "../../../lib/sqlpage/std",
       init,
     );
   }
@@ -17,11 +20,15 @@ export class EndToEndTestPrime extends SqlPageAssembler<Resource> {
 
 if (import.meta.main) {
   if (Deno.args.length) {
-    await new SqlPageCLI((init) => new EndToEndTestPrime(init)).cli().parse(
-      Deno.args,
-    );
+    await new SqlPageCLI((init) => new SqlPageStarter(init)).cli()
+      .parse(
+        Deno.args,
+      );
   } else {
-    await new EndToEndTestPrime({ dryRun: false, cleaningRequested: false })
+    await new SqlPageStarter({
+      dryRun: false,
+      cleaningRequested: false,
+    })
       .materialize();
   }
 }

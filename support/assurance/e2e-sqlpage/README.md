@@ -3,42 +3,40 @@
 deno install
 
 # setup symlink to Spry stdlib
-./spryctl.ts init               # only required once, creates `sqlpage/sqlpage.json` and `src/spry` symlink
+./sqlpagectl.ts init               # only required once, creates `sqlpage/sqlpage.json` and `src/spry` symlink
 
 # Housekeeping
-./spryctl.ts clean
-./spryctl.ts help
+./sqlpagectl.ts clean
+./sqlpagectl.ts help
 
 # Listing and inspection
-./spryctl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
-./spryctl.ts ls ann             # list all candidate sqlpage_files that have been annotated with `@spry.*` or `@route.*`
-./spryctl.ts ls foundries       # list all candidate foundries (executables) which can generate content
-./spryctl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
-./spryctl.ts ls head            # list names of files which will generate SQL DDL/DML for "init" operations that go before sqlpage_files inserts
-./spryctl.ts ls tail            # list names of files which will generate SQL DDL/DML for "finalization" operations that go after sqlpage_files inserts
-./spryctl.ts ls routes          # list all discovered files that have route annotations as a tree
-./spryctl.ts ls routes -t       # list all discovered files that have route annotations as a table
-./spryctl.ts ls routes -j       # list all discovered files that have route annotations as JSON
-./spryctl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
+./sqlpagectl.ts ls                 # TODO: list all candidate sqlpage_files content files and if there are any annotation errors
+./sqlpagectl.ts ls --tree          # TODO: list all candidate sqlpage_files content files as a tree
+./sqlpagectl.ts ls head            # list names of files which will generate SQL DDL/DML for "init" operations that go before sqlpage_files inserts
+./sqlpagectl.ts ls tail            # list names of files which will generate SQL DDL/DML for "finalization" operations that go after sqlpage_files inserts
+./sqlpagectl.ts ls routes          # list all discovered files that have route annotations as a tree
+./sqlpagectl.ts ls routes -t       # list all discovered files that have route annotations as a table
+./sqlpagectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
+./sqlpagectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
 # SQL emission
-./spryctl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
-./spryctl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
-./spryctl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
-./spryctl.ts sql deploy         # generate the full deployment package (all the above)
+./sqlpagectl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
+./sqlpagectl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
+./sqlpagectl.ts sql sqlpage-files  # generate the INSERT SQL DML for sqlpage_files contents
+./sqlpagectl.ts sql deploy         # generate the full deployment package (all the above)
 
 # Deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
-./spryctl.ts > sqlpage-package.sql
-./spryctl.ts | sqlite3 sqlpage.db
+./sqlpagectl.ts > sqlpage-package.sql
+./sqlpagectl.ts | sqlite3 sqlpage.db
 
 # Development
-./spryctl.ts dev                # launch SQLpage binary and reload SQLite content on file changes
+./sqlpagectl.ts dev                # launch SQLpage binary and reload SQLite content on file changes
 ```
 
 ## TODO: explain Build vs. Deploy
 
-- The build process `spryctl.ts build` generates files
+- The build process `sqlpagectl.ts build` generates files
 - The deploy process puts together generated files into `sqlpage_files` SQL
   `INSERT` DML statements
 

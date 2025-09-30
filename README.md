@@ -1,4 +1,6 @@
-# Spry Assembler
+<p align="center">
+  <img src="./support//assets/spry-logo-784x318.webp" />
+</p>
 
 Spry Assembler is a lightweight system for organizing, transforming, and
 assembling SQL-accepting files (and other framework-light sources) into
@@ -80,29 +82,6 @@ Spry Assembler works around four ideas:
    - Database: an optional SQLite table that SQL-accepting tools (like SQLPage)
      can read directly.
 
-## Typical Workflow
-
-1. Write your source file (SQL, Markdown, HTML, Bash, or even an AI prompt
-   file).
-
-2. Add annotations to describe intent (titles, routes, metadata).
-
-3. Add directives to insert layouts or snippets.
-
-4. (Optional) Add a foundry to generate content.
-
-5. Run Spry Assembler:
-
-   ```bash
-   ./spryctl.ts build
-   ```
-
-   - It scans your files.
-   - Runs any helpers.
-   - Assembles everything into consistent stores.
-
-6. Use `./spryctl.ts dev` to watch for changes and auto-rebuild.
-
 ## Why It Matters
 
 - For SQL & Bash: finally have a framework-like system for consistency.
@@ -128,3 +107,55 @@ Spry Assembler works around four ideas:
 applies your rules, runs your helpers, and assembles everything into consistent,
 framework-like outputs — even when working with languages or sources that don’t
 have frameworks of their own.
+
+## Contributors and Maintainers (TODO: need to refine and elaborate)
+
+### Init after clone
+
+This repo uses git hooks for maintenance, after cloning the repo in your sandbox
+please do the following:
+
+```bash
+deno task init
+```
+
+### Check for missing deps
+
+```bash
+deno task doctor
+```
+
+You should see something like this:
+
+```bash
+Git dependencies
+  🆗 .githooks/pre-commit
+  🆗 .githooks/pre-push
+  🆗 .githooks/prepare-commit-msg
+Runtime dependencies
+  🆗 deno 1.34.0 (release, x86_64-unknown-linux-gnu)
+Build dependencies
+  🆗 dot - graphviz version 2.43.0 (0)
+  🆗 java 17 2021-09-14 LTS
+  🆗 PlantUML version 1.2022.6 (Tue Jun 21 13:34:49 EDT 2022)
+```
+
+Doctor task legend:
+
+- 🚫 is used to indicate a warning or error and should be corrected
+- 💡 is used to indicate an (optional) _suggestion_
+- 🆗 is used to indicate success
+
+If you get any error messages for `dot`, `Java`, or `PlantUML` then you will not
+get auto-generated entity relationship diagrams (ERDs).
+
+### Tagging and pushing commits
+
+When you're ready to push code:
+
+```bash
+deno task git-hook-pre-commit   # run all tests/validation that will be run by Git commit hook so there are no surprises
+git commit -m ...               # commit your if the above shows no errors
+deno task prepare-publish       # bump the version tag and prepare for push
+git push                        # push the code with the bumped version
+```

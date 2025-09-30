@@ -1,5 +1,5 @@
 -- #include shahid -f ./bad.sql
--- NotFound: No such file or directory (os error 2): readfile '/home/snshah/workspaces/github.com/strategy-coach/spry/lib/std/bad.sql'
+-- replace /home/snshah/workspaces/github.com/strategy-coach/spry/lib/sqlpage/std/index.sql with ./bad.sql
 -- #includeEnd shahid
 
 -- @route.title 'Spry Backend-as-a-Service (BaaS)' @route.caption "Spry BaaS"
