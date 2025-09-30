@@ -1,10 +1,15 @@
-Awesome—SQLite + a preprocessor is a sweet combo for “SQL-only middleware.” Below are **drop-in patterns** adapted to SQLite (JSON1, FTS5, triggers, CASE-based ORDER BY), and notes on how to exploit your **.sql preprocessor** (for includes/macros). I’ll keep the snippets portable and parameter-driven for `run_sql(...)`.
+Awesome—SQLite + a preprocessor is a sweet combo for “SQL-only middleware.”
+Below are **drop-in patterns** adapted to SQLite (JSON1, FTS5, triggers,
+CASE-based ORDER BY), and notes on how to exploit your **.sql preprocessor**
+(for includes/macros). I’ll keep the snippets portable and parameter-driven for
+`run_sql(...)`.
 
 ---
 
 # 1) Request context with temp table (SQLite-safe)
 
-SQLite has no per-session `set_config`, so stash request context in a **temp table** created at the start of each page (one connection per request).
+SQLite has no per-session `set_config`, so stash request context in a **temp
+table** created at the start of each page (one connection per request).
 
 ```sql
 -- ctx.sql  (run first on each request)
@@ -42,7 +47,8 @@ SELECT ctx.user_id, ctx.locale FROM ctx;
 
 # 2) Role/flag guards that short-circuit rendering
 
-Return a component row when blocked; otherwise nothing. Compose guards with `UNION ALL`.
+Return a component row when blocked; otherwise nothing. Compose guards with
+`UNION ALL`.
 
 ```sql
 -- guards/require_role.sql
@@ -146,7 +152,8 @@ OFFSET (SELECT offset_val FROM q);
 
 # 5) Declarative validation (JSON1 + simple checks)
 
-SQLite lacks native `REGEXP` (unless you added an extension). Prefer presence, length, numeric bounds.
+SQLite lacks native `REGEXP` (unless you added an extension). Prefer presence,
+length, numeric bounds.
 
 ```sql
 -- validations(entity TEXT, field TEXT, required INT, min_num REAL, max_num REAL, min_len INT, max_len INT, like TEXT)
@@ -248,7 +255,8 @@ WITH u AS (SELECT json_object('name', name, 'email', email) AS user FROM users W
 SELECT * FROM run_sql('partials/user_card.sql', (SELECT user FROM u));
 ```
 
-> Preprocessor: define `@macro USER_CARD(json)` → `run_sql('partials/user_card.sql', json)`
+> Preprocessor: define `@macro USER_CARD(json)` →
+> `run_sql('partials/user_card.sql', json)`
 
 ---
 
@@ -265,7 +273,8 @@ SELECT 'message','Unknown command','No handler found'
 WHERE NOT EXISTS (SELECT 1 FROM h);
 ```
 
-**Example handler (creates project with validation + audit happens via trigger):**
+**Example handler (creates project with validation + audit happens via
+trigger):**
 
 ```sql
 -- handlers/create_project.sql
@@ -338,7 +347,8 @@ WHERE EXISTS (SELECT 1 FROM miss)
 RETURNING 'raw' AS component, payload;
 ```
 
-> If you don’t have a SHA/MD5 extension, store `cache_key = :filters` (works fine if params are short) or roll your own key in the preprocessor.
+> If you don’t have a SHA/MD5 extension, store `cache_key = :filters` (works
+> fine if params are short) or roll your own key in the preprocessor.
 
 ---
 
@@ -385,7 +395,8 @@ SELECT * FROM run_sql(
 );
 ```
 
-> Preprocessor: `@macro LIST(resource)` → `run_sql('generic_list.sql', json_object('resource', resource))`
+> Preprocessor: `@macro LIST(resource)` →
+> `run_sql('generic_list.sql', json_object('resource', resource))`
 
 ---
 
@@ -408,7 +419,10 @@ SELECT * FROM run_sql('log_event.sql', json_object('event','projects.view','meta
 
 # 14) Error-resilient external fetch
 
-SQLite can’t try/catch SQL errors, but you can **wrap external calls** in a helper that returns a default row on failure. If your SQLPage provides `sqlpage.fetch(...)`, prefer returning a sentinel when fetch fails and **COALESCE** your component.
+SQLite can’t try/catch SQL errors, but you can **wrap external calls** in a
+helper that returns a default row on failure. If your SQLPage provides
+`sqlpage.fetch(...)`, prefer returning a sentinel when fetch fails and
+**COALESCE** your component.
 
 ```sql
 -- safe_fetch.sql (pseudo—depends on your fetch function name)
@@ -429,13 +443,15 @@ SELECT 'message','Upstream error','Could not load external data' WHERE NOT EXIST
 
 Your external preprocessor can make this feel like a full framework:
 
-* **Includes**: `@include "ctx.sql"` at top of every file.
-* **Macros**:
+- **Includes**: `@include "ctx.sql"` at top of every file.
+- **Macros**:
 
-  * `@macro GUARD(role)` → expands to `run_sql('guards/require_role.sql', ...)`
-  * `@macro USER_CARD(user_json)` → expands to the partial call.
-* **Constants/config**: `@define PAGE_SIZE_DEFAULT 20`, substitute in `query_opts.sql`.
-* **File routing**: generate `routes` seed data from a directory tree (compile-time).
+  - `@macro GUARD(role)` → expands to `run_sql('guards/require_role.sql', ...)`
+  - `@macro USER_CARD(user_json)` → expands to the partial call.
+- **Constants/config**: `@define PAGE_SIZE_DEFAULT 20`, substitute in
+  `query_opts.sql`.
+- **File routing**: generate `routes` seed data from a directory tree
+  (compile-time).
 
 ---
 
@@ -456,18 +472,24 @@ UNION ALL
 SELECT * FROM run_sql('log_event.sql', json_object('event','projects.list','meta',json_object()));
 ```
 
-This structure gives you **consistent context, policy, validation, logging, caching, and templating** across a growing app—using only SQLite + your preprocessor + `run_sql`.
+This structure gives you **consistent context, policy, validation, logging,
+caching, and templating** across a growing app—using only SQLite + your
+preprocessor + `run_sql`.
 
-If you want, tell me which bits you plan to ship first (e.g., auth, CRUD, dashboards), and I’ll bundle the relevant files into a ready-to-paste mini-starter.
+If you want, tell me which bits you plan to ship first (e.g., auth, CRUD,
+dashboards), and I’ll bundle the relevant files into a ready-to-paste
+mini-starter.
 
-Great question. SvelteKit’s routing/layout model is full of ideas you can borrow—even in a SQLPage + SQLite + preprocessor world. Here’s a compact, practical “translation guide” with patterns and snippets you can drop in.
+Great question. SvelteKit’s routing/layout model is full of ideas you can
+borrow—even in a SQLPage + SQLite + preprocessor world. Here’s a compact,
+practical “translation guide” with patterns and snippets you can drop in.
 
 ---
 
 # 1) Filesystem routing → table-driven + folders
 
-**SvelteKit:** `src/routes/blog/[slug]/+page.svelte`
-**SQLPage idea:** mirror the tree; your preprocessor compiles it into a `routes` table.
+**SvelteKit:** `src/routes/blog/[slug]/+page.svelte` **SQLPage idea:** mirror
+the tree; your preprocessor compiles it into a `routes` table.
 
 ```
 /routes
@@ -483,17 +505,18 @@ Great question. SvelteKit’s routing/layout model is full of ideas you can borr
 
 Compile-time, generate `routes(path, sql_file, kind)` rows:
 
-* `+layout.sql` → layout node for a prefix
-* `+page.sql` → actual page
-* `+server.sql` → API endpoint (JSON)
-* `+page.actions.sql` → form handlers/command bus
+- `+layout.sql` → layout node for a prefix
+- `+page.sql` → actual page
+- `+server.sql` → API endpoint (JSON)
+- `+page.actions.sql` → form handlers/command bus
 
 ---
 
 # 2) Nested layouts & “slots”
 
-**SvelteKit:** layouts compose; `slot` fills child content.
-**SQLPage:** implement `render_layout(layout_file, inner_sql, params)`. Layout selects header/nav, then injects child content via `run_sql(inner_sql, params)`.
+**SvelteKit:** layouts compose; `slot` fills child content. **SQLPage:**
+implement `render_layout(layout_file, inner_sql, params)`. Layout selects
+header/nav, then injects child content via `run_sql(inner_sql, params)`.
 
 ```sql
 -- _layout_helpers.sql
@@ -532,14 +555,15 @@ SELECT 'navbar' AS component, 'Dashboard' AS title;
 SELECT * FROM run_sql(json_extract(:params,'$.child_sql'), :params);
 ```
 
-> Tip: Your preprocessor can auto-wire the chain: parent `+layout.sql` wraps child layout wraps `+page.sql`.
+> Tip: Your preprocessor can auto-wire the chain: parent `+layout.sql` wraps
+> child layout wraps `+page.sql`.
 
 ---
 
 # 3) Dynamic params: `[id]`, rest params: `[...slug]`
 
-**SvelteKit:** folder names drive params.
-**SQLPage:** let dispatcher parse the path and set `:params` JSON.
+**SvelteKit:** folder names drive params. **SQLPage:** let dispatcher parse the
+path and set `:params` JSON.
 
 ```sql
 -- example page: /routes/users/[id]/+page.sql
@@ -561,8 +585,9 @@ FROM json_each(json_extract(:params,'$.slug')); -- assume helper functions
 
 # 4) `+layout.server.ts` / `load()` → `+layout.load.sql`
 
-**SvelteKit:** parent/child `load` with cascading data.
-**SQLPage:** each `+layout.load.sql` stores results in temp tables (`temp.ctx_*`) that children read.
+**SvelteKit:** parent/child `load` with cascading data. **SQLPage:** each
+`+layout.load.sql` stores results in temp tables (`temp.ctx_*`) that children
+read.
 
 ```sql
 -- /routes/+layout.load.sql
@@ -575,17 +600,19 @@ WHERE s.token=:token
 GROUP BY u.id;
 ```
 
-Children can `SELECT * FROM temp.ctx_app`. You can add `/routes/dashboard/+layout.load.sql` to add `temp.ctx_dash`, etc.
+Children can `SELECT * FROM temp.ctx_app`. You can add
+`/routes/dashboard/+layout.load.sql` to add `temp.ctx_dash`, etc.
 
 ---
 
 # 5) Shared error & loading routes: `+error`, `+loading`
 
-**SvelteKit:** special files.
-**SQLPage:** define global partials and make dispatcher fall back to them.
+**SvelteKit:** special files. **SQLPage:** define global partials and make
+dispatcher fall back to them.
 
-* `/routes/+error.sql` – render a friendly component with details (no stack).
-* `/routes/+loading.sql` – optional skeleton (helpful when you use external fetches).
+- `/routes/+error.sql` – render a friendly component with details (no stack).
+- `/routes/+loading.sql` – optional skeleton (helpful when you use external
+  fetches).
 
 Dispatcher skeleton:
 
@@ -618,14 +645,15 @@ SELECT * FROM run_sql(
 );
 ```
 
-Your `+page.sql` emits a `<form>` pointing at the same path with a hidden `action` field.
+Your `+page.sql` emits a `<form>` pointing at the same path with a hidden
+`action` field.
 
 ---
 
 # 7) Route groups `(group)` and “private” folders
 
-**SvelteKit:** groups don’t affect URL but organize code.
-**SQLPage:** let folders in `()` be ignored for the path but contribute a layout.
+**SvelteKit:** groups don’t affect URL but organize code. **SQLPage:** let
+folders in `()` be ignored for the path but contribute a layout.
 
 ```
 /routes
@@ -633,31 +661,34 @@ Your `+page.sql` emits a `<form>` pointing at the same path with a hidden `actio
   /(app)/projects/+page.sql <-- path is /projects
 ```
 
-Preprocessor: compute the “effective layouts” chain for each page by walking parents and including any group layouts.
+Preprocessor: compute the “effective layouts” chain for each page by walking
+parents and including any group layouts.
 
 ---
 
 # 8) Universal vs server-only data
 
-**SvelteKit:** `+layout.ts` (universal) vs `+layout.server.ts`.
-**SQLPage:** decide what becomes:
+**SvelteKit:** `+layout.ts` (universal) vs `+layout.server.ts`. **SQLPage:**
+decide what becomes:
 
-* **Universal** (safe to embed in HTML): labels, i18n strings, feature toggles.
-* **Server-only** (temp tables only): secrets, raw tokens, internal IDs.
+- **Universal** (safe to embed in HTML): labels, i18n strings, feature toggles.
+- **Server-only** (temp tables only): secrets, raw tokens, internal IDs.
 
 Pattern:
 
-* `/+layout.load.sql` writes **both** a component (`'invisible'` or `'raw'`) returning public JSON, **and** a `temp.ctx_*` table for private data. Pages read from temp tables; if needed, they can also read the public JSON.
+- `/+layout.load.sql` writes **both** a component (`'invisible'` or `'raw'`)
+  returning public JSON, **and** a `temp.ctx_*` table for private data. Pages
+  read from temp tables; if needed, they can also read the public JSON.
 
 ---
 
 # 9) Per-route hooks: `handle`, `handleFetch`
 
-**SvelteKit:** global hooks.
-**SQLPage:** emulate with two special files your dispatcher calls:
+**SvelteKit:** global hooks. **SQLPage:** emulate with two special files your
+dispatcher calls:
 
-* `/hooks/+before.sql` (auth, tracing, feature flags)
-* `/hooks/+after.sql`  (logging, metrics)
+- `/hooks/+before.sql` (auth, tracing, feature flags)
+- `/hooks/+after.sql` (logging, metrics)
 
 ```sql
 -- before
@@ -671,8 +702,8 @@ SELECT * FROM run_sql('/hooks/+after.sql', json_object('path', :path, 'status', 
 
 # 10) Route options: `prerender`, `ssr`, `trailingSlash`
 
-**SvelteKit:** route metadata.
-**SQLPage:** support a `route_meta` table or front-matter in each `+page.sql` that your preprocessor extracts:
+**SvelteKit:** route metadata. **SQLPage:** support a `route_meta` table or
+front-matter in each `+page.sql` that your preprocessor extracts:
 
 ```sql
 -- front-matter-esque comment
@@ -681,18 +712,20 @@ SELECT * FROM run_sql('/hooks/+after.sql', json_object('path', :path, 'status', 
 -- compiled into route_meta(path, key, value)
 ```
 
-Dispatcher reads `route_meta` to set caching headers, enforce CSRF, or normalize paths.
+Dispatcher reads `route_meta` to set caching headers, enforce CSRF, or normalize
+paths.
 
 ---
 
 # 11) Layout “data contracts”
 
-Use a convention so layouts know what children provide and vice-versa. Example keys in `:params`:
+Use a convention so layouts know what children provide and vice-versa. Example
+keys in `:params`:
 
-* `params` – path params
-* `query` – parsed querystring
-* `ctx` – minimal public context (locale, theme)
-* `child_sql` – which page or nested layout to render next
+- `params` – path params
+- `query` – parsed querystring
+- `ctx` – minimal public context (locale, theme)
+- `child_sql` – which page or nested layout to render next
 
 Your preprocessor ensures each layer passes these along.
 
@@ -700,8 +733,8 @@ Your preprocessor ensures each layer passes these along.
 
 # 12) Error boundaries per layout
 
-**SvelteKit:** a layout can catch errors for its subtree.
-**SQLPage:** let each `+layout.sql` optionally define `+layout.error.sql`. Wrap the child call:
+**SvelteKit:** a layout can catch errors for its subtree. **SQLPage:** let each
+`+layout.sql` optionally define `+layout.error.sql`. Wrap the child call:
 
 ```sql
 -- in a layout
@@ -717,18 +750,20 @@ WHERE NOT EXISTS (SELECT 1 FROM child);
 
 # 13) Progressive enhancement pattern
 
-SvelteKit progressively enhances forms and links.
-In SQLPage:
+SvelteKit progressively enhances forms and links. In SQLPage:
 
-* Always make server-rendered forms work (POST → `+page.actions.sql`)
-* Optionally add a small JS sprinkles file per route that calls lightweight JSON endpoints in `/api/.../+server.sql` and swaps components (keep the server contract identical).
+- Always make server-rendered forms work (POST → `+page.actions.sql`)
+- Optionally add a small JS sprinkles file per route that calls lightweight JSON
+  endpoints in `/api/.../+server.sql` and swaps components (keep the server
+  contract identical).
 
 ---
 
 # 14) “Parent data” access
 
-**SvelteKit:** `const data = await parent()` in a child load.
-**SQLPage:** parents write into `temp.ctx_*` (server-only) and/or emit a `'raw'` component with public JSON `data`. Children can:
+**SvelteKit:** `const data = await parent()` in a child load. **SQLPage:**
+parents write into `temp.ctx_*` (server-only) and/or emit a `'raw'` component
+with public JSON `data`. Children can:
 
 ```sql
 -- read server-only
@@ -739,13 +774,15 @@ WITH d AS (SELECT payload FROM temp.ctx_public_data)  -- filled by parent
 SELECT json_extract(d.payload,'$.theme') FROM d;
 ```
 
-(You can have the preprocessor create a shared `temp.ctx_public_data` table per layout.)
+(You can have the preprocessor create a shared `temp.ctx_public_data` table per
+layout.)
 
 ---
 
 # 15) Path aliases and link helpers
 
-Create `link_to(name, params)` using the same route registry so links don’t hardcode paths.
+Create `link_to(name, params)` using the same route registry so links don’t
+hardcode paths.
 
 ```sql
 -- route_params(name, pattern, segments_json)
@@ -806,8 +843,7 @@ SELECT * FROM run_sql(
 
 If you want, I can sketch the dispatcher + preprocessor rules that auto-wire:
 
-* collecting the layout chain,
-* extracting route metadata,
-* populating `:params/:query`,
-* and invoking `+layout.load.sql` files in order before rendering.
-
+- collecting the layout chain,
+- extracting route metadata,
+- populating `:params/:query`,
+- and invoking `+layout.load.sql` files in order before rendering.

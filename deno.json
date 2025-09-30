@@ -7,5 +7,12 @@
     "git-hook-pre-push": "deno test --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
     "ts-check": "deno check --no-lock $(find . -name '*.ts' -not -path \"./support/*\")",
     "prepare-publish": "git semtag final"
+  },
+  "lint": {
+    "rules": {
+      "exclude": [
+        "no-import-prefix"
+      ]
+    }
   }
 }

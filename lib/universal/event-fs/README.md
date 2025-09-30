@@ -95,12 +95,12 @@ what’s happening.
 ```ts
 // Listen to all events
 const off = rfs.events.all((type, e) => {
-    console.log(type, e.path, "at", new Date(e.at).toISOString());
+  console.log(type, e.path, "at", new Date(e.at).toISOString());
 });
 
 // Listen to specific events, fully typed payloads:
 rfs.events.on("write:after", (ev) => {
-    console.log("Wrote", ev.path, "bytes:", ev.bytesWritten);
+  console.log("Wrote", ev.path, "bytes:", ev.bytesWritten);
 });
 ```
 
@@ -133,11 +133,11 @@ const buf = await rfs.read(rel("reports/2025/q3.txt"));
 
 ```ts
 await rfs.copy(rel("reports/2025/q3.txt"), rel("reports/2025/q3-backup.txt"), {
-    overwrite: true,
+  overwrite: true,
 });
 await rfs.move(
-    rel("reports/2025/q3-backup.txt"),
-    rel("reports/2025/q3-archived.txt"),
+  rel("reports/2025/q3-backup.txt"),
+  rel("reports/2025/q3-archived.txt"),
 );
 ```
 
@@ -159,7 +159,7 @@ for (const p of entries) console.log(String(p));
 ```ts
 const st = await rfs.stat(rel("assets/images/logo.svg"));
 if (st.exists && st.isFile) {
-    console.log("Logo size:", st.size);
+  console.log("Logo size:", st.size);
 }
 ```
 
@@ -211,9 +211,9 @@ changing your code.
 
 ```ts
 try {
-    await rfs.copy(rel("input.csv"), rel("backup/input.csv"));
+  await rfs.copy(rel("input.csv"), rel("backup/input.csv"));
 } catch (err) {
-    console.error("Backup failed:", err);
+  console.error("Backup failed:", err);
 }
 ```
 
@@ -223,18 +223,18 @@ try {
 
 ```ts
 async function mirror(
-    rfs: ReturnType<typeof reactiveFs>,
-    from: string,
-    to: string,
+  rfs: ReturnType<typeof reactiveFs>,
+  from: string,
+  to: string,
 ) {
-    const src = rel(from);
-    const dst = rel(to);
+  const src = rel(from);
+  const dst = rel(to);
 
-    const entries = await rfs.list(src);
-    for (const p of entries) {
-        const name = String(p).split("/").pop()!;
-        await rfs.copy(p, rel(`${String(dst)}/${name}`), { overwrite: true });
-    }
+  const entries = await rfs.list(src);
+  for (const p of entries) {
+    const name = String(p).split("/").pop()!;
+    await rfs.copy(p, rel(`${String(dst)}/${name}`), { overwrite: true });
+  }
 }
 ```
 
@@ -242,9 +242,9 @@ async function mirror(
 
 ```ts
 const off = rfs.events.on("write:after", (ev) => {
-    if (String(ev.path).startsWith("content/")) {
-        console.log("Updated content file:", String(ev.path));
-    }
+  if (String(ev.path).startsWith("content/")) {
+    console.log("Updated content file:", String(ev.path));
+  }
 });
 ```
 
@@ -280,7 +280,7 @@ console.log(await rfs.read(rel("docs/guides/readme.md"), { as: "text" }));
 
 await rfs.copy(rel("docs"), rel("backup/docs"), { overwrite: true });
 await rfs.move(rel("docs/guides/readme.md"), rel("docs/README.md"), {
-    overwrite: true,
+  overwrite: true,
 });
 
 await rfs.rm(rel("backup"), { recursive: true });

@@ -48,10 +48,10 @@ git subtree pull --prefix=vendor/spry https://github.com/you/master-repo.git mai
 ```json
 // deno.json
 {
-    "tasks": {
-        "vendor:add": "git subtree add --prefix=vendor/spry https://github.com/you/master-repo.git main --squash",
-        "vendor:update": "git subtree pull --prefix=vendor/spry https://github.com/you/master-repo.git main --squash"
-    }
+  "tasks": {
+    "vendor:add": "git subtree add --prefix=vendor/spry https://github.com/you/master-repo.git main --squash",
+    "vendor:update": "git subtree pull --prefix=vendor/spry https://github.com/you/master-repo.git main --squash"
+  }
 }
 ```
 
@@ -65,9 +65,9 @@ care about (e.g. `lib/std`), cleans old files, and writes them into `spry/`.
 
 ```json
 {
-    "source": "https://api.github.com/repos/you/master-repo/tarball/main",
-    "subdir": "lib/std",
-    "dest": "spry"
+  "source": "https://api.github.com/repos/you/master-repo/tarball/main",
+  "subdir": "lib/std",
+  "dest": "spry"
 }
 ```
 
@@ -85,11 +85,11 @@ type Manifest = { source: string; subdir: string; dest: string };
 const manifest: Manifest = JSON.parse(await Deno.readTextFile("vendor.json"));
 
 const res = await fetch(manifest.source, {
-    headers: { "Accept": "application/vnd.github+json" },
+  headers: { "Accept": "application/vnd.github+json" },
 });
 if (!res.ok) {
-    console.error(`Download failed: ${res.status} ${res.statusText}`);
-    Deno.exit(1);
+  console.error(`Download failed: ${res.status} ${res.statusText}`);
+  Deno.exit(1);
 }
 const buff = new Uint8Array(await res.arrayBuffer());
 
@@ -102,25 +102,25 @@ const dest = manifest.dest;
 await emptyDir(dest);
 
 for await (const entry of untar(reader)) {
-    if (!entry.fileName.includes("/")) continue; // top-level folder name
-    // strip the first path component: repo-hash/
-    const parts = entry.fileName.split("/");
-    const stripped = parts.slice(1).join("/");
+  if (!entry.fileName.includes("/")) continue; // top-level folder name
+  // strip the first path component: repo-hash/
+  const parts = entry.fileName.split("/");
+  const stripped = parts.slice(1).join("/");
 
-    // Only take files under subdir
-    if (!stripped.startsWith(manifest.subdir + "/")) continue;
+  // Only take files under subdir
+  if (!stripped.startsWith(manifest.subdir + "/")) continue;
 
-    const rel = stripped.slice(manifest.subdir.length + 1);
-    if (!rel) continue;
+  const rel = stripped.slice(manifest.subdir.length + 1);
+  if (!rel) continue;
 
-    const outPath = join(dest, rel);
+  const outPath = join(dest, rel);
 
-    if (entry.type === "directory") {
-        await ensureDir(outPath);
-    } else if (entry.type === "file") {
-        await ensureDir(join(outPath, ".."));
-        await Deno.writeFile(outPath, entry.content!);
-    }
+  if (entry.type === "directory") {
+    await ensureDir(outPath);
+  } else if (entry.type === "file") {
+    await ensureDir(join(outPath, ".."));
+    await Deno.writeFile(outPath, entry.content!);
+  }
 }
 
 console.log(`Vendored '${manifest.subdir}' -> '${dest}'`);
@@ -194,37 +194,37 @@ opens a PR.
 ```yaml
 name: Push vendored updates
 on:
-    push:
-        branches: [main]
+  push:
+    branches: [main]
 jobs:
-    update-dependents:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-            - uses: denoland/setup-deno@v1
-              with: { deno-version: v1.x }
-            - name: Update dependents
-              env:
-                  GH_TOKEN: ${{ secrets.GH_TOKEN }} # repo-level PAT with repo perms
-              run: |
-                  dependents=("you/app-a" "you/app-b")
-                  for repo in "${dependents[@]}"; do
-                    gh repo clone "$repo" dep
-                    cd dep
-                    # Drop in a vendor.json that points to master main (or tag), then run sync.ts
-                    jq -n \
-                      --arg src "https://api.github.com/repos/you/master-repo/tarball/main" \
-                      --arg sub "lib/std" \
-                      --arg dst "spry" \
-                      '{source:$src,subdir:$sub,dest:$dst}' > vendor.json
-                    deno run --allow-net=api.github.com --allow-read --allow-write ../sync.ts
-                    git checkout -b chore/vendor-update
-                    git add -A
-                    git commit -m "chore: vendor update from master-repo"
-                    gh pr create --fill || true
-                    cd ..
-                    rm -rf dep
-                  done
+  update-dependents:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v1
+        with: { deno-version: v1.x }
+      - name: Update dependents
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }} # repo-level PAT with repo perms
+        run: |
+          dependents=("you/app-a" "you/app-b")
+          for repo in "${dependents[@]}"; do
+            gh repo clone "$repo" dep
+            cd dep
+            # Drop in a vendor.json that points to master main (or tag), then run sync.ts
+            jq -n \
+              --arg src "https://api.github.com/repos/you/master-repo/tarball/main" \
+              --arg sub "lib/std" \
+              --arg dst "spry" \
+              '{source:$src,subdir:$sub,dest:$dst}' > vendor.json
+            deno run --allow-net=api.github.com --allow-read --allow-write ../sync.ts
+            git checkout -b chore/vendor-update
+            git add -A
+            git commit -m "chore: vendor update from master-repo"
+            gh pr create --fill || true
+            cd ..
+            rm -rf dep
+          done
 ```
 
 # Which should you pick?
@@ -285,10 +285,10 @@ import { copy, emptyDir } from "https://deno.land/std@0.224.0/fs/mod.ts";
 
 const [src, dest] = Deno.args;
 if (!src || !dest) {
-    console.error(
-        "Usage: deno run --allow-read --allow-write sync.ts <src> <dest>",
-    );
-    Deno.exit(1);
+  console.error(
+    "Usage: deno run --allow-read --allow-write sync.ts <src> <dest>",
+  );
+  Deno.exit(1);
 }
 
 await emptyDir(dest); // wipe dest first
@@ -361,9 +361,9 @@ Put it in a Deno task or npm script:
 ```json
 // deno.json
 {
-    "tasks": {
-        "vendor:sync": "rclone sync ./lib/std ./vendor/spry -P"
-    }
+  "tasks": {
+    "vendor:sync": "rclone sync ./lib/std ./vendor/spry -P"
+  }
 }
 ```
 

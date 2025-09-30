@@ -4,7 +4,7 @@ import {
   assertEquals,
   assertMatch,
   assertStringIncludes,
-} from "jsr:@std/assert";
+} from "jsr:@std/assert@1";
 import { provenanceText, sourceCodeProvenance } from "./provenance.ts";
 
 Deno.test("sourceCodeProvenance", async (t) => {

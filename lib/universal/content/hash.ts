@@ -25,7 +25,7 @@ export async function hashBytes(
   bytes: Uint8Array,
   alg: HashAlg = "SHA-256",
 ): Promise<string> {
-  const d = await crypto.subtle.digest(alg, bytes);
+  const d = await crypto.subtle.digest(alg, new Uint8Array(bytes));
   return toHex(d);
 }
 
