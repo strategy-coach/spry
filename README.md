@@ -159,3 +159,11 @@ git commit -m ...               # commit your if the above shows no errors
 deno task prepare-publish       # bump the version tag and prepare for push
 git push                        # push the code with the bumped version
 ```
+
+`deno task prepare-publish` is a simple wrapper but you can also use this for
+more control:
+
+```bash
+git-semtag final && git push
+# or git-semtag final -v "vN.N.N" && git push
+```
