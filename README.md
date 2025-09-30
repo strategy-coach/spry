@@ -128,7 +128,3 @@ Spry Assembler works around four ideas:
 applies your rules, runs your helpers, and assembles everything into consistent,
 framework-like outputs — even when working with languages or sources that don’t
 have frameworks of their own.
-
-Would you like me to also draft a one-page “executive” version (very high-level,
-no code samples) that you could hand to a product manager or business analyst
-without overwhelming them?
