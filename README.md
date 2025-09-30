@@ -3,38 +3,94 @@
 </p>
 
 Spry Assembler is a lightweight system for organizing, transforming, and
-assembling SQL-accepting files (and other framework-light sources) into
-consistent, reproducible outputs.
-
-Think of Spry as the assembler on your project team:
-
-- It discovers the files you already have (SQL, Markdown, HTML, scripts, AI
-  prompts, etc.).
-- It applies instructions you add inside those files (annotations and
-  directives).
-- It runs helpers (called foundries) that generate extra content when needed.
-- It assembles everything into consistent outputs that tools can use — for
-  example, a SQLite table for SQL-accepting tools like SQLPage, or a set of
-  auto-generated files you can share.
+assembling your source-like files (SQL, Markdown, HTML, shell scripts, or even
+AI prompts) into consistent, reproducible outputs.
 
 Spry is designed for situations where you don’t already have a full-blown
 framework. Languages like Java, JavaScript, and TypeScript have large ecosystems
-with many frameworks (Spring, React, Next.js, etc.). But SQL, Bash, and even
-“non-traditional” sources like AI prompts or Markdown don’t have much structure.
-Spry Assembler fills that gap.
+with many frameworks (Spring, React, Next.js, etc.). But SQL, shell scripts, and
+even “non-traditional” sources like AI prompts or Markdown don’t have much
+opionated structure. Spry Assembler fills that gap.
 
-## What Spry Assembler Does
+What Spry Does:
+
+- Discover the files you already have (SQL, Markdown, HTML, AI prompts,
+  scripts).
+- Annotate them with simple tags (`@route`, `@title`) to add meaning (liked
+  _frontmatter_).
+- Transform them with directives (`#include`, snippets, layouts).
+- Generate more content with helpers called _foundries_ (Python, Bash,
+  TypeScript, etc.).
+- Assemble everything into reproducible outputs: — SQLite tables, JSON, HTML,
+  Markdown, or other artifacts.
+- Stay in sync and rebuild automatically when files change.
+
+```
+ Sources                Acquired resources       Refinement & transforms      Final products
+                        "Discovery" step         "Materialization" step       
+┌──────────────┐       ┌──────────────────┐ 1:N ┌──────────────────────┐ 1:1 ┌───────────────────┐
+│ File System  ├──────►│ Originators &    ├────►│ Annotations (@...)   ├────►│  Filesystem       │
+│ Databases    │       │ Foundries        │     | Directives (#...)    │     │  (spry.d/auto/*)  │
+│ URLs / APIs  │       │ (SQL, JSON, etc.)│     | Transformations │    │     |  SQL DDL/DML, ... │
+│ AI Prompts   │       └──────────▲───────┘     └───────┬──────────────┘     │  HTML, JSON, etc. │
+│ Other input  │                  │                   recursive              └─────────┬─────────┘
+└──────────────┘                  │                   fan-out                          │
+                                  │                                               Destinations
+                                  └────────────────────────────────────────────────────┘
+```
+
+- Originators & Foundries: pull in files, fetch from DBs/APIs, or run helper
+  scripts to create resources.
+- Refinement: annotations add intent, directives insert snippets, middleware
+  transforms or fans out new resources.
+- Final products: rendered into SQLite, filesystem outputs, JSON, HTML, or other
+  destinations.
+
+Why Spry is useful:
 
 - Keeps things organized — pages, prompts, or scripts can be cataloged with
   routes and metadata.
-- Removes repetition — you can reuse layouts, headers, or snippets with a single
+- Removes repetition — reuse layouts, headers, or snippets with a single
   directive.
 - Runs your helpers — any script or program (Python, Bash, Rust, Node.js, etc.)
-  can act as a _foundry_ that generates SQL, JSON, or Markdown.
+  can act as a foundry that generates SQL, JSON, or Markdown.
 - Keeps outputs in sync — your source files plus Spry’s rules always produce the
   same results.
 - Supports dev workflow — watch files for changes, rebuild automatically, and
   keep SQL-accepting tools up-to-date.
+- Generates any kind of artifact — HTML, SQL, JSON, Markdown, or even static
+  “sites” and engineering deliverables.
+- Scales efficiently — supports partial rebuilds, incremental generation, and
+  advanced strategies like stale-while-revalidate.
+
+Why Spry Matters:
+
+- For SQL & Bash (or any shell scripts): finally a framework-like system for
+  consistency.
+- For AI Prompts: treat them like source code — versioned, reproducible, and
+  pipeline-ready.
+- For Engineering Teams: structured generation: resources can come from
+  anywhere, be refined in pipelines, and be rendered into any kind of
+  deliverable.
+- For Business Analysts: annotations and routes are easy to learn, no heavy
+  frameworks required.
+- For Large Sites or Catalogs: supports high-performance builds, partial
+  updates, and scalable information architecture.
+- For Teams: deterministic outputs mean the same build runs identically across
+  machines.
+
+Example Use Cases:
+
+- A data analyst wants to keep a catalog of SQL queries and reports with
+  consistent navigation.
+- A business team wants AI prompts managed like source code, so outputs are
+  predictable.
+- A developer needs to generate thousands of static HTML pages but only
+  re-render the ones that change.
+- An engineering group wants to combine SQL queries, Python scripts, and
+  Markdown into one reproducible workflow.
+- A company wants branded, type-safe HTML reports, enforced by a design system
+  but generated from arbitrary resource inputs.
 
 ## Key Concepts
 
@@ -81,32 +137,6 @@ Spry Assembler works around four ideas:
      commit).
    - Database: an optional SQLite table that SQL-accepting tools (like SQLPage)
      can read directly.
-
-## Why It Matters
-
-- For SQL & Bash: finally have a framework-like system for consistency.
-- For AI Prompts: treat them like source code, keep them versioned,
-  reproducible, and usable in pipelines.
-- For Business Analysts: simple tags (`@route`, `#include`) let you describe
-  what you want without writing new frameworks.
-- For Teams: deterministic outputs mean the same build runs identically across
-  machines.
-
-## Example Use Cases
-
-- A data analyst wants to keep a catalog of SQL queries and reports with
-  consistent navigation.
-- A business team wants AI prompts to be managed like source code, so outputs
-  are predictable.
-- A junior developer wants to reuse headers, layouts, or snippets across
-  multiple SQL or Markdown files.
-- A mixed team needs Python scripts and SQL queries to run in the same
-  repeatable workflow.
-
-👉 In short: Spry Assembler is a lightweight system that discovers your files,
-applies your rules, runs your helpers, and assembles everything into consistent,
-framework-like outputs — even when working with languages or sources that don’t
-have frameworks of their own.
 
 ## Contributors and Maintainers (TODO: need to refine and elaborate)
 
