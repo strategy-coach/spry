@@ -64,7 +64,11 @@ export function upsertMissingAncestors<T>(
 }
 
 export class CLI<R extends Resource, A extends Assembler<R>> {
-    constructor(readonly freshAssembler: () => A) {
+    constructor(
+        readonly freshAssembler: (
+            init: { dryRun: boolean; cleaningRequested: boolean },
+        ) => A,
+    ) {
     }
 
     lsWorkflowStepsField<Row extends LsCommandRow>():
@@ -237,9 +241,12 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
         tree?: true | undefined;
         routes?: true | undefined;
     }) {
-        const assembler = this.freshAssembler();
+        const assembler = this.freshAssembler({
+            dryRun: true,
+            cleaningRequested: false,
+        });
         const summary = this.summaryHooks(assembler);
-        await assembler.materialize({ dryRun: true });
+        await assembler.materialize();
         let list = summary.toList();
         if (opts?.known) {
             list = list.filter((r) => r.nature === "unknown" ? false : true);
@@ -309,7 +316,10 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
     }
 
     async lsRoutes(opts?: { json?: boolean }) {
-        const assembler = this.freshAssembler();
+        const assembler = this.freshAssembler({
+            dryRun: true,
+            cleaningRequested: false,
+        });
         assembler.resourceBus.on("assembler:state:mutated", async (ev) => {
             if (ev.current.step === "final") {
                 const routes = new Routes(
@@ -333,6 +343,6 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
                 }
             }
         });
-        await assembler.materialize({ dryRun: true });
+        await assembler.materialize();
     }
 }

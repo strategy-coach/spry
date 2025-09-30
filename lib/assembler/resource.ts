@@ -1,8 +1,14 @@
 import { z } from "jsr:@zod/zod@4";
-import { extractAnnotationsFromText } from "../universal/content/code-comments.ts";
+import {
+    AnnotationCatalog,
+    extractAnnotationsFromText,
+} from "../universal/content/code-comments.ts";
 import { LanguageSpec } from "../universal/content/code.ts";
 
 const resourceCommon = {
+    isParsedSuccessfully: z.boolean().describe(
+        "Whether or not the Resource annotations were parsed successfully by Zod",
+    ),
     isSystemGenerated: z.boolean().describe(
         "Virtual resources are not annotated by a user but created by the system",
     ),
@@ -80,6 +86,13 @@ export const resourceSchema = z.discriminatedUnion("nature", [
         ),
         ...resourceCommon,
     }).strict(),
+    z.object({
+        nature: z.literal("invalid:annotations").describe(
+            "The resource is not valid due to invalid resource-level innotations",
+        ),
+        error: z.string(),
+        ...resourceCommon,
+    }).strict(),
 ]).describe(
     `The nature of this file influences how it's treated by the system. 
    Possible values are:
@@ -93,6 +106,26 @@ export const resourceSchema = z.discriminatedUnion("nature", [
 );
 
 export type Resource = z.infer<typeof resourceSchema>;
+
+export type WebPathSupplier = {
+    readonly webPath: string;
+};
+
+export const isWebPathSupplier = (o: unknown): o is WebPathSupplier =>
+    o && typeof o === "object" && "webPath" in o &&
+        typeof o.webPath === "string"
+        ? true
+        : false;
+
+export type AnnotationsSupplier<T = unknown> = {
+    readonly annotations: AnnotationCatalog<T>;
+};
+
+export const isAnnotationsSupplier = (o: unknown): o is AnnotationsSupplier =>
+    o && typeof o === "object" && "annotations" in o &&
+        typeof o.annotations === "object"
+        ? true
+        : false;
 
 export type TextSupplier = {
     readonly text: () => string | Promise<string>;

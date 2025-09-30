@@ -24,13 +24,17 @@ import {
     zodParsedResourceAnns,
 } from "./resource.ts";
 import { Route } from "./route.ts";
+import z from "jsr:@zod/zod@4";
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
 
 export type ResourceEvents<R extends Resource> = {
     "diag:issue:annotations:resource": {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
-        annsCatalog?: AnnotationCatalog;
+        annotations?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
         annsParseResult: ReturnType<typeof zodParsedResourceAnns>;
     };
@@ -38,7 +42,7 @@ export type ResourceEvents<R extends Resource> = {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
-        annsCatalog?: AnnotationCatalog;
+        annotations?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
         routeParseResult: ReturnType<typeof Route.zodParsedAnnsCatalog>;
     };
@@ -46,7 +50,7 @@ export type ResourceEvents<R extends Resource> = {
         assemblerState: AssemblerState;
         resource: R;
         supplier: ResourceSupplier<R>;
-        annsCatalog?: AnnotationCatalog;
+        annotations?: AnnotationCatalog;
         srcCodeLanguage?: LanguageSpec;
         resAnnsParseResult?: ReturnType<typeof zodParsedResourceAnns>;
     };
@@ -69,7 +73,6 @@ export type ResourceEvents<R extends Resource> = {
             changed?: undefined;
         };
         written: boolean;
-        dryRun?: boolean;
     };
     "foundry:materialized": {
         assemblerState: AssemblerState;
@@ -80,7 +83,6 @@ export type ResourceEvents<R extends Resource> = {
         matAbsFsPath: false | string;
         isCleanable: boolean;
         error?: unknown;
-        dryRun?: boolean;
     };
     "assembler:state:mutated": {
         assemblerState: AssemblerState;
@@ -93,25 +95,27 @@ export type WorkflowStep =
     | { readonly step: "init" }
     | {
         readonly step: "discovery";
-        readonly discovering: ResourcesCollection<Resource>;
+        readonly discovering: ResourcesCollection<Any>;
         readonly discovered: (resource: Resource) => Promise<void>;
     }
     | {
         readonly step: "materialization";
-        readonly discovered: ResourcesCollection<Resource>;
-        readonly materializing: ResourcesCollection<Resource>;
+        readonly discovered: ResourcesCollection<Any>;
+        readonly materializing: ResourcesCollection<Any>;
         readonly materialized: (resource: Resource) => Promise<void>;
     }
     | {
         readonly step: "final";
-        readonly discovered: ResourcesCollection<Resource>;
-        readonly materialized: ResourcesCollection<Resource>;
+        readonly discovered: ResourcesCollection<Any>;
+        readonly materialized: ResourcesCollection<Any>;
     };
 
 export class AssemblerState {
     #workflow: WorkflowStep;
 
-    constructor() {
+    constructor(
+        readonly init: { dryRun: boolean; cleaningRequested: boolean },
+    ) {
         this.#workflow = { step: "init" };
     }
 
@@ -263,7 +267,7 @@ export function cleaner(
 
         // run workflow in dryRun to catalog the resources which will call
         // resourceBus.on.materializedFoundry
-        await assembler.materialize({ dryRun: true, cleaningRequested: true });
+        await assembler.materialize();
 
         // now that files have been cleaned, see if there's request for any directory cleanup
         if (init?.removeDirs) {
@@ -288,7 +292,7 @@ export function assemblerBusesInit<R extends Resource>(
     const resources = eventBus<ResourceEvents<R>>();
 
     resources.on("resource:encountered", (ev) => {
-        if (ev.annsCatalog) {
+        if (ev.annotations) {
             if (ev.resAnnsParseResult?.error) {
                 resources.emit("diag:issue:annotations:resource", {
                     resource: ev.resource,
@@ -301,11 +305,11 @@ export function assemblerBusesInit<R extends Resource>(
             if (isFsFileResource(ev.resource)) {
                 const safeParse = Route.fromFsFileResource(
                     ev.resource,
-                    ev.annsCatalog,
+                    ev.annotations,
                 );
                 if (safeParse?.success) {
                     // this adds resource.route so isRouteSupplier will be true
-                    const route = new Route(safeParse.data, ev.annsCatalog);
+                    const route = new Route(safeParse.data, ev.annotations);
                     route.mutateAsRouteSupplier(ev.resource);
                     resources.emit("resource:mutated", {
                         assemblerState: ev.assemblerState,
@@ -355,8 +359,9 @@ export class Assembler<R extends Resource> {
         readonly projectId: string,
         readonly moduleHome: string, // import.meta.resolve('./') from module
         readonly assemblerBuses: AssemblerBusesInit<R>,
+        readonly init: { dryRun: boolean; cleaningRequested: boolean },
     ) {
-        this.#state = new AssemblerState();
+        this.#state = new AssemblerState(init);
     }
 
     get resourceBus() {
@@ -383,7 +388,7 @@ export class Assembler<R extends Resource> {
                     | ReturnType<typeof zodParsedResourceAnns>
                     | undefined;
                 let resAnn: Resource | undefined;
-                let annsCatalog:
+                let annotations:
                     | Awaited<ReturnType<typeof extractAnnotationsFromText>>
                     | undefined;
                 let srcCodeLanguage: LanguageSpec | undefined;
@@ -392,7 +397,7 @@ export class Assembler<R extends Resource> {
                     isSrcCodeLangSpecSupplier(resource)
                 ) {
                     srcCodeLanguage = resource.srcCodeLanguage;
-                    annsCatalog = await extractAnnotationsFromText(
+                    annotations = await extractAnnotationsFromText(
                         await resource.text(),
                         srcCodeLanguage,
                         {
@@ -402,19 +407,31 @@ export class Assembler<R extends Resource> {
                             json: false,
                         },
                     );
-                    annsParseResult = zodParsedResourceAnns(annsCatalog, {
+                    annsParseResult = zodParsedResourceAnns(annotations, {
+                        nature: "unknown",
+                        isParsedSuccessfully: true,
                         isSystemGenerated: false,
                     });
+
+                    // the resource annoations `resAnn` will be spread into Resource below
                     resAnn = annsParseResult?.success
                         ? annsParseResult.data
-                        : undefined;
+                        : (annsParseResult?.error
+                            ? {
+                                isParsedSuccessfully: false,
+                                isSystemGenerated: false,
+                                nature: "invalid:annotations",
+                                error: z.prettifyError(annsParseResult.error),
+                            }
+                            : undefined);
                 }
 
                 this.assemblerBuses.resources.emit("resource:encountered", {
                     assemblerState: this.#state,
-                    resource: { ...resource, ...resAnn },
+                    // the resource will now be an AnnotationsSupplier, too
+                    resource: { ...resource, ...resAnn, annotations },
                     supplier,
-                    annsCatalog,
+                    annotations,
                     srcCodeLanguage,
                     resAnnsParseResult: annsParseResult,
                 });
@@ -490,7 +507,6 @@ export class Assembler<R extends Resource> {
             & { absFsPath: string }
             & TextProducer
         >,
-        args?: { readonly dryRun?: boolean },
     ) {
         type ElementOfIterable<I> = I extends Iterable<infer T> ? T : never;
         type SourceFile = {
@@ -508,7 +524,7 @@ export class Assembler<R extends Resource> {
             const result = await replacer.processToString(original, state);
             let written = false;
             if (
-                !args?.dryRun &&
+                !this.#state.init.dryRun &&
                 (result.changed && result.after != result.before)
             ) {
                 await resource.writeText(result.after);
@@ -518,7 +534,6 @@ export class Assembler<R extends Resource> {
                 assemblerState: this.#state,
                 resource: resource as R & ElementOfIterable<typeof srcFiles>,
                 replacerResult: result,
-                dryRun: args?.dryRun,
                 written,
                 contentState: state.contentState,
             });
@@ -527,7 +542,6 @@ export class Assembler<R extends Resource> {
 
     async materializeFoundries(
         candidates: Iterable<FsFileResource>,
-        args?: { readonly dryRun?: boolean; cleaningRequested?: boolean },
     ) {
         // now see which files are executable and materialize them appropriately
         const { isExecutable, materialize } = this.executables;
@@ -536,7 +550,7 @@ export class Assembler<R extends Resource> {
         // foundries that create unmanaged (by Spry) files do their own cleaning
         // by being told through the environment
         const env = this.projectStateEnv({
-            cleaningRequested: args?.cleaningRequested,
+            cleaningRequested: this.#state.init.cleaningRequested,
         });
         const cwd = Deno.cwd();
 
@@ -553,7 +567,7 @@ export class Assembler<R extends Resource> {
                         matAbsFsPath,
                         env,
                         cwd,
-                        dryRun: args?.dryRun,
+                        dryRun: this.#state.init.dryRun,
                     }, (err) => error = err);
                     this.resourceBus.emit("foundry:materialized", {
                         assemblerState: this.#state,
@@ -562,7 +576,6 @@ export class Assembler<R extends Resource> {
                         matAbsFsPath,
                         env,
                         cwd,
-                        dryRun: args?.dryRun,
                         error,
                         isCleanable: wf.isCleanable ? true : false,
                     });
@@ -571,18 +584,14 @@ export class Assembler<R extends Resource> {
         }
     }
 
-    async materialize(
-        args?: {
-            readonly dryRun?: boolean;
-            readonly cleaningRequested?: boolean;
-        },
-    ) {
-        // TODO: this seems to have a lot of copy/paste of code?
-        // TODO: publish events before/after/etc. stage changes and other works
-        // TODO: refine how dryRun works
-        // TODO: add linting
-        // TODO: add observability for CLI directly into resources?
-
+    /**
+     * Two-phase materialization -- discover first, perform first-pass of file
+     * preparation and then run the exact process again on the "final" set of
+     * artifacts. Might converge this into a single-pass at some point but the
+     * two-pass model gives more flexibility.
+     * @param args
+     */
+    async materialize() {
         // we start in "init", then move to next stage
         let workflow = this.#state.nextStep(this.resourceBus);
         if (workflow?.step === "discovery") {
@@ -594,13 +603,11 @@ export class Assembler<R extends Resource> {
                 workflow.discovering.resources.filter(
                     isFsSrcCodeFileSupplier,
                 ),
-                args,
             );
 
             // now see which files are executable and materialize them appropriately
             this.materializeFoundries(
                 workflow.discovering.resources.filter(isFsFileResource),
-                args,
             );
         } else {
             console.warn("should be in discovery stage now");
@@ -614,18 +621,16 @@ export class Assembler<R extends Resource> {
             // restart the resources events bus
             await this.emitResources();
 
-            // directives are able to modify files so let's do that now
+            // directives are able to modify files so let's do that again
             await this.materializeDirectives(
                 workflow.materializing.resources.filter(
                     isFsSrcCodeFileSupplier,
                 ),
-                args,
             );
 
-            // now see which files are executable and materialize them appropriately
+            // now see which files are executable and materialize them again
             this.materializeFoundries(
                 workflow.materializing.resources.filter(isFsFileResource),
-                args,
             );
         } else {
             console.warn("should be in materialization stage now");

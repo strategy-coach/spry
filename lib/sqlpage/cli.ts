@@ -5,12 +5,19 @@ import { CLI, Resource } from "../assembler/mod.ts";
 import { SqlPageAssembler } from "./assembler.ts";
 
 export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
-    constructor(freshAssembler: () => SqlPageAssembler<Resource>) {
+    constructor(
+        freshAssembler: (
+            init: { dryRun: boolean; cleaningRequested: boolean },
+        ) => SqlPageAssembler<Resource>,
+    ) {
         super(freshAssembler);
     }
 
     async init(init: { dbName: string; clean: boolean }) {
-        const assembler = this.freshAssembler();
+        const assembler = this.freshAssembler({
+            dryRun: true,
+            cleaningRequested: false,
+        });
         const { spryStd, sqlPage } = assembler.projectPaths();
 
         const exists = async (path: string) =>
@@ -91,7 +98,10 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
             .command("clean")
             .description("Clean auto-generated directories or files")
             .action(async () => {
-                const assembler = this.freshAssembler();
+                const assembler = this.freshAssembler({
+                    dryRun: true,
+                    cleaningRequested: true,
+                });
                 const task = assembler.cleaner();
                 await task.clean(assembler);
             })
