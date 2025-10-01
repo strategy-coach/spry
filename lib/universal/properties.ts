@@ -1,4 +1,3 @@
-// deno-lint-ignore-file no-explicit-any
 /**
  * @module properties
  *
@@ -82,21 +81,30 @@ export type Meta = {
  * @internal
  */
 const metaOf = (s: z.ZodTypeAny): Meta | undefined => {
-  const anyS: any = s as any;
-  if (typeof anyS.meta === "function") {
+  type WithMetaFns = {
+    meta?: () => unknown;
+    getMeta?: () => unknown;
+    _def?: Record<string, unknown>;
+    def?: Record<string, unknown>;
+  };
+  const node = s as unknown as WithMetaFns;
+
+  if (typeof node.meta === "function") {
     try {
-      const m = anyS.meta();
-      if (m) return m as Meta;
+      const m = node.meta();
+      if (m && typeof m === "object") return m as Meta;
     } catch { /* ignore */ }
   }
-  if (typeof anyS.getMeta === "function") {
+  if (typeof node.getMeta === "function") {
     try {
-      const m = anyS.getMeta();
-      if (m) return m as Meta;
+      const m = node.getMeta();
+      if (m && typeof m === "object") return m as Meta;
     } catch { /* ignore */ }
   }
-  const def = anyS._def ?? anyS.def ?? {};
-  return (def.meta ?? def.metadata) as Meta | undefined;
+  const def = (node._def ?? node.def ?? {}) as Record<string, unknown>;
+  const maybe =
+    (def.meta ?? (def as Record<string, unknown>).metadata) as unknown;
+  return (maybe && typeof maybe === "object") ? maybe as Meta : undefined;
 };
 
 /**
@@ -105,10 +113,19 @@ const metaOf = (s: z.ZodTypeAny): Meta | undefined => {
  * @internal
  */
 const descOf = (s: z.ZodTypeAny): string | undefined => {
-  const anyS: any = s as any;
-  if (typeof anyS.description === "string") return anyS.description;
-  const def = anyS._def ?? anyS.def ?? {};
-  if (typeof def.description === "string") return def.description;
+  type WithDesc = {
+    description?: unknown;
+    _def?: Record<string, unknown>;
+    def?: Record<string, unknown>;
+  };
+  const node = s as unknown as WithDesc;
+
+  if (typeof node.description === "string") return node.description;
+
+  const def = (node._def ?? node.def ?? {}) as Record<string, unknown>;
+  const d = def.description;
+  if (typeof d === "string") return d;
+
   const m = metaOf(s);
   return typeof m?.description === "string" ? m.description : undefined;
 };
@@ -256,8 +273,11 @@ export function assemblerProperties<S extends z.ZodRawShape>(
   const values = new Map<K, unknown>();
   const bus = eventBus<PropEvents<S>>();
 
+  type ShapeAsAny = { [P in keyof S]: z.ZodTypeAny };
+  const shape = schema.shape as unknown as ShapeAsAny;
+
   const keys = () => Object.keys(schema.shape) as K[];
-  const sub = <T extends K>(k: T) => (schema.shape as any)[k] as z.ZodTypeAny;
+  const sub = <T extends K>(k: T) => shape[k] as z.ZodTypeAny;
 
   /**
    * Set a value after validating/coercing through its Zod schema.
@@ -281,11 +301,11 @@ export function assemblerProperties<S extends z.ZodRawShape>(
    * @returns The typed value, or `undefined` if unset and no default exists
    */
   function get<T extends K>(key: T): ValOf<S, T> | undefined {
-    if (values.has(key)) return values.get(key) as any;
+    if (values.has(key)) return values.get(key) as ValOf<S, T>;
     const s = sub(key);
     const out = s.safeParse(undefined); // realize defaults/transforms if any
     if (out.success && out.data !== undefined) {
-      values.set(key, out.data);
+      values.set(key, out.data as unknown);
       return out.data as ValOf<S, T>;
     }
     return undefined;
@@ -352,7 +372,7 @@ export function assemblerProperties<S extends z.ZodRawShape>(
           bus.emit("prop:missing", { key: k });
           throw new Error(`Required property '${k}' not provided`);
         }
-        values.set(k, out.data);
+        values.set(k, out.data as unknown);
       }
     }
 
@@ -366,9 +386,9 @@ export function assemblerProperties<S extends z.ZodRawShape>(
    * @throws ZodError if aggregate validation fails
    */
   function toObject(): z.infer<typeof schema> {
-    const obj: any = {};
-    for (const k of keys()) obj[k] = get(k as any);
-    return schema.parse(obj);
+    const obj: Partial<Record<K, unknown>> = {};
+    for (const k of keys()) obj[k] = get(k as K);
+    return schema.parse(obj as unknown);
   }
 
   /**
@@ -378,11 +398,19 @@ export function assemblerProperties<S extends z.ZodRawShape>(
     const merged = schema.merge(extra);
     const next = assemblerProperties(merged);
     const mergedKeys = new Set(Object.keys(merged.shape));
+
+    // Compute the merged key type to avoid `any`
+    type MShape = typeof merged extends z.ZodObject<infer MS> ? MS : never;
+    type MK = keyof MShape & string;
+
     for (const [k, v] of values.entries()) {
       if (mergedKeys.has(k)) {
-        try {
-          next.set(k as any, v, "extend-copy");
-        } catch { /* ignore */ }
+        // Type-safe invocation of next.set for merged schema
+        (next.set as (key: MK, value: unknown, source?: string) => unknown)(
+          k as unknown as MK,
+          v,
+          "extend-copy",
+        );
       }
     }
     return next;
@@ -414,9 +442,11 @@ export function propertiesQuery<S extends z.ZodRawShape>(
   bag: ReturnType<typeof assemblerProperties<S>>,
 ) {
   type K = KeyOf<S>;
+  type ShapeAsAny = { [P in keyof S]: z.ZodTypeAny };
+  const shape = bag.schema.shape as unknown as ShapeAsAny;
+
   const keys = () => Object.keys(bag.schema.shape) as K[];
-  const sub = <T extends K>(k: T) =>
-    (bag.schema.shape as any)[k] as z.ZodTypeAny;
+  const sub = <T extends K>(k: T) => shape[k] as z.ZodTypeAny;
 
   /**
    * List properties with optional tag filter, redaction, and **name transformation**.
@@ -463,8 +493,13 @@ export function propertiesQuery<S extends z.ZodRawShape>(
   function pick<T extends readonly K[]>(
     ...ks: T
   ): { [P in T[number]]: ValOf<S, P> } {
-    const out: any = {};
-    for (const k of ks) out[k] = bag.require(k);
+    const out = {} as { [P in T[number]]: ValOf<S, P> };
+    for (const k of ks) {
+      (out as Record<string, unknown>)[k] = bag.require(k) as unknown as ValOf<
+        S,
+        typeof k
+      >;
+    }
     return out;
   }
 
