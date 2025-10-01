@@ -48,6 +48,7 @@ export class SqlSupplier {
         | "Tail SQL Statements";
       readonly rootPath: string;
       readonly walkOptions?: WalkOptions;
+      readonly ensureExistence?: boolean;
       readonly emitWalkPathProvenance?: boolean;
     } | {
       readonly nature: "sqlpage_files Table Candidates";
@@ -69,17 +70,22 @@ export class SqlSupplier {
     nature: "Head SQL Statements" | "Tail SQL Statements",
     emitFnProvenance: boolean,
   ) {
+    let fnProvenanceEmitted = false;
     const walkers = this.paths.filter((p) => p.nature === nature);
     if (walkers.length) {
-      if (emitFnProvenance) {
-        yield `-- ${nature} in ${this.provenanceHint} (begin)`;
-      }
       for (const w of walkers) {
+        const ensureExists = w.nature !== "sqlpage_files Table Candidates"
+          ? w.ensureExistence
+          : false;
         const emitProv = w.nature !== "sqlpage_files Table Candidates"
           ? w.emitWalkPathProvenance
           : false;
         try {
           for await (const we of walk(w.rootPath, w.walkOptions)) {
+            if (emitFnProvenance && !fnProvenanceEmitted) {
+              yield `-- ${nature} in ${this.provenanceHint} (begin)`;
+              fnProvenanceEmitted = true;
+            }
             if (emitProv) {
               yield `-- ${nature} from ${this.relativeToCWD(we.path)} (begin)`;
             }
@@ -90,15 +96,17 @@ export class SqlSupplier {
           }
         } catch (err) {
           if (err instanceof Deno.errors.NotFound) {
-            // deno-fmt-ignore
-            yield `-- Walker root ${this.relativeToCWD(w.rootPath)} not found (${this.provenanceHint})`;
+            if (ensureExists) {
+              // deno-fmt-ignore
+              yield `-- Walker root ${this.relativeToCWD(w.rootPath)} not found (${this.provenanceHint})`;
+            }
           } else {
             // deno-fmt-ignore
             yield `-- Error: ${String(err)} in walker ${this.relativeToCWD(w.rootPath)} (${this.provenanceHint})`;
           }
         }
       }
-      if (emitFnProvenance) {
+      if (fnProvenanceEmitted) {
         yield `-- ${nature} in ${this.provenanceHint} (end)`;
       }
     } else {
@@ -117,6 +125,7 @@ export class SqlSupplier {
       try {
         for await (const we of walk(w.rootPath, w.walkOptions)) {
           const path = w["sqlpage_files Table path"](we);
+          // TODO: this is dumb, we shouldn't delete first just use ON CONFLICT
           yield inlinedSQL(
             db.delete(sqlpageFilesTable).where(
               eq(sqlpageFilesTable.path, path),
