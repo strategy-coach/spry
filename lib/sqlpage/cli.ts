@@ -3,6 +3,7 @@ import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import { dirname, join, relative } from "jsr:@std/path@1";
 import { CLI, Resource } from "../assembler/mod.ts";
 import { SqlPageAssembler } from "./assembler.ts";
+import { SqlSupplier } from "./sql.ts";
 
 export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
   constructor(
@@ -76,6 +77,49 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
     return { spryStd, sqlPage, created, removed, linked };
   }
 
+  async sql() {
+    const assembler = this.freshAssembler({
+      dryRun: true,
+      cleaningRequested: true,
+    });
+    const pp = assembler.projectPaths();
+    await new SqlSupplier([{
+      nature: "Head SQL Statements",
+      rootPath: join(pp.spryStd.absPathToLocal, "sql.d", "head"),
+      walkOptions: { includeDirs: false, canonicalize: true },
+      emitWalkPathProvenance: true,
+    }, {
+      nature: "sqlpage_files Table Candidates",
+      rootPath: pp.projectSrcHome,
+      "sqlpage_files Table path": (we) => {
+        if (
+          relative(pp.projectHome, we.path).startsWith(
+            assembler.stdlibSymlinkDest,
+          )
+        ) {
+          return relative(
+            Deno.cwd(), // assume that CWD is the project home
+            join("spry", relative(assembler.stdlibSymlinkDest, we.path)),
+          );
+        }
+        return relative(pp.projectSrcHome, we.path);
+      },
+      walkOptions: {
+        exts: [".sql", ".json"],
+        includeDirs: false,
+        includeFiles: true,
+        includeSymlinks: false,
+        followSymlinks: true, // important for "src/spry"
+        canonicalize: true, // important for "src/spry"
+      },
+    }, {
+      nature: "Tail SQL Statements",
+      rootPath: join(pp.spryStd.absPathToLocal, "sql.d", "tail"),
+      walkOptions: { includeDirs: false, canonicalize: true },
+      emitWalkPathProvenance: true,
+    }]).toStdOut();
+  }
+
   cli(init?: { name?: string }) {
     return new Command()
       .name(init?.name ?? "spryctl.ts")
@@ -83,12 +127,12 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
       .description(
         "Orchestrate the content which will be supplied to SQLPage target database.",
       )
-      .globalOption("--db-name <file>", "name of SQLite database", {
-        default: "sqlpage.db",
-      })
       .command("help", new HelpCommand().global())
       .command("init")
       .description("Setup local dev environment")
+      .option("--db-name <file>", "name of SQLite database", {
+        default: "sqlpage.db",
+      })
       .option("--clean", "Remove existing and recreate", {
         default: false,
       })
@@ -116,6 +160,11 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
         "-r, --routes",
         "Show only resources which have @route annotations",
       )
-      .action(async (opts) => await this.ls(opts));
+      .action(async (opts) => await this.ls(opts))
+      .command(
+        "sql",
+        "Collect and emit the SQL files to STDOUT or save to file",
+      )
+      .action(async () => await this.sql());
   }
 }
