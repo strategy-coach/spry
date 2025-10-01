@@ -19,6 +19,9 @@ deno install
 ./sqlpagectl.ts ls routes -j       # list all discovered files that have route annotations as JSON
 ./sqlpagectl.ts ls breadcrumbs     # list all discovered files that have route annotations as breadcrumbs
 
+# Foundries
+./sqlpagectl.ts foundry --env      # list all the environment variables which will be made available to executables
+
 # SQL emission
 ./sqlpagectl.ts sql head           # generate the SQL (usually DDL or DML, not SQL) that go before sqlpage_files inserts
 ./sqlpagectl.ts sql tail           # generate the SQL (usually DDL or DML, not SQL) that go after sqlpage_files inserts
@@ -91,6 +94,8 @@ applied to SQLPage’s distribution. Just be careful about putting things into
 
 WIP
 
+- [ ] Create #pipeTo directive which will take the output of the current file
+      (after processing) and send it as STDIN to another executable.
 - [ ] Create #prepend and #append similar to #include/#includeEnd except
       #prepend replaces everything before and #append replaces everything
       afterwards
