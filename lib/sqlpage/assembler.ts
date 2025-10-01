@@ -36,7 +36,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     moduleHome: string, // import.meta.resolve('./') from module
     assemblerBuses: AssemblerBusesInit<R>,
     readonly stdlibSymlinkDest: string,
-    init: { dryRun: boolean; cleaningRequested: boolean },
+    init: { dryRun: boolean; cleaningRequested?: boolean },
   ) {
     super(projectId, moduleHome, assemblerBuses, init);
 

@@ -66,7 +66,7 @@ export function upsertMissingAncestors<T>(
 export class CLI<R extends Resource, A extends Assembler<R>> {
   constructor(
     readonly freshAssembler: (
-      init: { dryRun: boolean; cleaningRequested: boolean },
+      init: { dryRun: boolean; cleaningRequested?: boolean },
     ) => A,
   ) {
   }
@@ -234,10 +234,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
     tree?: true | undefined;
     routes?: true | undefined;
   }) {
-    const assembler = this.freshAssembler({
-      dryRun: true,
-      cleaningRequested: false,
-    });
+    const assembler = this.freshAssembler({ dryRun: true });
     const summary = this.summaryHooks(assembler);
     await assembler.materialize();
     let list = summary.toList();
@@ -309,10 +306,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
   }
 
   async lsRoutes(opts?: { json?: boolean }) {
-    const assembler = this.freshAssembler({
-      dryRun: true,
-      cleaningRequested: false,
-    });
+    const assembler = this.freshAssembler({ dryRun: true });
     assembler.resourceBus.on("assembler:state:mutated", async (ev) => {
       if (ev.current.step === "final") {
         const routes = new Routes(

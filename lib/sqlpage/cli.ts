@@ -8,17 +8,14 @@ import { SqlSupplier } from "./sql.ts";
 export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
   constructor(
     freshAssembler: (
-      init: { dryRun: boolean; cleaningRequested: boolean },
+      init: { dryRun: boolean; cleaningRequested?: boolean },
     ) => SqlPageAssembler<Resource>,
   ) {
     super(freshAssembler);
   }
 
   async init(init: { dbName: string; clean: boolean }) {
-    const assembler = this.freshAssembler({
-      dryRun: true,
-      cleaningRequested: false,
-    });
+    const assembler = this.freshAssembler({ dryRun: true });
     const { spryStd, sqlPage } = assembler.projectPaths();
 
     const exists = async (path: string) =>
@@ -78,10 +75,7 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
   }
 
   async sql() {
-    const assembler = this.freshAssembler({
-      dryRun: true,
-      cleaningRequested: true,
-    });
+    const assembler = this.freshAssembler({ dryRun: true });
     const pp = assembler.projectPaths();
     await new SqlSupplier([{
       nature: "Head SQL Statements",

@@ -114,7 +114,7 @@ export class AssemblerState {
   #workflow: WorkflowStep;
 
   constructor(
-    readonly init: { dryRun: boolean; cleaningRequested: boolean },
+    readonly init: { dryRun: boolean; cleaningRequested?: boolean },
   ) {
     this.#workflow = { step: "init" };
   }
@@ -358,7 +358,7 @@ export class Assembler<R extends Resource> {
     readonly projectId: string,
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly assemblerBuses: AssemblerBusesInit<R>,
-    readonly init: { dryRun: boolean; cleaningRequested: boolean },
+    readonly init: { dryRun: boolean; cleaningRequested?: boolean },
   ) {
     this.#state = new AssemblerState(init);
   }

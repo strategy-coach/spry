@@ -7,7 +7,7 @@ import { SqlPageAssembler, SqlPageCLI } from "../../../lib/sqlpage/mod.ts";
 // change line 12 from `e2e-sqlpage` to your own project ID
 
 export class SqlPageStarter extends SqlPageAssembler<Resource> {
-  constructor(init: { dryRun: boolean; cleaningRequested: boolean }) {
+  constructor(init: { dryRun: boolean; cleaningRequested?: boolean }) {
     super(
       "e2e-sqlpage",
       import.meta.resolve("./"),
@@ -25,10 +25,6 @@ if (import.meta.main) {
         Deno.args,
       );
   } else {
-    await new SqlPageStarter({
-      dryRun: false,
-      cleaningRequested: false,
-    })
-      .materialize();
+    await new SqlPageStarter({ dryRun: false }).materialize();
   }
 }
