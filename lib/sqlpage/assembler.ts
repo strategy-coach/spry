@@ -126,6 +126,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
   ) {
     const projectSrcHome = resolve(projectHome, "src");
     const absPathToSpryLocal = join(projectSrcHome, "spry");
+    const relPathToSpryLocal = relative(Deno.cwd(), absPathToSpryLocal);
 
     // Spry is usually symlinked and Deno.watchFs doesn't follow symlinks
     // so we watch the physical Spry because the symlink won't be watched
@@ -136,6 +137,11 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     ];
     return {
       ...super.projectPaths(projectHome),
+      projectSqlDropIn: {
+        fsHome: resolve(projectSrcHome, "sql.d"),
+        fsHeadHome: resolve(projectSrcHome, "sql.d", "head"),
+        fsTailHome: resolve(projectSrcHome, "sql.d", "tail"),
+      },
       spryDropIn: {
         fsHome: resolve(projectSrcHome, "spry.d"),
         fsAuto: resolve(projectSrcHome, "spry.d", "auto"),
@@ -143,17 +149,23 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
         webAuto: join("spry.d", "auto"),
       },
       spryStd: {
-        homeFromSymlink: relative(
+        fsHomeFromSymlink: relative(
           dirname(absPathToSpryLocal),
           this.stdlibSymlinkDest,
         ),
-        absPathToLocal: absPathToSpryLocal,
-        relPathToHome: relative(Deno.cwd(), absPathToSpryLocal),
+        fsHomeAbs: absPathToSpryLocal,
+        fsHomeRelToProject: relPathToSpryLocal,
+        sqlDropIn: {
+          fsHome: resolve(relPathToSpryLocal, "sql.d"),
+          fsHeadHome: resolve(relPathToSpryLocal, "sql.d", "head"),
+          fsTailHome: resolve(relPathToSpryLocal, "sql.d", "tail"),
+        },
       },
       sqlPage: {
-        absPathToConfDir: join(projectHome, "sqlpage"),
+        fsConfDirHome: join(projectHome, "sqlpage"),
       },
       devWatchRoots,
+      relativeToCWD: (path: string) => relative(Deno.cwd(), path),
     };
   }
 
@@ -161,10 +173,14 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     const paths = this.projectPaths();
     return {
       ...super.projectStatePathEnvVars(),
-      "SQLPAGE_HOME": paths.sqlPage.absPathToConfDir,
-      "SPRY_STD_HOME": paths.spryStd.absPathToLocal,
-      "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.homeFromSymlink,
-      "SPRY_STD_HOME_REL": paths.spryStd.relPathToHome,
+      "SPRY_STD_SQLD_HEAD_HOME": paths.spryStd.sqlDropIn.fsHeadHome,
+      "SPRY_STD_SQLD_TAIL_HOME": paths.spryStd.sqlDropIn.fsTailHome,
+      "PROJECT_SQLD_HEAD_HOME": paths.projectSqlDropIn.fsHeadHome,
+      "PROJECT_SQLD_TAIL_HOME": paths.projectSqlDropIn.fsTailHome,
+      "SQLPAGE_HOME": paths.sqlPage.fsConfDirHome,
+      "SPRY_STD_HOME": paths.spryStd.fsHomeAbs,
+      "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.fsHomeFromSymlink,
+      "SPRY_STD_HOME_REL": paths.spryStd.fsHomeRelToProject,
       "SPRYD_HOME": paths.spryDropIn.fsHome,
       "SPRYD_AUTO": paths.spryDropIn.fsAuto,
       "SPRYD_WEB_HOME": paths.spryDropIn.webHome,

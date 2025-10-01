@@ -31,26 +31,26 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
 
     const removed: string[] = [];
     if (init?.clean) {
-      if (await exists(spryStd.relPathToHome)) {
-        await Deno.remove(spryStd.relPathToHome);
-        removed.push(spryStd.relPathToHome);
+      if (await exists(spryStd.fsHomeRelToProject)) {
+        await Deno.remove(spryStd.fsHomeRelToProject);
+        removed.push(spryStd.fsHomeRelToProject);
       }
 
-      if (await exists(sqlPage.absPathToConfDir)) {
-        await Deno.remove(sqlPage.absPathToConfDir, {
+      if (await exists(sqlPage.fsConfDirHome)) {
+        await Deno.remove(sqlPage.fsConfDirHome, {
           recursive: true,
         });
-        removed.push(relativeToCWD(sqlPage.absPathToConfDir));
+        removed.push(relativeToCWD(sqlPage.fsConfDirHome));
       }
     }
 
     const created: string[] = [];
     const linked: { from: string; to: string }[] = [];
 
-    if (!(await exists(sqlPage.absPathToConfDir))) {
-      await Deno.mkdir(sqlPage.absPathToConfDir, { recursive: true });
-      created.push(relativeToCWD(sqlPage.absPathToConfDir));
-      const sqpConf = join(sqlPage.absPathToConfDir, "sqlpage.json");
+    if (!(await exists(sqlPage.fsConfDirHome))) {
+      await Deno.mkdir(sqlPage.fsConfDirHome, { recursive: true });
+      created.push(relativeToCWD(sqlPage.fsConfDirHome));
+      const sqpConf = join(sqlPage.fsConfDirHome, "sqlpage.json");
       await Deno.writeTextFile(
         sqpConf,
         JSON.stringify(defaultSqlpageConf, null, 2),
@@ -58,28 +58,38 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
       created.push(relativeToCWD(sqpConf));
     }
 
-    if (!(await exists(spryStd.relPathToHome))) {
-      const spryStdLinkDest = dirname(spryStd.relPathToHome);
+    if (!(await exists(spryStd.fsHomeRelToProject))) {
+      const spryStdLinkDest = dirname(spryStd.fsHomeRelToProject);
       if (!(await exists(spryStdLinkDest))) {
         await Deno.mkdir(spryStdLinkDest, { recursive: true });
         created.push(relativeToCWD(spryStdLinkDest));
       }
-      await Deno.symlink(spryStd.homeFromSymlink, spryStd.relPathToHome);
+      await Deno.symlink(spryStd.fsHomeFromSymlink, spryStd.fsHomeRelToProject);
       linked.push({
-        from: spryStd.relPathToHome,
-        to: spryStd.homeFromSymlink,
+        from: spryStd.fsHomeRelToProject,
+        to: spryStd.fsHomeFromSymlink,
       });
     }
 
     return { spryStd, sqlPage, created, removed, linked };
   }
 
+  /**
+   * Assemble and yield all SQL statements from `spry/sql.d/head`,
+   * `src/sql.d/head`, then the `sqlpage_files` table INSERT DML,
+   * followed by `src/sql.d/tail` and finally `spry/sql.d/tail`.
+   */
   async sql() {
     const assembler = this.freshAssembler({ dryRun: true });
     const pp = assembler.projectPaths();
     await new SqlSupplier([{
       nature: "Head SQL Statements",
-      rootPath: join(pp.spryStd.absPathToLocal, "sql.d", "head"),
+      rootPath: join(pp.spryStd.sqlDropIn.fsHeadHome),
+      walkOptions: { includeDirs: false, canonicalize: true },
+      emitWalkPathProvenance: true,
+    }, {
+      nature: "Head SQL Statements",
+      rootPath: join(pp.projectSqlDropIn.fsHeadHome),
       walkOptions: { includeDirs: false, canonicalize: true },
       emitWalkPathProvenance: true,
     }, {
@@ -108,7 +118,12 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
       },
     }, {
       nature: "Tail SQL Statements",
-      rootPath: join(pp.spryStd.absPathToLocal, "sql.d", "tail"),
+      rootPath: join(pp.projectSqlDropIn.fsTailHome),
+      walkOptions: { includeDirs: false, canonicalize: true },
+      emitWalkPathProvenance: true,
+    }, {
+      nature: "Tail SQL Statements",
+      rootPath: join(pp.spryStd.sqlDropIn.fsTailHome),
       walkOptions: { includeDirs: false, canonicalize: true },
       emitWalkPathProvenance: true,
     }]).toStdOut();
@@ -150,11 +165,18 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
       .option("-k, --known", "Show only known resources, hide 'unknown'")
       .option("-l, --long", "Longer listing")
       .option("-t, --tree", "Simple tree of annotated routes")
+      .option("-g, --auto", "Filter auto-generated files")
       .option(
         "-r, --routes",
         "Show only resources which have @route annotations",
       )
       .action(async (opts) => await this.ls(opts))
+      .command("foundry", "Observe foundry details")
+      .option(
+        "-e, --env",
+        "Show the environment variables that foundries can use",
+      )
+      .action(async (opts) => await this.foundry(opts))
       .command(
         "sql",
         "Collect and emit the SQL files to STDOUT or save to file",
