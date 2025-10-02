@@ -159,25 +159,28 @@ export type PropertyNamingStrategy = (
 ) => string;
 
 const splitWords = (s: string) =>
-  s
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+  s.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_\-\.\s]+/g, " ")
     .trim()
     .split(" ")
     .filter(Boolean);
 
-const toCamel = (s: string) => {
+export const toCamel = (s: string) => {
   const p = splitWords(s.toLowerCase());
   return p.map((w, i) => (i === 0 ? w : w[0].toUpperCase() + w.slice(1))).join(
     "",
   );
 };
-const toSnake = (s: string) =>
+
+export const toSnake = (s: string) =>
   splitWords(s).map((w) => w.toLowerCase()).join("_");
-const toScreamingSnake = (s: string) => toSnake(s).toUpperCase();
-const toKebab = (s: string) =>
+
+export const toScreamingSnake = (s: string) => toSnake(s).toUpperCase();
+
+export const toKebab = (s: string) =>
   splitWords(s).map((w) => w.toLowerCase()).join("-");
-const toPascal = (s: string) =>
+
+export const toPascal = (s: string) =>
   splitWords(s).map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase()).join(
     "",
   );
@@ -614,100 +617,241 @@ export const sqlRowLoader = <S extends z.ZodRawShape>(
   },
 });
 
-/**
- * Transform value at path → final string value.
- * - Return a string to emit immediately (you can JSON.stringify here).
- * - Return false to skip this entry.
- * - Return undefined to use default behavior:
- *   * primitives (string|number|boolean) → String(value)
- *   * objects/arrays → recurse into children
- *   * null/undefined → skipped
- */
-export type FlattenedEnvLikeValueTransform = (
-  value: unknown,
-  segments: readonly string[],
-) => string | false | undefined;
-
-/**
- * Flatten any nested structure into a flat `{ [key]: string }` map for env/SQL-ish use.
- *
- * Rules:
- * - Walks objects & arrays; includes array indexes in path segments.
- * - Calls `value(v, path)` first; if it returns:
- *   * string → emits immediately and does not descend further
- *   * false  → skips this entry entirely
- *   * undefined → uses default behavior (descend objects/arrays; stringify primitives)
- * - Calls `name(path)` to build the key; if it returns false, skips the entry.
- *
- * @example
- * // Drop the top-level "paths" segment and SCREAMING_SNAKE the rest:
- * flattenedEnvLike(props, {
- *   name: (p) => {
- *     const s = p[0] === "paths" ? p.slice(1) : p;
- *     return s.length ? s.map(to => to.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()).join("_") : false;
- *   }
- * });
- *
- * @example
- * // Emit a single PATHS_JSON var for the whole subtree:
- * flattenedEnvLike(props, {
- *   name: (p) => (p.length === 1 && p[0] === "paths" ? "PATHS_JSON" : false),
- *   value: (v, p) => (p.length === 1 && p[0] === "paths" ? JSON.stringify(v) : undefined),
- * });
- */
-export function flattenedEnvLike(
-  input: unknown,
-  opts?: {
-    /** Transform full path → key string, or return false to skip this entry. */
-    name?: (segments: string[]) => string | false;
-    value?: FlattenedEnvLikeValueTransform;
+export function flatten<S extends z.ZodRawShape>(
+  bag: ReturnType<typeof propertiesBag<S>>,
+  init?: {
+    /** Default naming for entries (override per call in entries()/record()). */
+    name?: (segments: readonly string[], znode: z.ZodTypeAny) => string | false;
+    /**
+     * Default value strategy:
+     *  - return `string`   → emit one row for this node (aggregate) and suppress children
+     *  - return `false`    → skip this subtree entirely
+     *  - return `undefined`→ descend into children (default for objects/arrays)
+     *
+     * You can override per call in entries()/record().
+     */
+    value?: (
+      v: unknown,
+      segments: readonly string[],
+      znode: z.ZodTypeAny,
+    ) => string | false | undefined;
   },
 ) {
-  const {
-    name = (segments: readonly string[]) =>
-      segments.map(toScreamingSnake).join("_"),
-    value,
-  } = opts ?? {};
-  const isPrimitive = (v: unknown): v is string | number | boolean =>
+  /* ——— local helpers (public Zod v4 API only) ——— */
+
+  const isPrim = (v: unknown): v is string | number | boolean =>
     typeof v === "string" || typeof v === "number" || typeof v === "boolean";
 
-  const out: Record<string, string> = {};
-
-  const emit = (path: string[], v: unknown) => {
-    const key = name(path);
-    if (key === false) return;
-    out[key] = String(v);
+  // Unwrap only Optional/Nullable using public .unwrap()
+  const unwrap = (node: z.ZodTypeAny): z.ZodTypeAny => {
+    let n = node;
+    for (let i = 0; i < 4; i++) {
+      if (n instanceof z.ZodOptional || n instanceof z.ZodNullable) {
+        n = n.unwrap() as z.ZodTypeAny;
+        continue;
+      }
+      break;
+    }
+    return n;
   };
 
-  const walk = (val: unknown, path: string[]) => {
-    // Let value-transform take first shot (can force JSON or skip)
-    const vt = value?.(val, path);
-    if (vt === false) return;
-    if (typeof vt === "string") {
-      emit(path, vt);
+  const typeHint = (node: z.ZodTypeAny): string => {
+    const n = unwrap(node);
+    if (n instanceof z.ZodString) return "string";
+    if (n instanceof z.ZodNumber) return "number";
+    if (n instanceof z.ZodBoolean) return "boolean";
+    if (n instanceof z.ZodBigInt) return "bigint";
+    if (n instanceof z.ZodDate) return "date";
+    if (n instanceof z.ZodArray) {
+      return `array<${
+        // deno-lint-ignore no-explicit-any
+        typeHint((n as z.ZodArray<any>).element as z.ZodTypeAny)}>`;
+    }
+    if (n instanceof z.ZodRecord) {
+      return `record<string,${
+        // deno-lint-ignore no-explicit-any
+        typeHint((n as z.ZodRecord<any>).valueType as z.ZodTypeAny)}>`;
+    }
+    if (n instanceof z.ZodObject) return "object";
+    if (n instanceof z.ZodEnum) return "enum";
+    // Zod v4 does not export ZodNativeEnum; nativeEnum returns ZodEnum
+    if (n instanceof z.ZodUnion || n instanceof z.ZodDiscriminatedUnion) {
+      return "union";
+    }
+    if (n instanceof z.ZodMap) return "map";
+    if (n instanceof z.ZodTuple) return "tuple";
+    if (n instanceof z.ZodNull) return "null";
+    if (n instanceof z.ZodUndefined) return "undefined";
+    if (n instanceof z.ZodUnknown) return "unknown";
+    if (n instanceof z.ZodAny) return "any";
+    return "unknown";
+  };
+
+  type Row = {
+    name: string;
+    comment?: string;
+    value: string;
+    valueHint: string;
+  };
+  type Shape = { [P in keyof S]: z.ZodTypeAny };
+  const shape = bag.schema.shape as unknown as Shape;
+
+  // Defaults set at construction; callers can override per call.
+  const defaultName = init?.name ??
+    ((segs) => segs.map((s) => toScreamingSnake(s)).join("_"));
+
+  const defaultValue = init?.value ??
+    ((v) => {
+      if (v == null) return false; // drop null/undefined
+      if (isPrim(v)) return String(v); // emit primitives
+      return undefined; // descend objects/arrays
+    });
+
+  function* walkLeaves(
+    node: z.ZodTypeAny,
+    val: unknown,
+    path: string[],
+  ): Generator<{ node: z.ZodTypeAny; path: string[]; value: unknown }> {
+    const n = unwrap(node);
+
+    if (n instanceof z.ZodObject) {
+      const objShape = n.shape as Record<string, z.ZodTypeAny>;
+      const obj = (val ?? {}) as Record<string, unknown>;
+      for (const key of Object.keys(objShape)) {
+        const child = objShape[key];
+        const has = Object.prototype.hasOwnProperty.call(obj, key);
+        yield* walkLeaves(child, has ? obj[key] : undefined, [...path, key]);
+      }
       return;
     }
 
-    // Default behavior
-    if (val === null || val === undefined) return;
-
-    if (isPrimitive(val)) {
-      emit(path, val);
+    if (n instanceof z.ZodRecord) {
+      const rec = (val ?? {}) as Record<string, unknown>;
+      // deno-lint-ignore no-explicit-any
+      const vt = (n as z.ZodRecord<any>).valueType as z.ZodTypeAny;
+      for (const [k, v] of Object.entries(rec)) {
+        yield* walkLeaves(vt, v, [...path, k]);
+      }
       return;
     }
 
-    if (Array.isArray(val)) {
-      for (let i = 0; i < val.length; i++) walk(val[i], [...path, String(i)]);
+    if (n instanceof z.ZodArray) {
+      const arr = Array.isArray(val) ? val : [];
+      // deno-lint-ignore no-explicit-any
+      const el = (n as z.ZodArray<any>).element as z.ZodTypeAny;
+      for (let i = 0; i < arr.length; i++) {
+        yield* walkLeaves(el, arr[i], [...path, String(i)]);
+      }
       return;
     }
 
-    if (typeof val === "object") {
-      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-        walk(v, [...path, k]);
+    // treat remainder as leaves
+    yield { node: n, path, value: val };
+  }
+
+  /** Generate rows from a specific values instance. */
+  function* entries(
+    values?: Partial<z.infer<z.ZodObject<S>>>,
+    overrides?: {
+      name?: (
+        segments: readonly string[],
+        znode: z.ZodTypeAny,
+      ) => string | false;
+      value?: (
+        v: unknown,
+        segments: readonly string[],
+        znode: z.ZodTypeAny,
+      ) => string | false | undefined;
+    },
+  ): Generator<Row> {
+    const src = (values ?? {}) as Record<string, unknown>;
+    const nameFn = overrides?.name ?? defaultName;
+    const valueFn = overrides?.value ?? defaultValue;
+
+    const suppressed = new Set<string>(); // top-level keys suppressed after aggregate/skip
+
+    // Aggregate/skip pass on top-level keys
+    for (const topKey of Object.keys(shape) as Array<keyof S & string>) {
+      const node = shape[topKey];
+      const val = Object.prototype.hasOwnProperty.call(src, topKey)
+        ? src[topKey]
+        : undefined;
+
+      const agg = valueFn(val, [topKey], node);
+
+      if (typeof agg === "string") {
+        const nm = nameFn([topKey], node);
+        if (nm !== false) {
+          yield {
+            name: nm,
+            comment: descOf(node),
+            value: agg,
+            valueHint: typeHint(node),
+          };
+        }
+        suppressed.add(topKey);
+        continue;
+      }
+
+      if (agg === false) {
+        suppressed.add(topKey);
       }
     }
-  };
 
-  walk(input, []);
-  return out;
+    // Leaf pass
+    for (const topKey of Object.keys(shape) as Array<keyof S & string>) {
+      if (suppressed.has(topKey)) continue;
+
+      const node = shape[topKey];
+      const val = Object.prototype.hasOwnProperty.call(src, topKey)
+        ? src[topKey]
+        : undefined;
+
+      for (const leaf of walkLeaves(node, val, [topKey])) {
+        const nm = nameFn(leaf.path, leaf.node);
+        if (nm === false) continue;
+
+        const chosen = valueFn(leaf.value, leaf.path, leaf.node);
+        if (chosen === false) continue;
+
+        const outVal = typeof chosen === "string"
+          ? chosen
+          : isPrim(leaf.value)
+          ? String(leaf.value)
+          : JSON.stringify(leaf.value);
+
+        yield {
+          name: nm,
+          comment: descOf(leaf.node),
+          value: outVal,
+          valueHint: typeHint(leaf.node),
+        };
+      }
+    }
+  }
+
+  /** Build a plain Record from a specific values instance (optional prefix & overrides). */
+  function record(
+    prefix: string,
+    values?: Partial<z.infer<z.ZodObject<S>>>,
+    overrides?: {
+      name?: (
+        segments: readonly string[],
+        znode: z.ZodTypeAny,
+      ) => string | false;
+      value?: (
+        v: unknown,
+        segments: readonly string[],
+        znode: z.ZodTypeAny,
+      ) => string | false | undefined;
+    },
+  ): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const r of entries(values, overrides)) {
+      out[prefix ? `${prefix}${r.name}` : r.name] = r.value;
+    }
+    return out;
+  }
+
+  return { entries, record } as const;
 }

@@ -15,6 +15,7 @@
 
 import { z } from "jsr:@zod/zod@4";
 import {
+  assert,
   assertEquals,
   assertMatch,
   assertObjectMatch,
@@ -22,7 +23,7 @@ import {
 } from "jsr:@std/assert@1";
 import {
   envLoader,
-  flattenedEnvLike,
+  flatten,
   jsonLoader,
   Naming,
   propertiesBag,
@@ -227,179 +228,243 @@ Deno.test("assemblerProperties — developer doc (camelCase + naming)", async (t
   stopAll();
 });
 
-/** Helper used in tests: SCREAMING_SNAKE a single segment. */
-const SNAKE = (s: string) =>
-  s
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/[^A-Za-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .toUpperCase();
+Deno.test("flatten — unified behavior", async (t) => {
+  function indexByName<T extends { name: string }>(rows: Iterable<T>) {
+    const m = new Map<string, T>();
+    for (const r of rows) m.set(r.name, r);
+    return m;
+  }
 
-Deno.test("flattenedEnvLike — behavior & docs", async (t) => {
-  await t.step(
-    "defaults: SCREAMING_SNAKE + primitives; arrays use indexes; null/undefined skipped",
-    () => {
-      const obj = {
-        id: "abc",
-        paths: {
-          projectHome: "/p",
-          projectSrcHome: "/p/src",
-          nested: { deep: true },
-          arr: [1, 2],
-          nothing: null,
-          undef: undefined,
-        },
-      };
+  // ── Fixtures (shared across subtests) ────────────────────────────────────
+  const Schema = z.object({
+    id: z.string().describe("Project ID"),
+    paths: z.object({
+      projectHome: z.string().describe("Project home"),
+      projectSrcHome: z.string().describe("Project src"),
+      numbers: z.array(z.number()).describe("Numeric list"),
+      flags: z.object({
+        debug: z.boolean().describe("Debug flag"),
+      }).describe("Flags"),
+    }).describe("Paths"),
+    labels: z.record(z.string(), z.string()).describe("Labels"),
+    mode: z.enum(["dev", "prod"]).describe("Mode"),
+    count: z.number().describe("Count"),
+    maybe: z.string().optional().describe("Maybe string"),
+    nully: z.string().nullable().describe("Nullable string"),
+    secrets: z.object({
+      token: z.string().describe("Secret token"),
+    }).describe("Secrets"),
+  });
 
-      const out = flattenedEnvLike(obj); // default name transform
-      const expected = {
-        ID: "abc",
-        PATHS_PROJECT_HOME: "/p",
-        PATHS_PROJECT_SRC_HOME: "/p/src",
-        PATHS_NESTED_DEEP: "true",
-        PATHS_ARR_0: "1",
-        PATHS_ARR_1: "2",
-      };
-
-      assertObjectMatch(out, expected);
-      // ensure null/undefined not present
-      assertEquals("PATHS_NOTHING" in out, false);
-      assertEquals("PATHS_UNDEF" in out, false);
+  type Props = z.infer<typeof Schema>;
+  const sampleBase: Props = {
+    id: "abc",
+    paths: {
+      projectHome: "/p",
+      projectSrcHome: "/p/src",
+      numbers: [1, 2, 3],
+      flags: { debug: true },
     },
-  );
+    labels: { a: "x", b: "y" },
+    mode: "dev",
+    count: 5,
+    // maybe intentionally omitted
+    nully: null,
+    secrets: { token: "shh" },
+  };
 
-  await t.step(
-    "name transform: drop top-level 'paths' and SCREAMING_SNAKE the rest",
-    () => {
-      const obj = {
-        id: "abc",
-        paths: { projectHome: "/p", projectSrcHome: "/p/src" },
-      };
+  const bag = propertiesBag(Schema);
+  const f = flatten(bag);
 
-      const out = flattenedEnvLike(obj, {
-        name: (segments) => {
-          const s = segments[0] === "paths" ? segments.slice(1) : segments;
-          return s.length ? s.map(SNAKE).join("_") : false;
-        },
-      });
+  // ── 1) Default traversal, naming, comments, hints ───────────────────────
+  await t.step("default traversal, naming, comments, hints", () => {
+    const rows = [...f.entries(sampleBase)];
+    const by = indexByName(rows);
 
-      assertObjectMatch(out, {
-        ID: "abc",
-        PROJECT_HOME: "/p",
-        PROJECT_SRC_HOME: "/p/src",
-      });
-      // default would include PATHS_*; confirm it does not
-      assertEquals("PATHS_PROJECT_HOME" in out, false);
-    },
-  );
+    // Scalars
+    assert(by.has("ID"));
+    assertEquals(by.get("ID")!.value, "abc");
+    assertEquals(by.get("ID")!.comment, "Project ID");
+    assertEquals(by.get("ID")!.valueHint, "string");
 
-  await t.step(
-    "value transform: emit whole subtree as JSON (single PATHS_JSON key)",
-    () => {
-      const obj = {
-        id: "abc",
-        paths: { projectHome: "/p", projectSrcHome: "/p/src" },
-      };
+    // Nested object
+    assert(by.has("PATHS_PROJECT_HOME"));
+    assertEquals(by.get("PATHS_PROJECT_HOME")!.value, "/p");
+    assertEquals(by.get("PATHS_PROJECT_HOME")!.comment, "Project home");
+    assertEquals(by.get("PATHS_PROJECT_HOME")!.valueHint, "string");
 
-      const out = flattenedEnvLike(obj, {
-        name: (
-          p,
-        ) => (p.length === 1 && p[0] === "paths"
-          ? "PATHS_JSON"
-          : SNAKE(p.join(".")).replace(/\./g, "_")),
-        value: (
-          v,
-          p,
-        ) => (p.length === 1 && p[0] === "paths"
-          ? JSON.stringify(v)
-          : undefined),
-      });
+    // Boolean leaf
+    assert(by.has("PATHS_FLAGS_DEBUG"));
+    assertEquals(by.get("PATHS_FLAGS_DEBUG")!.value, "true");
+    assertEquals(by.get("PATHS_FLAGS_DEBUG")!.comment, "Debug flag");
+    assertEquals(by.get("PATHS_FLAGS_DEBUG")!.valueHint, "boolean");
 
-      assertEquals(Object.keys(out).sort(), ["ID", "PATHS_JSON"]);
-      assertEquals(out.ID, "abc");
-      assertEquals(out.PATHS_JSON, JSON.stringify(obj.paths));
-    },
-  );
+    // Arrays by index
+    assert(by.has("PATHS_NUMBERS_0"));
+    assertEquals(by.get("PATHS_NUMBERS_0")!.value, "1");
+    assertEquals(by.get("PATHS_NUMBERS_0")!.valueHint, "number");
+    assert(by.has("PATHS_NUMBERS_2"));
+    assertEquals(by.get("PATHS_NUMBERS_2")!.value, "3");
 
-  await t.step("value transform: skip secrets subtree entirely", () => {
-    const obj = {
-      mode: "dev",
-      secrets: {
-        token: "shh",
-        nested: { inner: "nope" },
-      },
-    };
+    // Record<string,string>
+    assert(by.has("LABELS_A"));
+    assertEquals(by.get("LABELS_A")!.value, "x");
+    assertEquals(by.get("LABELS_A")!.valueHint, "string");
+    assert(by.has("LABELS_B"));
+    assertEquals(by.get("LABELS_B")!.value, "y");
 
-    const out = flattenedEnvLike(obj, {
-      name: (p) => p.map(SNAKE).join("_"),
-      value: (_v, p) => (p[0] === "secrets" ? false : undefined),
+    // Enum hint
+    assert(by.has("MODE"));
+    assertEquals(by.get("MODE")!.value, "dev");
+    assertEquals(by.get("MODE")!.valueHint, "enum");
+
+    // Optional omitted → no row
+    assert(!by.has("MAYBE"));
+
+    // Nullable null → skipped by default
+    assert(!by.has("NULLY"));
+
+    // Secrets present by default
+    assert(by.has("SECRETS_TOKEN"));
+    assertEquals(by.get("SECRETS_TOKEN")!.value, "shh");
+
+    // record(prefix)
+    const rec = f.record("FOUNDRY_", sampleBase);
+    assertObjectMatch(rec, {
+      FOUNDRY_ID: "abc",
+      FOUNDRY_MODE: "dev",
+      FOUNDRY_COUNT: "5",
+      FOUNDRY_PATHS_PROJECT_HOME: "/p",
+      FOUNDRY_SECRETS_TOKEN: "shh",
     });
-
-    assertObjectMatch(out, { MODE: "dev" });
-    // ensure secrets did not leak
-    assertEquals(Object.keys(out).some((k) => k.startsWith("SECRETS")), false);
+    assertEquals("FOUNDRY_MAYBE" in rec, false);
   });
 
-  await t.step("arrays: indices included", () => {
-    const obj = { items: ["a", "b"] };
-    const out = flattenedEnvLike(obj, { name: (p) => p.map(SNAKE).join("_") });
-    assertObjectMatch(out, { ITEMS_0: "a", ITEMS_1: "b" });
-  });
-
-  await t.step(
-    "name transform: alias segments and drop 'fs' prefix on final segment",
-    () => {
-      const props = {
-        paths: {
-          spryStd: {
-            sqlDropIn: {
-              fsHeadHome: "/head",
-              fsTailHome: "/tail",
-            },
-          },
-        },
-      };
-
-      const out = flattenedEnvLike(props, {
-        name: (segments) => {
-          // remove top-level "paths"
-          let s = segments[0] === "paths" ? segments.slice(1) : segments;
-
-          // alias certain segments
-          const alias: Record<string, string> = {
-            spryStd: "SPRY_STD",
-            projectSqlDropIn: "PROJECT_SQLD",
-            sqlDropIn: "SQLD",
-            spryDropIn: "SPRYD",
-          };
-          s = s.map((seg) => alias[seg] ?? seg);
-
-          // drop a leading "fs" on the final segment
-          if (s.length) {
-            const last = s[s.length - 1];
-            s[s.length - 1] = last.startsWith("fs") && last.length > 2
-              ? last.slice(2)
-              : last;
+  // ── 2) Aggregate (emit once) & skip subtree ─────────────────────────────
+  await t.step("aggregate (emit once) & skip subtree", () => {
+    // Aggregate: emit PATHS_JSON once; suppress child leaves
+    const aggregated = [
+      ...f.entries(sampleBase, {
+        name: (segs) =>
+          segs.length === 1 && segs[0] === "paths"
+            ? "PATHS_JSON"
+            : segs.map((s) =>
+              s.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
+            ).join("_"),
+        value: (v, segs, _znode) => {
+          if (segs.length === 1 && segs[0] === "paths") {
+            return JSON.stringify(v);
           }
-          return s.map(SNAKE).join("_");
+          if (v == null) return false;
+          if (
+            typeof v === "string" || typeof v === "number" ||
+            typeof v === "boolean"
+          ) {
+            return String(v);
+          }
+          return undefined;
         },
-      });
-      assertObjectMatch(out, {
-        SPRY_STD_SQLD_HEAD_HOME: "/head",
-        SPRY_STD_SQLD_TAIL_HOME: "/tail",
-      });
-      assertEquals("PATHS_SPRY_STD_SQL_DROP_IN_FS_HEAD_HOME" in out, false);
-    },
-  );
+      }),
+    ];
+    const agBy = indexByName(aggregated);
+    assert(agBy.has("PATHS_JSON"));
+    assertEquals(agBy.get("PATHS_JSON")!.comment, "Paths");
+    assertEquals(agBy.get("PATHS_JSON")!.valueHint, "object");
+    assertEquals(
+      agBy.get("PATHS_JSON")!.value,
+      JSON.stringify(sampleBase.paths),
+    );
 
-  await t.step("name transform: return false to skip specific leaves", () => {
-    const obj = { id: "abc", keepMe: 42 };
-    const out = flattenedEnvLike(obj, {
-      name: (
-        p,
-      ) => (p.length === 1 && p[0] === "id" ? false : p.map(SNAKE).join("_")),
+    const hasPathLeaf = aggregated.some((r) =>
+      r.name.startsWith("PATHS_PROJECT_") ||
+      r.name.startsWith("PATHS_FLAGS_") ||
+      r.name.startsWith("PATHS_NUMBERS_")
+    );
+    assertEquals(hasPathLeaf, false);
+
+    // Skip: drop entire 'secrets' subtree
+    const noSecrets = [
+      ...f.entries(sampleBase, {
+        value: (_v, segs) => (segs[0] === "secrets" ? false : undefined),
+      }),
+    ];
+    const hasSecrets = noSecrets.some((r) => r.name.startsWith("SECRETS_"));
+    assertEquals(hasSecrets, false);
+  });
+
+  // ── 3) Per-call naming overrides, aliasing, and record() ────────────────
+  await t.step("per-call naming overrides, aliasing, and record()", () => {
+    // entries(): drop 'paths' and alias projectSrcHome → SRC_HOME
+    const rows = [
+      ...f.entries(sampleBase, {
+        name: (segs) => {
+          const alias: Record<string, string> = { projectSrcHome: "SRC_HOME" };
+          let s = [...segs];
+          if (s[0] === "paths") s = s.slice(1);
+          s = s.map((seg) => alias[seg] ?? seg);
+          return s
+            .map((seg) =>
+              seg.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
+            )
+            .join("_");
+        },
+      }),
+    ];
+    const by = indexByName(rows);
+    assert(by.has("PROJECT_HOME"));
+    assert(by.has("SRC_HOME"));
+    assert(!rows.some((r) => r.name.startsWith("PATHS_")));
+
+    // record(): same naming logic, plus prefix
+    const out = f.record(
+      "APP_",
+      sampleBase,
+      {
+        name: (segs) => {
+          const alias: Record<string, string> = { projectSrcHome: "SRC_HOME" };
+          let s = [...segs];
+          if (s[0] === "paths") s = s.slice(1); // <-- FIX: drop 'paths' for record() too
+          s = s.map((seg) => alias[seg] ?? seg);
+          return s
+            .map((seg) =>
+              seg.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
+            )
+            .join("_");
+        },
+        value: (v) => {
+          if (v == null) return false;
+          if (
+            typeof v === "string" || typeof v === "number" ||
+            typeof v === "boolean"
+          ) {
+            return String(v);
+          }
+          return undefined;
+        },
+      },
+    );
+
+    assertObjectMatch(out, {
+      APP_ID: "abc",
+      APP_MODE: "dev",
+      APP_COUNT: "5",
+      APP_PROJECT_HOME: "/p",
+      APP_SRC_HOME: "/p/src",
     });
-    assertObjectMatch(out, { KEEP_ME: "42" });
-    assertEquals("ID" in out, false);
+  });
+
+  // ── 4) Optional present and nullable non-null ───────────────────────────
+  await t.step("optional present and nullable non-null emitted", () => {
+    const withOptionals: Props = { ...sampleBase, maybe: "hello", nully: "ok" };
+    const rows = [...f.entries(withOptionals)];
+    const by = indexByName(rows);
+
+    assert(by.has("MAYBE"));
+    assertEquals(by.get("MAYBE")!.value, "hello");
+    assertEquals(by.get("MAYBE")!.valueHint, "string");
+
+    assert(by.has("NULLY"));
+    assertEquals(by.get("NULLY")!.value, "ok");
+    assertEquals(by.get("NULLY")!.valueHint, "string");
   });
 });
