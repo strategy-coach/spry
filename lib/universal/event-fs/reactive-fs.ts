@@ -432,7 +432,7 @@ export class ReactiveFs<R extends RootLiteral> {
         correlationId,
         kind: "modify",
       });
-      return bytesWritten;
+      return { path, absPath: absPath as string, correlationId, bytesWritten };
     } catch (error) {
       this.#bus.emit("write:error", {
         op: "write",
