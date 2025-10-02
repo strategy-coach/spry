@@ -14,13 +14,18 @@
  */
 
 import { z } from "jsr:@zod/zod@4";
-import { assertEquals, assertMatch, assertRejects } from "jsr:@std/assert@1";
-
 import {
-  assemblerProperties,
+  assertEquals,
+  assertMatch,
+  assertObjectMatch,
+  assertRejects,
+} from "jsr:@std/assert@1";
+import {
   envLoader,
+  flattenedEnvLike,
   jsonLoader,
   Naming,
+  propertiesBag,
   propertiesQuery,
   sqlRowLoader,
 } from "./properties.ts";
@@ -67,7 +72,7 @@ const URL_EXAMPLE = "https://db.example.com/postgres";
 /* -------------------------------- Tests -------------------------------- */
 
 Deno.test("assemblerProperties — developer doc (camelCase + naming)", async (t) => {
-  const bag = assemblerProperties(SpryProps);
+  const bag = propertiesBag(SpryProps);
   const q = propertiesQuery(bag);
 
   // Capture all events (doc + verification)
@@ -109,7 +114,7 @@ Deno.test("assemblerProperties — developer doc (camelCase + naming)", async (t
   await t.step(
     "3) Loader precedence with naming: env(SCREAMING_SNAKE) -> json(snake) -> sql(snake)",
     async () => {
-      const bag2 = assemblerProperties(SpryProps);
+      const bag2 = propertiesBag(SpryProps);
       const envName = "SPRY_DATABASE_URL"; // from camelCase + SCREAMING_SNAKE + prefix
       const prev = Deno.env.get(envName);
 
@@ -220,4 +225,181 @@ Deno.test("assemblerProperties — developer doc (camelCase + naming)", async (t
   });
 
   stopAll();
+});
+
+/** Helper used in tests: SCREAMING_SNAKE a single segment. */
+const SNAKE = (s: string) =>
+  s
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+
+Deno.test("flattenedEnvLike — behavior & docs", async (t) => {
+  await t.step(
+    "defaults: SCREAMING_SNAKE + primitives; arrays use indexes; null/undefined skipped",
+    () => {
+      const obj = {
+        id: "abc",
+        paths: {
+          projectHome: "/p",
+          projectSrcHome: "/p/src",
+          nested: { deep: true },
+          arr: [1, 2],
+          nothing: null,
+          undef: undefined,
+        },
+      };
+
+      const out = flattenedEnvLike(obj); // default name transform
+      const expected = {
+        ID: "abc",
+        PATHS_PROJECT_HOME: "/p",
+        PATHS_PROJECT_SRC_HOME: "/p/src",
+        PATHS_NESTED_DEEP: "true",
+        PATHS_ARR_0: "1",
+        PATHS_ARR_1: "2",
+      };
+
+      assertObjectMatch(out, expected);
+      // ensure null/undefined not present
+      assertEquals("PATHS_NOTHING" in out, false);
+      assertEquals("PATHS_UNDEF" in out, false);
+    },
+  );
+
+  await t.step(
+    "name transform: drop top-level 'paths' and SCREAMING_SNAKE the rest",
+    () => {
+      const obj = {
+        id: "abc",
+        paths: { projectHome: "/p", projectSrcHome: "/p/src" },
+      };
+
+      const out = flattenedEnvLike(obj, {
+        name: (segments) => {
+          const s = segments[0] === "paths" ? segments.slice(1) : segments;
+          return s.length ? s.map(SNAKE).join("_") : false;
+        },
+      });
+
+      assertObjectMatch(out, {
+        ID: "abc",
+        PROJECT_HOME: "/p",
+        PROJECT_SRC_HOME: "/p/src",
+      });
+      // default would include PATHS_*; confirm it does not
+      assertEquals("PATHS_PROJECT_HOME" in out, false);
+    },
+  );
+
+  await t.step(
+    "value transform: emit whole subtree as JSON (single PATHS_JSON key)",
+    () => {
+      const obj = {
+        id: "abc",
+        paths: { projectHome: "/p", projectSrcHome: "/p/src" },
+      };
+
+      const out = flattenedEnvLike(obj, {
+        name: (
+          p,
+        ) => (p.length === 1 && p[0] === "paths"
+          ? "PATHS_JSON"
+          : SNAKE(p.join(".")).replace(/\./g, "_")),
+        value: (
+          v,
+          p,
+        ) => (p.length === 1 && p[0] === "paths"
+          ? JSON.stringify(v)
+          : undefined),
+      });
+
+      assertEquals(Object.keys(out).sort(), ["ID", "PATHS_JSON"]);
+      assertEquals(out.ID, "abc");
+      assertEquals(out.PATHS_JSON, JSON.stringify(obj.paths));
+    },
+  );
+
+  await t.step("value transform: skip secrets subtree entirely", () => {
+    const obj = {
+      mode: "dev",
+      secrets: {
+        token: "shh",
+        nested: { inner: "nope" },
+      },
+    };
+
+    const out = flattenedEnvLike(obj, {
+      name: (p) => p.map(SNAKE).join("_"),
+      value: (_v, p) => (p[0] === "secrets" ? false : undefined),
+    });
+
+    assertObjectMatch(out, { MODE: "dev" });
+    // ensure secrets did not leak
+    assertEquals(Object.keys(out).some((k) => k.startsWith("SECRETS")), false);
+  });
+
+  await t.step("arrays: indices included", () => {
+    const obj = { items: ["a", "b"] };
+    const out = flattenedEnvLike(obj, { name: (p) => p.map(SNAKE).join("_") });
+    assertObjectMatch(out, { ITEMS_0: "a", ITEMS_1: "b" });
+  });
+
+  await t.step(
+    "name transform: alias segments and drop 'fs' prefix on final segment",
+    () => {
+      const props = {
+        paths: {
+          spryStd: {
+            sqlDropIn: {
+              fsHeadHome: "/head",
+              fsTailHome: "/tail",
+            },
+          },
+        },
+      };
+
+      const out = flattenedEnvLike(props, {
+        name: (segments) => {
+          // remove top-level "paths"
+          let s = segments[0] === "paths" ? segments.slice(1) : segments;
+
+          // alias certain segments
+          const alias: Record<string, string> = {
+            spryStd: "SPRY_STD",
+            projectSqlDropIn: "PROJECT_SQLD",
+            sqlDropIn: "SQLD",
+            spryDropIn: "SPRYD",
+          };
+          s = s.map((seg) => alias[seg] ?? seg);
+
+          // drop a leading "fs" on the final segment
+          if (s.length) {
+            const last = s[s.length - 1];
+            s[s.length - 1] = last.startsWith("fs") && last.length > 2
+              ? last.slice(2)
+              : last;
+          }
+          return s.map(SNAKE).join("_");
+        },
+      });
+      assertObjectMatch(out, {
+        SPRY_STD_SQLD_HEAD_HOME: "/head",
+        SPRY_STD_SQLD_TAIL_HOME: "/tail",
+      });
+      assertEquals("PATHS_SPRY_STD_SQL_DROP_IN_FS_HEAD_HOME" in out, false);
+    },
+  );
+
+  await t.step("name transform: return false to skip specific leaves", () => {
+    const obj = { id: "abc", keepMe: 42 };
+    const out = flattenedEnvLike(obj, {
+      name: (
+        p,
+      ) => (p.length === 1 && p[0] === "id" ? false : p.map(SNAKE).join("_")),
+    });
+    assertObjectMatch(out, { KEEP_ME: "42" });
+    assertEquals("ID" in out, false);
+  });
 });

@@ -6,7 +6,7 @@
  * ## Core concepts
  * - **Define once in camelCase**: Write your Zod object schema using camelCase keys.
  * - **Zod owns semantics**: Types, defaults, refinements, transforms, `.describe()`, and `.meta()`.
- * - **Evented bag**: `assemblerProperties()` validates, sets, loads, and emits typed events.
+ * - **Evented bag**: `propertiesBag()` validates, sets, loads, and emits typed events.
  * - **Read-only view**: `propertiesQuery()` lists/filters/picks without mutation concerns.
  * - **Naming strategies**: Present or map names (camelCase/snake_case/SCREAMING_SNAKE/kebab/Pascal) via `PropertyNamingStrategy`.
  * - **Pluggable loaders**: `envLoader`, `jsonLoader`, `sqlRowLoader` use strategies and respect per-field `meta.externalName`.
@@ -15,7 +15,7 @@
  * ```ts
  * import { z } from "jsr:@zod/zod@4";
  * import {
- *   assemblerProperties, propertiesQuery,
+ *   propertiesBag, propertiesQuery,
  *   envLoader, jsonLoader, Naming,
  * } from "./properties.ts";
  *
@@ -34,7 +34,7 @@
  * });
  *
  * // 2) Create the bag and load values (env → json)
- * const bag = assemblerProperties(SpryProps);
+ * const bag = propertiesBag(SpryProps);
  * await bag.loadAll([
  *   envLoader({ prefix: "SPRY" }),                             // SPRY_DATABASE_URL, SPRY_MODE, ...
  *   jsonLoader({ page_limit: 500, assembly_mode: "discovery" })// snake_case mapping by default
@@ -250,7 +250,7 @@ export type PropEvents<S extends z.ZodRawShape> = {
 };
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* assemblerProperties(): mutation + events                                   */
+/* propertiesBag(): mutation + events                                   */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -266,7 +266,7 @@ export type PropEvents<S extends z.ZodRawShape> = {
  * @param schema - Zod object schema that defines all properties
  * @returns API with `set/get/require/loadAll/toObject/extend` and a typed `bus`
  */
-export function assemblerProperties<S extends z.ZodRawShape>(
+export function propertiesBag<S extends z.ZodRawShape>(
   schema: z.ZodObject<S>,
 ) {
   type K = KeyOf<S>;
@@ -396,7 +396,7 @@ export function assemblerProperties<S extends z.ZodRawShape>(
    */
   function extend<E extends z.ZodRawShape>(extra: z.ZodObject<E>) {
     const merged = schema.merge(extra);
-    const next = assemblerProperties(merged);
+    const next = propertiesBag(merged);
     const mergedKeys = new Set(Object.keys(merged.shape));
 
     // Compute the merged key type to avoid `any`
@@ -439,7 +439,7 @@ export function assemblerProperties<S extends z.ZodRawShape>(
  * Keeps mutation and querying separate for clean composition (e.g., CLI/GUI).
  */
 export function propertiesQuery<S extends z.ZodRawShape>(
-  bag: ReturnType<typeof assemblerProperties<S>>,
+  bag: ReturnType<typeof propertiesBag<S>>,
 ) {
   type K = KeyOf<S>;
   type ShapeAsAny = { [P in keyof S]: z.ZodTypeAny };
@@ -613,3 +613,101 @@ export const sqlRowLoader = <S extends z.ZodRawShape>(
       : undefined;
   },
 });
+
+/**
+ * Transform value at path → final string value.
+ * - Return a string to emit immediately (you can JSON.stringify here).
+ * - Return false to skip this entry.
+ * - Return undefined to use default behavior:
+ *   * primitives (string|number|boolean) → String(value)
+ *   * objects/arrays → recurse into children
+ *   * null/undefined → skipped
+ */
+export type FlattenedEnvLikeValueTransform = (
+  value: unknown,
+  segments: readonly string[],
+) => string | false | undefined;
+
+/**
+ * Flatten any nested structure into a flat `{ [key]: string }` map for env/SQL-ish use.
+ *
+ * Rules:
+ * - Walks objects & arrays; includes array indexes in path segments.
+ * - Calls `value(v, path)` first; if it returns:
+ *   * string → emits immediately and does not descend further
+ *   * false  → skips this entry entirely
+ *   * undefined → uses default behavior (descend objects/arrays; stringify primitives)
+ * - Calls `name(path)` to build the key; if it returns false, skips the entry.
+ *
+ * @example
+ * // Drop the top-level "paths" segment and SCREAMING_SNAKE the rest:
+ * flattenedEnvLike(props, {
+ *   name: (p) => {
+ *     const s = p[0] === "paths" ? p.slice(1) : p;
+ *     return s.length ? s.map(to => to.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()).join("_") : false;
+ *   }
+ * });
+ *
+ * @example
+ * // Emit a single PATHS_JSON var for the whole subtree:
+ * flattenedEnvLike(props, {
+ *   name: (p) => (p.length === 1 && p[0] === "paths" ? "PATHS_JSON" : false),
+ *   value: (v, p) => (p.length === 1 && p[0] === "paths" ? JSON.stringify(v) : undefined),
+ * });
+ */
+export function flattenedEnvLike(
+  input: unknown,
+  opts?: {
+    /** Transform full path → key string, or return false to skip this entry. */
+    name?: (segments: string[]) => string | false;
+    value?: FlattenedEnvLikeValueTransform;
+  },
+) {
+  const {
+    name = (segments: readonly string[]) =>
+      segments.map(toScreamingSnake).join("_"),
+    value,
+  } = opts ?? {};
+  const isPrimitive = (v: unknown): v is string | number | boolean =>
+    typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+
+  const out: Record<string, string> = {};
+
+  const emit = (path: string[], v: unknown) => {
+    const key = name(path);
+    if (key === false) return;
+    out[key] = String(v);
+  };
+
+  const walk = (val: unknown, path: string[]) => {
+    // Let value-transform take first shot (can force JSON or skip)
+    const vt = value?.(val, path);
+    if (vt === false) return;
+    if (typeof vt === "string") {
+      emit(path, vt);
+      return;
+    }
+
+    // Default behavior
+    if (val === null || val === undefined) return;
+
+    if (isPrimitive(val)) {
+      emit(path, val);
+      return;
+    }
+
+    if (Array.isArray(val)) {
+      for (let i = 0; i < val.length; i++) walk(val[i], [...path, String(i)]);
+      return;
+    }
+
+    if (typeof val === "object") {
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        walk(v, [...path, k]);
+      }
+    }
+  };
+
+  walk(input, []);
+  return out;
+}
