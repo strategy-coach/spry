@@ -125,7 +125,7 @@ Deno.test("jsonStringifyReplacers with function and jq-like rules", async (t) =>
   await t.step("query rule: replacement wins", () => {
     const data = { token: "abc", nested: { token: "xyz" } };
     const replacer = jsonStringifyReplacers([
-      { query: "token", action: "replace", with: "****" },
+      { query: "token", action: "replace", with: () => "****" },
       { query: "**", action: "keep" }, // keep rule should not override replacement
     ]);
     const out = JSON.parse(JSON.stringify(data, replacer));
