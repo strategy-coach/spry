@@ -30,8 +30,8 @@ deno install
 
 # Deployment
 # generates all "head", sqlpage-files, *.auto.json, and "tail" SQL to STDOUT
-./sqlpagectl.ts > sqlpage-package.sql
-./sqlpagectl.ts | sqlite3 sqlpage.db
+./sqlpagectl.ts sql > sqlpage-package.sql
+./sqlpagectl.ts sql | sqlite3 sqlpage.db
 
 # Development
 ./sqlpagectl.ts dev                # launch SQLpage binary and reload SQLite content on file changes

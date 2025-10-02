@@ -1,10 +1,12 @@
 import { fromFileUrl, resolve } from "jsr:@std/path@1";
+import z from "jsr:@zod/zod@4";
 import {
   AnnotationCatalog,
   extractAnnotationsFromText,
 } from "../universal/content/code-comments.ts";
 import { LanguageSpec } from "../universal/content/code.ts";
 import { eventBus } from "../universal/event-bus.ts";
+import { flattenedEnvLike, propertiesBag } from "../universal/properties.ts";
 import { includeDirective } from "./directives.ts";
 import {
   executables,
@@ -24,7 +26,6 @@ import {
   zodParsedResourceAnns,
 } from "./resource.ts";
 import { Route } from "./route.ts";
-import z from "jsr:@zod/zod@4";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -347,6 +348,16 @@ export function assemblerBusesInit<R extends Resource>(
   return { ...defaults, resources };
 }
 
+export const typicalProjectPathsSchema = z.object({
+  projectHome: z.string().describe("The home path for our entire project"),
+  projectSrcHome: z.string().describe("The 'src' path for entire project"),
+});
+
+export const typicalAssemblerProjectPropsSchema = z.object({
+  projectId: z.string().describe("Project ID"),
+  projectPaths: typicalProjectPathsSchema.describe("Project paths"),
+});
+
 export class Assembler<R extends Resource> {
   #state: AssemblerState;
   #suppliersSignal?: AbortSignal;
@@ -445,58 +456,47 @@ export class Assembler<R extends Resource> {
       : this.moduleHome,
   ) {
     const projectSrcHome = resolve(projectHome, "src");
-    return {
-      projectHome,
-      projectSrcHome,
-    };
+    return { projectHome, projectSrcHome };
   }
 
-  projectStateProjectEnvVars() {
-    return {
-      "ID": this.projectId,
+  /** Single source: validate & store id + base paths; return hierarchical object for JSON. */
+  projectStateProperties() {
+    const props = {
+      projectId: this.projectId,
+      projectPaths: this.projectPaths(),
     };
+    // validate + cache in the bag (Zod coerces/strips unknowns if any)
+    const bag = propertiesBag(typicalAssemblerProjectPropsSchema);
+    bag.set("projectId", props.projectId);
+    bag.set("projectPaths", props.projectPaths);
+    return { props, bag }; // keep hierarchy for JSON
   }
 
-  projectStatePathEnvVars() {
-    const paths = this.projectPaths();
-    return {
-      "HOME": paths.projectHome,
-      "SRC_HOME": paths.projectSrcHome,
-    };
-  }
-
-  projectStateEnv(
-    init?: {
-      projectVarPrefix?: string;
-      pathVarPrefix?: string;
-      cleaningRequested?: boolean;
-    },
-  ) {
-    const paths = this.projectPaths();
-    const {
-      pathVarPrefix = "FOUNDRY_PROJECT_PATH_",
-      projectVarPrefix = "FOUNDRY_PROJECT_",
-    } = init ?? {};
-    const projectVars = this.projectStateProjectEnvVars();
-    const pathVars = this.projectStatePathEnvVars();
-    const result: Record<string, string> = {};
-    result[`${projectVarPrefix}ID`] = this.projectId;
-    result[`${projectVarPrefix}WORKFLOW_STEP`] = this.#state.workflow.step;
-    result[`${projectVarPrefix}PATHS_JSON`] = JSON.stringify(paths);
-    if (init?.cleaningRequested) {
-      result[`${projectVarPrefix}DESTROY_CLEAN_REQUESTED`] = "TRUE";
+  /**
+   * Derive ENV/SQL vars by flattening whatever `projectStateProperties()` returns.
+   */
+  projectStateEnvVars() {
+    const { props } = this.projectStateProperties();
+    const flat = flattenedEnvLike(props, {
+      // Drop the top-level "paths" segment and SCREAMING_SNAKE the rest
+      name: (p) => {
+        const s = p[0] === "projectPaths" ? p.slice(1) : p;
+        return s.length
+          ? "FOUNDRY_" +
+            s.map((to) =>
+              to.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
+            ).join("_")
+          : false;
+      },
+    });
+    const out: Record<string, string> = {};
+    if (this.#state.init.cleaningRequested) {
+      out["SPRY_FOUNDRY_STATE_CLEANING_REQUESTED"] = "TRUE";
     }
-    for (const [k, v] of Object.entries(projectVars)) {
-      if (typeof k === "string") {
-        result[`${projectVarPrefix}${k}`] = String(v);
-      }
+    for (const [k, v] of Object.entries(flat)) {
+      if (v !== undefined && v !== null) out[k] = String(v);
     }
-    for (const [k, v] of Object.entries(pathVars)) {
-      if (typeof k === "string") {
-        result[`${pathVarPrefix}${k}`] = String(v);
-      }
-    }
-    return result;
+    return out;
   }
 
   async materializeDirectives(
@@ -548,9 +548,7 @@ export class Assembler<R extends Resource> {
     // when cleaning is requested, we can "auto clean" auto-materialized but
     // foundries that create unmanaged (by Spry) files do their own cleaning
     // by being told through the environment
-    const env = this.projectStateEnv({
-      cleaningRequested: this.#state.init.cleaningRequested,
-    });
+    const env = this.projectStateEnvVars();
     const cwd = Deno.cwd();
 
     for await (const wf of candidates) {

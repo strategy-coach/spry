@@ -1,4 +1,5 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
+import z from "jsr:@zod/zod@4";
 import {
   AnnotatedRoute,
   Assembler,
@@ -10,6 +11,7 @@ import {
   Resource,
   ResourcesCollection,
   Routes,
+  typicalAssemblerProjectPropsSchema,
 } from "../assembler/mod.ts";
 import {
   localDriver,
@@ -23,6 +25,43 @@ import {
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
+
+// Only what the subclass adds under `paths`
+export const sqlPageProjectPathsSchema = z.object({
+  projectSqlDropIn: z.object({
+    fsHome: z.string(),
+    fsHeadHome: z.string(),
+    fsTailHome: z.string(),
+  }),
+  spryDropIn: z.object({
+    fsHome: z.string(),
+    fsAuto: z.string(),
+    webHome: z.string(),
+    webAuto: z.string(),
+  }),
+  spryStd: z.object({
+    fsHomeFromSymlink: z.string(),
+    fsHomeAbs: z.string(),
+    fsHomeRelToProject: z.string(),
+    sqlDropIn: z.object({
+      fsHome: z.string(),
+      fsHeadHome: z.string(),
+      fsTailHome: z.string(),
+    }),
+  }),
+  sqlPage: z.object({
+    fsConfDirHome: z.string(),
+  }),
+  devWatchRoots: z.array(z.string()),
+  // functions (e.g., relativeToCWD) are intentionally not modeled here
+});
+
+export const sqlPageAssemblerProjectPropsSchema =
+  typicalAssemblerProjectPropsSchema
+    .extend({
+      projectPaths: typicalAssemblerProjectPropsSchema.shape.projectPaths
+        .extend(sqlPageProjectPathsSchema.shape),
+    });
 
 export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
   readonly projectFsDriver = localDriver();
@@ -165,27 +204,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
         fsConfDirHome: join(projectHome, "sqlpage"),
       },
       devWatchRoots,
-      relativeToCWD: (path: string) => relative(Deno.cwd(), path),
-    };
-  }
-
-  override projectStatePathEnvVars() {
-    const paths = this.projectPaths();
-    return {
-      ...super.projectStatePathEnvVars(),
-      "SPRY_STD_SQLD_HEAD_HOME": paths.spryStd.sqlDropIn.fsHeadHome,
-      "SPRY_STD_SQLD_TAIL_HOME": paths.spryStd.sqlDropIn.fsTailHome,
-      "PROJECT_SQLD_HEAD_HOME": paths.projectSqlDropIn.fsHeadHome,
-      "PROJECT_SQLD_TAIL_HOME": paths.projectSqlDropIn.fsTailHome,
-      "SQLPAGE_HOME": paths.sqlPage.fsConfDirHome,
-      "SPRY_STD_HOME": paths.spryStd.fsHomeAbs,
-      "SPRY_STD_HOME_FROM_SYMLINK": paths.spryStd.fsHomeFromSymlink,
-      "SPRY_STD_HOME_REL": paths.spryStd.fsHomeRelToProject,
-      "SPRYD_HOME": paths.spryDropIn.fsHome,
-      "SPRYD_AUTO": paths.spryDropIn.fsAuto,
-      "SPRYD_WEB_HOME": paths.spryDropIn.webHome,
-      "SPRYD_WEB_AUTO": paths.spryDropIn.webAuto,
-    };
+    } satisfies z.infer<typeof sqlPageProjectPathsSchema>;
   }
 
   protected async dropInArtifacts(rc: ResourcesCollection<R>) {
