@@ -9,7 +9,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { basename, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { Assembler } from "./assembler.ts";
+import { Assembler, SideAffects } from "./assembler.ts";
 import { isFsFileResource } from "./fs.ts";
 import { Resource } from "./resource.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
@@ -67,7 +67,7 @@ export function upsertMissingAncestors<T>(
 export class CLI<R extends Resource, A extends Assembler<R>> {
   constructor(
     readonly freshAssembler: (
-      init: { dryRun: boolean; cleaningRequested?: boolean },
+      init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
     ) => A,
   ) {
   }
@@ -240,7 +240,9 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
     routes?: true | undefined;
     auto?: true | undefined;
   }) {
-    const assembler = this.freshAssembler({ dryRun: true });
+    const assembler = this.freshAssembler({
+      sideAffectsAllowed: { materialize: false },
+    });
     const summary = this.summaryHooks(assembler);
     await assembler.materialize();
     let list = summary.toList();
@@ -316,7 +318,9 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
   }
 
   async lsRoutes(opts?: { json?: boolean }) {
-    const assembler = this.freshAssembler({ dryRun: true });
+    const assembler = this.freshAssembler({
+      sideAffectsAllowed: { materialize: false },
+    });
     assembler.resourceBus.on("assembler:state:mutated", async (ev) => {
       if (ev.current.step === "final") {
         const routes = new Routes(
@@ -342,7 +346,9 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
   }
 
   async foundry(opts: { env?: true | undefined }) {
-    const assembler = this.freshAssembler({ dryRun: true });
+    const assembler = this.freshAssembler({
+      sideAffectsAllowed: { materialize: false },
+    });
     if (opts.env) {
       const env = assembler.projectStateEnvVars({ debug: true });
       await new ListerBuilder<{ name: string; value: string }>()

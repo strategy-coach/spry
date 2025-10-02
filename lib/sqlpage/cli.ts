@@ -1,21 +1,23 @@
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import { dirname, join, relative } from "jsr:@std/path@1";
-import { CLI, Resource } from "../assembler/mod.ts";
+import { CLI, Resource, SideAffects } from "../assembler/mod.ts";
 import { SqlPageAssembler } from "./assembler.ts";
 import { SqlSupplier } from "./sql.ts";
 
 export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
   constructor(
     freshAssembler: (
-      init: { dryRun: boolean; cleaningRequested?: boolean },
+      init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
     ) => SqlPageAssembler<Resource>,
   ) {
     super(freshAssembler);
   }
 
   async init(init: { dbName: string; clean: boolean }) {
-    const assembler = this.freshAssembler({ dryRun: true });
+    const assembler = this.freshAssembler({
+      sideAffectsAllowed: { materialize: false },
+    });
     const { spryStd, sqlPage } = assembler.projectPaths();
 
     const exists = async (path: string) =>
@@ -80,7 +82,9 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
    * followed by `src/sql.d/tail` and finally `spry/sql.d/tail`.
    */
   async sql() {
-    const assembler = this.freshAssembler({ dryRun: true });
+    const assembler = this.freshAssembler({
+      sideAffectsAllowed: { materialize: false },
+    });
     const pp = assembler.projectPaths();
     await new SqlSupplier([{
       nature: "Head SQL Statements",
@@ -155,7 +159,7 @@ export class SqlPageCLI extends CLI<Resource, SqlPageAssembler<Resource>> {
       .description("Clean auto-generated directories or files")
       .action(async () => {
         const assembler = this.freshAssembler({
-          dryRun: true,
+          sideAffectsAllowed: { materialize: false },
           cleaningRequested: true,
         });
         const task = assembler.cleaner();

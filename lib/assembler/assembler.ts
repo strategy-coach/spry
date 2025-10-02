@@ -115,11 +115,18 @@ export type WorkflowStep =
     readonly materialized: ResourcesCollection<Any>;
   };
 
+export type SideAffects = {
+  readonly materialize: boolean;
+};
+
 export class AssemblerState {
   #workflow: WorkflowStep;
 
   constructor(
-    readonly init: { dryRun: boolean; cleaningRequested?: boolean },
+    readonly init: {
+      sideAffectsAllowed: SideAffects;
+      cleaningRequested?: boolean;
+    },
   ) {
     this.#workflow = { step: "init" };
   }
@@ -357,9 +364,16 @@ export const typicalProjectPathsSchema = z.object({
   projectSrcHome: z.string().describe("The 'src' path for entire project"),
 });
 
+export const typicalProjectArtifactsSchema = z.object({
+  brand: z.string().optional().describe(
+    "TODO: replace this with a real artifact",
+  ),
+});
+
 export const typicalAssemblerProjectPropsSchema = z.object({
   projectId: z.string().describe("Project ID"),
   projectPaths: typicalProjectPathsSchema.describe("Project paths"),
+  projectArtifacts: typicalProjectArtifactsSchema.describe("Project artifacts"),
 });
 
 export class Assembler<R extends Resource> {
@@ -373,7 +387,10 @@ export class Assembler<R extends Resource> {
     readonly projectId: string,
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly assemblerBuses: AssemblerBusesInit<R>,
-    readonly init: { dryRun: boolean; cleaningRequested?: boolean },
+    readonly init: {
+      sideAffectsAllowed: SideAffects;
+      cleaningRequested?: boolean;
+    },
   ) {
     this.#state = new AssemblerState(init);
   }
@@ -463,6 +480,10 @@ export class Assembler<R extends Resource> {
     return { projectHome, projectSrcHome };
   }
 
+  projectArtifacts() {
+    return {} satisfies z.infer<typeof typicalProjectArtifactsSchema>;
+  }
+
   // subclasses should override for their own schemas
   projectStatePropertiesBag() {
     return propertiesBag(typicalAssemblerProjectPropsSchema);
@@ -527,7 +548,7 @@ export class Assembler<R extends Resource> {
       const result = await replacer.processToString(original, state);
       let written = false;
       if (
-        !this.#state.init.dryRun &&
+        this.#state.init.sideAffectsAllowed.materialize &&
         (result.changed && result.after != result.before)
       ) {
         await resource.writeText(result.after);
@@ -568,7 +589,9 @@ export class Assembler<R extends Resource> {
             matAbsFsPath,
             env,
             cwd,
-            dryRun: this.#state.init.dryRun,
+            dryRun: this.#state.init.sideAffectsAllowed.materialize
+              ? false
+              : true,
           }, (err) => error = err);
           this.resourceBus.emit("foundry:materialized", {
             assemblerState: this.#state,

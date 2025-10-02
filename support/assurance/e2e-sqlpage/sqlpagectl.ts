@@ -1,13 +1,19 @@
 #!/usr/bin/env -S deno run -A 
 
-import { assemblerBusesInit, Resource } from "../../../lib/assembler/mod.ts";
+import {
+  assemblerBusesInit,
+  Resource,
+  SideAffects,
+} from "../../../lib/assembler/mod.ts";
 import { SqlPageAssembler, SqlPageCLI } from "../../../lib/sqlpage/mod.ts";
 
 // rename SqlPageStarter class to your project name
 // change line 12 from `e2e-sqlpage` to your own project ID
 
 export class SqlPageStarter extends SqlPageAssembler<Resource> {
-  constructor(init: { dryRun: boolean; cleaningRequested?: boolean }) {
+  constructor(
+    init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
+  ) {
     super(
       "e2e-sqlpage",
       import.meta.resolve("./"),
@@ -25,6 +31,7 @@ if (import.meta.main) {
         Deno.args,
       );
   } else {
-    await new SqlPageStarter({ dryRun: false }).materialize();
+    await new SqlPageStarter({ sideAffectsAllowed: { materialize: true } })
+      .materialize();
   }
 }

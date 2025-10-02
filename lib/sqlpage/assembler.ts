@@ -11,6 +11,7 @@ import {
   Resource,
   ResourcesCollection,
   Routes,
+  SideAffects,
   typicalAssemblerProjectPropsSchema,
 } from "../assembler/mod.ts";
 import {
@@ -22,7 +23,9 @@ import {
   rootFs,
   RootLiteral,
 } from "../universal/event-fs/mod.ts";
-import { propertiesBag } from "../universal/properties.ts";
+import { flatten, propertiesBag } from "../universal/properties.ts";
+import { toSnakeCase } from "npm:drizzle-orm@0.44.5/casing";
+import { literal as literalSQL } from "../universal/sql-text.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -57,26 +60,48 @@ export const sqlPageProjectPathsSchema = z.object({
   // functions (e.g., relativeToCWD) are intentionally not modeled here
 });
 
+export const sqlPageProjectArtifactsSchema = z.object({
+  materialized: z.object({
+    // projectPropsAutoSql: z.string().describe(
+    //   "SQLPage .sql file with constants for the project paths, artifacts, etc.",
+    // ),
+    resourcesAutoJson: z.string().describe(
+      "JSON text file listing of all resources (with @spry.* annotations)",
+    ),
+    routesAutoJson: z.string().describe(
+      "JSON text file with full routes resolved from @route.* annotations",
+    ),
+    routesTreeAutoTxt: z.string().describe(
+      "Simple text file showing route tree resolved from @route.* annotations",
+    ),
+    edgesAutoJson: z.string().describe(
+      "JSON text file with parent/child edges resolved from @route.* annotations",
+    ),
+  }),
+});
+
 export const sqlPageAssemblerProjectPropsSchema =
   typicalAssemblerProjectPropsSchema
     .extend({
       projectPaths: typicalAssemblerProjectPropsSchema.shape.projectPaths
         .extend(sqlPageProjectPathsSchema.shape),
+      projectArtifacts: typicalAssemblerProjectPropsSchema.shape
+        .projectArtifacts.extend(sqlPageProjectArtifactsSchema.shape),
     });
 
 export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
   readonly projectFsDriver = localDriver();
   readonly projectHomeFs: ReactiveFs<Any>;
   readonly projectSrcFs: ReactiveFs<Any>;
-  readonly spryDropInfsHomeFs: ReactiveFs<Any>;
-  readonly spryDropInfsAutoFs: ReactiveFs<Any>;
+  readonly spryDropInsHomeFs: ReactiveFs<Any>;
+  readonly spryDropInsAutoFs: ReactiveFs<Any>;
 
   constructor(
     projectId: string,
     moduleHome: string, // import.meta.resolve('./') from module
     assemblerBuses: AssemblerBusesInit<R>,
     readonly stdlibSymlinkDest: string,
-    init: { dryRun: boolean; cleaningRequested?: boolean },
+    init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
   ) {
     super(projectId, moduleHome, assemblerBuses, init);
 
@@ -106,17 +131,20 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       this.projectFsDriver,
       paths.projectSrcHome as RootLiteral,
     ));
-    this.spryDropInfsHomeFs = reactiveFs(rootFs(
+    this.spryDropInsHomeFs = reactiveFs(rootFs(
       this.projectFsDriver,
       paths.spryDropIn.fsHome as RootLiteral,
     ));
-    this.spryDropInfsAutoFs = reactiveFs(rootFs(
+    this.spryDropInsAutoFs = reactiveFs(rootFs(
       this.projectFsDriver,
       paths.spryDropIn.fsAuto as RootLiteral,
     ));
 
     this.resourceBus.on("assembler:state:mutated", async (ev) => {
-      if (ev.current.step === "final" && !ev.assemblerState.init.dryRun) {
+      if (
+        ev.current.step === "final" &&
+        ev.assemblerState.init.sideAffectsAllowed.materialize
+      ) {
         try {
           await Deno.mkdir(paths.projectSrcHome, { recursive: true });
           await Deno.mkdir(paths.spryDropIn.fsHome, {
@@ -221,11 +249,8 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     for await (const rcr of rc.resources) {
       if (isWebPathSupplier(rcr)) {
         const path = rel(rcr.webPath);
-        await this.spryDropInfsAutoFs.mkdir(
-          dirname(path) as RelCanonical,
-          { recursive: true },
-        );
-        await this.spryDropInfsAutoFs.write(
+        // reactive-fs local-fs write automatically creates directories
+        await this.spryDropInsAutoFs.write(
           `${path}.auto.json` as RelCanonical,
           JSON.stringify(rcr, null, 2),
           { overwrite: true },
@@ -233,7 +258,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       }
     }
 
-    await this.spryDropInfsAutoFs.write(
+    const { absPath: resourcesAutoJson } = await this.spryDropInsAutoFs.write(
       rel("resources.auto.json"),
       JSON.stringify(
         rc.resources.map((r) => ({
@@ -254,13 +279,13 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     );
     const { serializers, breadcrumbs, edges } = await routes.populate();
 
-    await this.spryDropInfsAutoFs.write(
+    const { absPath: routesAutoJson } = await this.spryDropInsAutoFs.write(
       rel("routes.auto.json"),
       serializers.jsonText({ space: 2 }),
       { overwrite: true },
     );
 
-    await this.spryDropInfsAutoFs.write(
+    const { absPath: routesTreeAutoTxt } = await this.spryDropInsAutoFs.write(
       rel("routes-tree.auto.txt"),
       serializers.asciiTreeText(),
       { overwrite: true },
@@ -268,21 +293,59 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
 
     for await (const [webPath, bc] of Object.entries(breadcrumbs)) {
       const path = rel(`breadcrumbs/${webPath}`);
-      await this.spryDropInfsAutoFs.mkdir(
-        dirname(path) as RelCanonical,
-        { recursive: true },
-      );
-      await this.spryDropInfsAutoFs.write(
+      await this.spryDropInsAutoFs.write(
         `${path}.auto.json` as RelCanonical,
         JSON.stringify(bc, null, 2),
         { overwrite: true },
       );
     }
 
-    await this.spryDropInfsAutoFs.write(
+    const { absPath: edgesAutoJson } = await this.spryDropInsAutoFs.write(
       rel("edges.auto.json"),
       JSON.stringify(edges, null, 2),
       { overwrite: true },
     );
+
+    const projectPaths = this.projectPaths();
+    const bag = this.projectStatePropertiesBag();
+    const artifacts: z.infer<typeof sqlPageProjectArtifactsSchema> = {
+      materialized: {
+        resourcesAutoJson: relative(
+          projectPaths.projectSrcHome,
+          resourcesAutoJson,
+        ),
+        routesAutoJson: relative(projectPaths.projectSrcHome, routesAutoJson),
+        routesTreeAutoTxt: relative(
+          projectPaths.projectSrcHome,
+          routesTreeAutoTxt,
+        ),
+        edgesAutoJson: relative(projectPaths.projectSrcHome, edgesAutoJson),
+      },
+    };
+
+    const props = {
+      projectId: this.projectId,
+      projectPaths: this.projectPaths(),
+      projectArtifacts: artifacts,
+    };
+    // validate + cache in the bag (Zod coerces/strips unknowns if any)
+    bag.set("projectId", props.projectId);
+    bag.set("projectPaths", props.projectPaths);
+    bag.set("projectArtifacts", props.projectArtifacts);
+
+    const f = flatten(bag);
+    const govnSql: string[] = [];
+    // deno-fmt-ignore
+    for (const r of f.entries(props)) {
+      const cmt = `-- [${r.valueHint}] ${r.comment ?? "(TODO: supply comment)"}`;
+      govnSql.push(`${cmt}\nSET ${toSnakeCase(r.name)} = ${literalSQL(r.value)};`);
+    }
+
+    const { path } = await this.spryDropInsAutoFs.write(
+      rel("project-govn.auto.sql"),
+      govnSql.join("\n\n"),
+      { overwrite: true },
+    );
+    console.log(path);
   }
 }
