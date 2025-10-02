@@ -84,7 +84,7 @@ serve(async (req: Request) => {
     });
   } catch (error) {
     // Log and return an error response if something goes wrong
-    console.error(`Error during proxying: ${error.message}`);
-    return new Response("Proxy error: " + error.message, { status: 502 });
+    console.error(`Error during proxying: ${String(error)}`);
+    return new Response("Proxy error: " + String(error), { status: 502 });
   }
 }, { port: parseInt(proxyPort, 10) });
