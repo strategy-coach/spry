@@ -11,7 +11,7 @@ SELECT
    'Resources annotated with @spry.* or @route.* tags in comments' AS contents,
    1 AS level;
 
-SET resources_json = sqlpage.read_file_as_text('spry.d/auto/resource/resources.auto.json');
+SET resources_json = sqlpage.read_file_as_text('spry.d/auto/resource/resources-catalog.auto.json');
 SET resources_json_safe = COALESCE(NULLIF($resources_json, ''), '[]');
 
 SELECT 'big_number' as component;

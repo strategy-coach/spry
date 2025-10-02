@@ -1,5 +1,7 @@
 import { dirname, fromFileUrl, join, relative, resolve } from "jsr:@std/path@1";
 import z from "jsr:@zod/zod@4";
+import { toSnakeCase } from "npm:drizzle-orm@0.44.5/casing";
+import { isFsFileResource, isFsSrcCodeFileSupplier } from "../assembler/fs.ts";
 import {
   AnnotatedRoute,
   Assembler,
@@ -25,11 +27,10 @@ import {
   rootFs,
   RootLiteral,
 } from "../universal/event-fs/mod.ts";
-import { flatten, propertiesBag } from "../universal/properties.ts";
-import { toSnakeCase } from "npm:drizzle-orm@0.44.5/casing";
-import { literal as literalSQL } from "../universal/sql-text.ts";
-import { isFsFileResource, isFsSrcCodeFileSupplier } from "../assembler/fs.ts";
 import { jsonStringifyReplacers } from "../universal/json-stringify-aide.ts";
+import { flatten, propertiesBag } from "../universal/properties.ts";
+import { literal as literalSQL } from "../universal/sql-text.ts";
+import { MarkdownStore } from "../universal/markdown.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -122,7 +123,7 @@ export const resourceCatalogEntry = z.intersection(
 
 export type ResourceCatalogEntry = z.infer<typeof resourceCatalogEntry>;
 
-// Collection type for resources.auto.json catalogs
+// Collection type for resource/resources-catalog.auto.json catalogs
 export const resourcesCatalogListSchema = z.array(resourceCatalogEntry);
 export type ResourcesCatalog = z.infer<typeof resourcesCatalogListSchema>;
 
@@ -132,7 +133,8 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
   readonly projectSrcFs: ReactiveFs<Any>;
   readonly spryDropInsHomeFs: ReactiveFs<Any>;
   readonly spryDropInsAutoFs: ReactiveFs<Any>;
-  readonly spryDropInsResourceCatalogEntryFs: ReactiveFs<Any>;
+  readonly spryDropInsRoutesManifestFs: ReactiveFs<Any>;
+  readonly spryDropInsResourceManifestFs: ReactiveFs<Any>;
 
   constructor(
     projectId: string,
@@ -177,7 +179,11 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       this.projectFsDriver,
       paths.spryDropIn.fsAuto as RootLiteral,
     ));
-    this.spryDropInsResourceCatalogEntryFs = reactiveFs(rootFs(
+    this.spryDropInsRoutesManifestFs = reactiveFs(rootFs(
+      this.projectFsDriver,
+      join(paths.spryDropIn.fsAuto, "route") as RootLiteral,
+    ));
+    this.spryDropInsResourceManifestFs = reactiveFs(rootFs(
       this.projectFsDriver,
       join(paths.spryDropIn.fsAuto, "resource") as RootLiteral,
     ));
@@ -335,6 +341,33 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     );
   }
 
+  protected async dropInAutoReadme() {
+    const mdStore = new MarkdownStore<"README.md">();
+    // deno-fmt-ignore
+    const README = () => {
+        const md = mdStore.markdown("README.md");
+        md.h1("Spry Dropin Resources and Routes");
+        md.pTag`After annotations are parsed and validated, Spry generates the following in \`spry.d/auto\`:`;
+        md.li("`project-govn.auto.sql` contains an SQL file you can use to copy/paste from or include via SQLPage all of the major paths and other project properties")
+        md.li("`resource/` directory contains parsed `@spry.*` with `@route.*` embedded annotations for each route / endpoint individually.")
+        md.li("[`resource/resources-catalog.auto.json`](resource/resources-catalog.auto.json) is a single JSON array of all annotated `@spry.*` resources")
+        md.li("TODO: [`resources/issues.auto.md`](resource/issues.auto.json) is a single JSON array of all errors found in annotated `@spry.*` resources (will be an empty array if no issues found)")
+        md.li("`route/` directory contains route annotations JSON for each route / endpoint individually.")
+        md.li("`route/breadcrumbs/` directory contains computed \"breadcrumbs\" for each @route.* annotation.")
+        md.li("[`route/edges.auto.json`](route/edges.auto.json) contains route edges to conveniently build graph with `forest.auto.json`.")
+        md.li("[`route/routes-tree.auto.txt`](route/routes-tree.auto.txt) contains route tree in ASCII text format.")
+        md.li("[`route/routes.auto.json`](route/routes.auto.json) contains full routes ('forest') in JSON format.")
+        md.p("");
+        md.p("TODO:")
+        md.li("need to store the JSON Schemas for each of the above as well (need to use Zod built-ins)")
+        return md;
+    };
+    await this.spryDropInsAutoFs.write(
+      rel("README.auto.md"),
+      README().write(),
+    );
+  }
+
   protected async dropInArtifacts(rc: ResourcesCollection<R>) {
     // don't store absFsPath because it will be different across systems
     // making it harder to store in Git (because it will show diffs)
@@ -353,7 +386,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       if (isWebPathSupplier(rcr)) {
         const path = rel(rcr.webPath);
         // reactive-fs local-fs write automatically creates directories
-        await this.spryDropInsResourceCatalogEntryFs.write(
+        await this.spryDropInsResourceManifestFs.write(
           `${path}.auto.json` as RelCanonical,
           JSON.stringify(rcr, mutateNonIdempotent, 2),
           { overwrite: true },
@@ -361,11 +394,12 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       }
     }
 
-    const { absPath: resourcesAutoJson } = await this.spryDropInsAutoFs.write(
-      rel("resources.auto.json"),
-      JSON.stringify(this.resourcesCatalog(rc), null, 2),
-      { overwrite: true },
-    );
+    const { absPath: resourcesAutoJson } = await this
+      .spryDropInsResourceManifestFs.write(
+        rel("resources-catalog.auto.json"),
+        JSON.stringify(this.resourcesCatalog(rc), null, 2),
+        { overwrite: true },
+      );
 
     const routes = new Routes(
       rc.resources.filter(isRouteSupplier)
@@ -375,32 +409,33 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     );
     const { serializers, breadcrumbs, edges } = await routes.populate();
 
-    const { absPath: routesAutoJson } = await this.spryDropInsAutoFs.write(
-      rel("routes.auto.json"),
-      serializers.jsonText({ space: 2 }),
-      { overwrite: true },
-    );
+    const { absPath: routesAutoJson } = await this.spryDropInsRoutesManifestFs
+      .write(
+        rel("routes.auto.json"),
+        serializers.jsonText({ space: 2 }),
+        { overwrite: true },
+      );
 
-    const { absPath: routesTreeAutoTxt } = await this.spryDropInsAutoFs.write(
-      rel("routes-tree.auto.txt"),
-      serializers.asciiTreeText(),
-      { overwrite: true },
-    );
+    const { absPath: routesTreeAutoTxt } = await this
+      .spryDropInsRoutesManifestFs.write(
+        rel("routes-tree.auto.txt"),
+        serializers.asciiTreeText(),
+        { overwrite: true },
+      );
 
     for await (const [webPath, bc] of Object.entries(breadcrumbs)) {
       const path = rel(`breadcrumbs/${webPath}`);
-      await this.spryDropInsAutoFs.write(
+      await this.spryDropInsRoutesManifestFs.write(
         `${path}.auto.json` as RelCanonical,
         JSON.stringify(bc, null, 2),
         { overwrite: true },
       );
     }
 
-    const { absPath: edgesAutoJson } = await this.spryDropInsAutoFs.write(
-      rel("edges.auto.json"),
-      JSON.stringify(edges, null, 2),
-      { overwrite: true },
-    );
+    const { absPath: edgesAutoJson } = await this.spryDropInsRoutesManifestFs
+      .write(rel("edges.auto.json"), JSON.stringify(edges, null, 2), {
+        overwrite: true,
+      });
 
     const bag = this.projectStatePropertiesBag();
     const artifacts: z.infer<typeof sqlPageProjectArtifactsSchema> = {
@@ -441,6 +476,9 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       govnSql.join("\n\n"),
       { overwrite: true },
     );
+
+    await this.dropInAutoReadme();
+
     console.log(path);
   }
 }
