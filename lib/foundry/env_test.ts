@@ -1,0 +1,186 @@
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { EnvAide, FoundryEnvAide } from "./env.ts";
+
+// ---------- Test utilities ----------
+
+function snapshotEnv(): Record<string, string> {
+  return Deno.env.toObject();
+}
+
+function restoreEnv(snapshot: Record<string, string>) {
+  // Clear current env
+  for (const k of Object.keys(Deno.env.toObject())) {
+    Deno.env.delete(k);
+  }
+  // Restore
+  for (const [k, v] of Object.entries(snapshot)) {
+    Deno.env.set(k, v);
+  }
+}
+
+// ---------- Tests ----------
+
+Deno.test("EnvAide & FoundryEnvAide (composition)", async (t) => {
+  const snap = snapshotEnv();
+  try {
+    // Arrange a clean, controlled environment
+    for (const k of Object.keys(Deno.env.toObject())) Deno.env.delete(k);
+
+    Deno.env.set("PATH", "/usr/bin");
+    Deno.env.set("HOME", "/home/test");
+    Deno.env.set("OTHER_URL", "https://example.com");
+
+    Deno.env.set("FOUNDRY_TARGET_SQLITE_DB", "/tmp/db.sqlite");
+    Deno.env.set("FOUNDRY_DB_URL", "sqlite:///tmp/db.sqlite");
+    Deno.env.set(
+      "FOUNDRY_CONTEXT",
+      JSON.stringify({ runId: "abc123", n: 2 }),
+    );
+
+    await t.step(
+      "EnvAide: dynamic lookup maps camelCase → SNAKE_CASE",
+      () => {
+        const env = new EnvAide();
+        // @ts-ignore dynamic trap
+        assertEquals(env.path(), "/usr/bin"); // PATH
+        // @ts-ignore dynamic trap
+        assertEquals(env.otherUrl(), "https://example.com"); // OTHER_URL
+      },
+    );
+
+    await t.step("EnvAide: get/require/has/keys/toObject", () => {
+      const env = new EnvAide();
+      assertEquals(env.get("HOME"), "/home/test");
+      assert(env.has("PATH"));
+      assertThrows(
+        () => env.require("MISSING_VAR"),
+        "Missing MISSING_VAR",
+      );
+
+      const keys = env.keys();
+      assert(keys.includes("PATH"));
+      assert(keys.includes("FOUNDRY_TARGET_SQLITE_DB"));
+
+      const all = env.toObject();
+      assertEquals(all.PATH, "/usr/bin");
+      assertEquals(all.FOUNDRY_DB_URL, "sqlite:///tmp/db.sqlite");
+
+      const onlyHome = env.toObject((k) => k === "HOME");
+      assertEquals(Object.keys(onlyHome), ["HOME"]);
+      assertEquals(onlyHome.HOME, "/home/test");
+    });
+
+    await t.step("FoundryEnvAide: dynamic lookup prefixes FOUNDRY_", () => {
+      const cap = new FoundryEnvAide(new EnvAide());
+      // @ts-ignore dynamic trap
+      assertEquals(cap.targetSqliteDb(), "/tmp/db.sqlite"); // FOUNDRY_TARGET_SQLITE_DB
+      // @ts-ignore dynamic trap (consecutive capitals)
+      assertEquals(cap.dbURL(), "sqlite:///tmp/db.sqlite"); // FOUNDRY_DB_URL
+    });
+
+    await t.step("FoundryEnvAide: get/require/has/keys", () => {
+      const cap = new FoundryEnvAide(new EnvAide());
+      // De-prefixed
+      assertEquals(cap.get("TARGET_SQLITE_DB"), "/tmp/db.sqlite");
+      // Prefixed
+      assertEquals(cap.get("FOUNDRY_DB_URL"), "sqlite:///tmp/db.sqlite");
+
+      assert(cap.has("TARGET_SQLITE_DB"));
+      assert(cap.has("FOUNDRY_DB_URL"));
+
+      assertThrows(
+        () => cap.require("MISSING"),
+        "Missing FOUNDRY_MISSING",
+      );
+
+      const keys = cap.keys(); // de-prefixed
+      assert(keys.includes("TARGET_SQLITE_DB"));
+      assert(keys.includes("DB_URL"));
+      assert(!keys.includes("FOUNDRY_TARGET_SQLITE_DB"));
+    });
+
+    await t.step("FoundryEnvAide: toObject default & filter", () => {
+      const cap = new FoundryEnvAide(new EnvAide());
+      const obj = cap.toObject();
+      // Default: only FOUNDRY_* (prefixed)
+      assertEquals(obj.FOUNDRY_TARGET_SQLITE_DB, "/tmp/db.sqlite");
+      assertEquals(obj.FOUNDRY_DB_URL, "sqlite:///tmp/db.sqlite");
+      // Not included by default
+      assertEquals(Object.hasOwn(obj, "HOME"), false);
+
+      const obj2 = cap.toObject((k) => k === "HOME");
+      assertEquals(obj2.HOME, "/home/test"); // included by filter
+      assertEquals(obj2.FOUNDRY_TARGET_SQLITE_DB, "/tmp/db.sqlite"); // still present
+    });
+
+    await t.step(
+      "FoundryEnvAide: context() JSON parsing & schema validation",
+      async (t2) => {
+        const cap = new FoundryEnvAide(new EnvAide());
+
+        await t2.step("returns parsed JSON when no schema", () => {
+          const ctx = cap.context<{ runId: string; n: number }>();
+          assertEquals(ctx, { runId: "abc123", n: 2 });
+        });
+
+        await t2.step("uses schema.parse when provided", () => {
+          const schema = {
+            parse(value: unknown) {
+              const v = value as { runId?: unknown; n?: unknown };
+              if (
+                typeof v?.runId !== "string" ||
+                typeof v?.n !== "number"
+              ) {
+                throw new Error("Invalid shape");
+              }
+              return { runId: v.runId, n: v.n };
+            },
+          };
+          const ctx = cap.context(schema);
+          assertEquals(ctx, { runId: "abc123", n: 2 });
+        });
+
+        await t2.step("throws on invalid JSON", () => {
+          const snap2 = snapshotEnv();
+          try {
+            Deno.env.set("FOUNDRY_CONTEXT", "{not json}");
+            const cap2 = new FoundryEnvAide(new EnvAide());
+            assertThrows(
+              () => cap2.context(),
+              "Invalid JSON in FOUNDRY_CONTEXT",
+            );
+          } finally {
+            restoreEnv(snap2);
+          }
+        });
+
+        await t2.step(
+          "returns undefined when FOUNDRY_CONTEXT missing/empty",
+          () => {
+            const snap2 = snapshotEnv();
+            try {
+              Deno.env.delete("FOUNDRY_CONTEXT");
+              const cap2 = new FoundryEnvAide(new EnvAide());
+              const ctx = cap2.context();
+              assertEquals(ctx, undefined);
+            } finally {
+              restoreEnv(snap2);
+            }
+          },
+        );
+      },
+    );
+
+    await t.step("FoundryEnvAide: prefixedKeys()", () => {
+      const cap = new FoundryEnvAide(new EnvAide());
+      const pk = cap.prefixedKeys();
+      // Should include the exact prefixed names
+      assert(pk.includes("FOUNDRY_TARGET_SQLITE_DB"));
+      assert(pk.includes("FOUNDRY_DB_URL"));
+      // And not include non-FOUNDRY envs
+      assert(!pk.includes("HOME"));
+    });
+  } finally {
+    restoreEnv(snap);
+  }
+});
