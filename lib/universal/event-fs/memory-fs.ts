@@ -27,9 +27,8 @@ export function memoryDriver(): FsDriver {
       return f;
     },
 
-    // deno-lint-ignore require-await
     async write(abs, data, _opts) {
-      ensureDir(abs);
+      await this.mkdir(parentDir(abs), { recursive: true }).catch(() => {});
       const bytes = typeof data === "string"
         ? new TextEncoder().encode(data)
         : data;
