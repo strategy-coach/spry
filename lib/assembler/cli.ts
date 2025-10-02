@@ -344,7 +344,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
   async foundry(opts: { env?: true | undefined }) {
     const assembler = this.freshAssembler({ dryRun: true });
     if (opts.env) {
-      const env = assembler.projectStateEnvVars();
+      const env = assembler.projectStateEnvVars({ debug: true });
       await new ListerBuilder<{ name: string; value: string }>()
         .declareColumns("name", "value")
         .from(Object.entries(env).map(([k, v]) => ({ name: k, value: v })))

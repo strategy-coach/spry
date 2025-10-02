@@ -484,7 +484,7 @@ export class Assembler<R extends Resource> {
   /**
    * Derive ENV/SQL vars by flattening whatever `projectStateProperties()` returns.
    */
-  projectStateEnvVars() {
+  projectStateEnvVars(opts?: { debug: boolean }) {
     const { bag, props } = this.projectStateProperties();
     const flattened = flatten(bag);
     const envVars = flattened.record("FOUNDRY_", props, {
@@ -492,8 +492,13 @@ export class Assembler<R extends Resource> {
         segs.map((s) => s == "projectPaths" ? "PATH" : toScreamingSnake(s))
           .join("_"),
     });
-    if (this.#state.init.cleaningRequested) {
-      envVars["FOUNDRY_SPRY_STATE_CLEANING_REQUESTED"] = "TRUE";
+    if (opts?.debug) {
+      envVars["FOUNDRY_ASSEMBLER_STATE_CLEANING_REQUESTED"] =
+        "<will be set to TRUE if 'clean' is passed into state>";
+    } else {
+      if (this.#state.init.cleaningRequested) {
+        envVars["FOUNDRY_ASSEMBLER_STATE_CLEANING_REQUESTED"] = "TRUE";
+      }
     }
     return envVars;
   }
