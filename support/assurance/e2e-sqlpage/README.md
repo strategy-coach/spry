@@ -95,7 +95,9 @@ applied to SQLPage’s distribution. Just be careful about putting things into
 WIP
 
 - [ ] Create #pipeTo directive which will take the output of the current file
-      (after processing) and send it as STDIN to another executable.
+      (after processing) and send it as STDIN to another executable. This allows
+      foundries to act like "shebang" after annotations and other processing is
+      completed. Allow choice of "phase" or "stage" (discovery, materialization)
 - [ ] Create #prepend and #append similar to #include/#includeEnd except
       #prepend replaces everything before and #append replaces everything
       afterwards

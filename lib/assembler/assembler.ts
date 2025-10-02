@@ -6,7 +6,11 @@ import {
 } from "../universal/content/code-comments.ts";
 import { LanguageSpec } from "../universal/content/code.ts";
 import { eventBus } from "../universal/event-bus.ts";
-import { flattenedEnvLike, propertiesBag } from "../universal/properties.ts";
+import {
+  flatten,
+  propertiesBag,
+  toScreamingSnake,
+} from "../universal/properties.ts";
 import { includeDirective } from "./directives.ts";
 import {
   executables,
@@ -459,6 +463,11 @@ export class Assembler<R extends Resource> {
     return { projectHome, projectSrcHome };
   }
 
+  // subclasses should override for their own schemas
+  projectStatePropertiesBag() {
+    return propertiesBag(typicalAssemblerProjectPropsSchema);
+  }
+
   /** Single source: validate & store id + base paths; return hierarchical object for JSON. */
   projectStateProperties() {
     const props = {
@@ -466,7 +475,7 @@ export class Assembler<R extends Resource> {
       projectPaths: this.projectPaths(),
     };
     // validate + cache in the bag (Zod coerces/strips unknowns if any)
-    const bag = propertiesBag(typicalAssemblerProjectPropsSchema);
+    const bag = this.projectStatePropertiesBag();
     bag.set("projectId", props.projectId);
     bag.set("projectPaths", props.projectPaths);
     return { props, bag }; // keep hierarchy for JSON
@@ -476,27 +485,17 @@ export class Assembler<R extends Resource> {
    * Derive ENV/SQL vars by flattening whatever `projectStateProperties()` returns.
    */
   projectStateEnvVars() {
-    const { props } = this.projectStateProperties();
-    const flat = flattenedEnvLike(props, {
-      // Drop the top-level "paths" segment and SCREAMING_SNAKE the rest
-      name: (p) => {
-        const s = p[0] === "projectPaths" ? p.slice(1) : p;
-        return s.length
-          ? "FOUNDRY_" +
-            s.map((to) =>
-              to.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
-            ).join("_")
-          : false;
-      },
+    const { bag, props } = this.projectStateProperties();
+    const flattened = flatten(bag);
+    const envVars = flattened.record("FOUNDRY_", props, {
+      name: (segs) =>
+        segs.map((s) => s == "projectPaths" ? "PATH" : toScreamingSnake(s))
+          .join("_"),
     });
-    const out: Record<string, string> = {};
     if (this.#state.init.cleaningRequested) {
-      out["SPRY_FOUNDRY_STATE_CLEANING_REQUESTED"] = "TRUE";
+      envVars["FOUNDRY_SPRY_STATE_CLEANING_REQUESTED"] = "TRUE";
     }
-    for (const [k, v] of Object.entries(flat)) {
-      if (v !== undefined && v !== null) out[k] = String(v);
-    }
-    return out;
+    return envVars;
   }
 
   async materializeDirectives(

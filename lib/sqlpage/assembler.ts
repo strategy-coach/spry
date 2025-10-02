@@ -22,6 +22,7 @@ import {
   rootFs,
   RootLiteral,
 } from "../universal/event-fs/mod.ts";
+import { propertiesBag } from "../universal/properties.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -156,6 +157,10 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       );
     }
     return result;
+  }
+
+  override projectStatePropertiesBag() {
+    return propertiesBag(sqlPageAssemblerProjectPropsSchema);
   }
 
   override projectPaths(
