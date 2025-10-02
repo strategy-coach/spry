@@ -2,7 +2,7 @@
 
 // @spry.nature foundry @spry.dependsOn db-after-build @spry.isCleanable
 
-import { SqliteAide } from "../../engine/foundry/mod.ts";
+import { SqliteAide } from "../../../foundry/mod.ts";
 
 const SQL = `
 .mode list
