@@ -9,7 +9,9 @@ import {
   isRouteSupplier,
   isWebPathSupplier,
   Resource,
+  resourceSchema,
   ResourcesCollection,
+  routeAnnSchema,
   Routes,
   SideAffects,
   typicalAssemblerProjectPropsSchema,
@@ -26,6 +28,8 @@ import {
 import { flatten, propertiesBag } from "../universal/properties.ts";
 import { toSnakeCase } from "npm:drizzle-orm@0.44.5/casing";
 import { literal as literalSQL } from "../universal/sql-text.ts";
+import { isFsFileResource, isFsSrcCodeFileSupplier } from "../assembler/fs.ts";
+import { jsonStringifyReplacers } from "../universal/json-stringify-aide.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -89,12 +93,46 @@ export const sqlPageAssemblerProjectPropsSchema =
         .projectArtifacts.extend(sqlPageProjectArtifactsSchema.shape),
     });
 
+// Common catalog fields present for all resources discovered in the catalog
+export const resourceCatalogFields = z.object({
+  path: z.string().describe("Filesystem path relative to project root"),
+  basename: z.string().describe("Base file name (no directories)"),
+  extension: z.string().describe("Primary extension without dot"),
+  // Some entries include multiple extensions (e.g., [".ddl","sql"] or [".json","ts"])
+  extensions: z.array(z.string()).optional()
+    .describe("Additional or compound extensions, order preserved"),
+  autoMaterializeTo: z.string().optional()
+    .describe("If set, where this resource auto-materializes its artifact"),
+  srcCodeLanguage: z.string().optional()
+    .describe(
+      "Source language classification (e.g., 'sql', 'typescript', 'shell')",
+    ),
+  route: routeAnnSchema.optional(),
+}).strict();
+
+/**
+ * Extends the base Resource schema with catalog metadata.
+ * This keeps all nature-specific constraints from resourceSchema
+ * (e.g., sqlImpact requirements) and adds catalog fields common to files.
+ */
+export const resourceCatalogEntry = z.intersection(
+  resourceSchema,
+  resourceCatalogFields,
+);
+
+export type ResourceCatalogEntry = z.infer<typeof resourceCatalogEntry>;
+
+// Collection type for resources.auto.json catalogs
+export const resourcesCatalogListSchema = z.array(resourceCatalogEntry);
+export type ResourcesCatalog = z.infer<typeof resourcesCatalogListSchema>;
+
 export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
   readonly projectFsDriver = localDriver();
   readonly projectHomeFs: ReactiveFs<Any>;
   readonly projectSrcFs: ReactiveFs<Any>;
   readonly spryDropInsHomeFs: ReactiveFs<Any>;
   readonly spryDropInsAutoFs: ReactiveFs<Any>;
+  readonly spryDropInsResourceCatalogEntryFs: ReactiveFs<Any>;
 
   constructor(
     projectId: string,
@@ -138,6 +176,10 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     this.spryDropInsAutoFs = reactiveFs(rootFs(
       this.projectFsDriver,
       paths.spryDropIn.fsAuto as RootLiteral,
+    ));
+    this.spryDropInsResourceCatalogEntryFs = reactiveFs(rootFs(
+      this.projectFsDriver,
+      join(paths.spryDropIn.fsAuto, "resource") as RootLiteral,
     ));
 
     this.resourceBus.on("assembler:state:mutated", async (ev) => {
@@ -185,6 +227,17 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       );
     }
     return result;
+  }
+
+  webPathOf(supplied: string) {
+    const result = relative(this.projectPaths().projectHome, supplied);
+    if (result.startsWith(this.stdlibSymlinkDest)) {
+      return relative(
+        Deno.cwd(), // assume that CWD is the project home
+        join("spry", relative(this.stdlibSymlinkDest, supplied)),
+      );
+    }
+    return relative(this.projectPaths().projectSrcHome, supplied);
   }
 
   override projectStatePropertiesBag() {
@@ -240,19 +293,69 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     } satisfies z.infer<typeof sqlPageProjectPathsSchema>;
   }
 
+  protected resourcesCatalog(rc: ResourcesCollection<R>) {
+    return (rc.resources.map((r) => {
+      // TODO: convert this to Zod and prepare a JSON Schema
+      // deno-lint-ignore no-explicit-any
+      let entry: Record<string, any> = {
+        nature: r.nature,
+        path: isWebPathSupplier(r) ? r.webPath : undefined,
+        isSystemGenerated: r.isSystemGenerated,
+      };
+      if (isFsFileResource(r)) {
+        entry = {
+          ...entry,
+          isParsedSuccessfully: r.isParsedSuccessfully,
+          basename: r.extensions.basename,
+          extension: r.extensions.terminal,
+        };
+        if (r.extensions.extensions.length > 1) {
+          entry.extensions = r.extensions.extensions;
+        }
+        const isAM = r.extensions.autoMaterializable();
+        if (isAM) {
+          entry.autoMaterializeTo = this.webPathOf(isAM);
+        }
+      }
+      if (isFsSrcCodeFileSupplier(r)) {
+        entry = {
+          ...entry,
+          srcCodeLanguage: r.srcCodeLanguage.id,
+        };
+      }
+      if (isRouteSupplier(r)) {
+        entry = {
+          ...entry,
+          route: r.route.annotated,
+        };
+      }
+      return entry;
+    }) as unknown as ResourcesCatalog).filter((r) =>
+      r.path.indexOf(".auto.") > 0 ? false : true
+    );
+  }
+
   protected async dropInArtifacts(rc: ResourcesCollection<R>) {
     // don't store absFsPath because it will be different across systems
     // making it harder to store in Git (because it will show diffs)
-    const _omitNonIdempotent = (k: unknown, v: unknown) =>
-      k === "absFsPath" || k === "origin" ? undefined : v;
+    const cwd = Deno.cwd();
+    const withRelativeToCWD = (_: readonly string[], value: unknown) =>
+      relative(cwd, String(value));
+    const mutateNonIdempotent = jsonStringifyReplacers([
+      { query: "absFsPath", action: "omit" },
+      { query: "supplier.root", action: "replace", with: withRelativeToCWD },
+      { query: "walkEntry.path", action: "replace", with: withRelativeToCWD },
+    ]);
+
+    const pp = this.projectPaths();
 
     for await (const rcr of rc.resources) {
       if (isWebPathSupplier(rcr)) {
         const path = rel(rcr.webPath);
         // reactive-fs local-fs write automatically creates directories
-        await this.spryDropInsAutoFs.write(
+        await this.spryDropInsResourceCatalogEntryFs.write(
           `${path}.auto.json` as RelCanonical,
-          JSON.stringify(rcr, null, 2),
+          JSON.stringify(rcr, mutateNonIdempotent, 2),
           { overwrite: true },
         );
       }
@@ -260,14 +363,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
 
     const { absPath: resourcesAutoJson } = await this.spryDropInsAutoFs.write(
       rel("resources.auto.json"),
-      JSON.stringify(
-        rc.resources.map((r) => ({
-          nature: r.nature,
-          path: isWebPathSupplier(r) ? r.webPath : undefined,
-        })),
-        null,
-        2,
-      ),
+      JSON.stringify(this.resourcesCatalog(rc), null, 2),
       { overwrite: true },
     );
 
@@ -306,20 +402,19 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
       { overwrite: true },
     );
 
-    const projectPaths = this.projectPaths();
     const bag = this.projectStatePropertiesBag();
     const artifacts: z.infer<typeof sqlPageProjectArtifactsSchema> = {
       materialized: {
         resourcesAutoJson: relative(
-          projectPaths.projectSrcHome,
+          pp.projectSrcHome,
           resourcesAutoJson,
         ),
-        routesAutoJson: relative(projectPaths.projectSrcHome, routesAutoJson),
+        routesAutoJson: relative(pp.projectSrcHome, routesAutoJson),
         routesTreeAutoTxt: relative(
-          projectPaths.projectSrcHome,
+          pp.projectSrcHome,
           routesTreeAutoTxt,
         ),
-        edgesAutoJson: relative(projectPaths.projectSrcHome, edgesAutoJson),
+        edgesAutoJson: relative(pp.projectSrcHome, edgesAutoJson),
       },
     };
 
