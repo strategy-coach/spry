@@ -1,37 +1,39 @@
 # SQLite DDL Migrations (No Dependencies)
 
-Goal: Idempotent, self-describing, and transactional schema management using only the `sqlite3` CLI and plain `.sql` files.
+Goal: Idempotent, self-describing, transactional schema management using only `sqlite3` and `.sql` files.
 
-* Tool: `sqlite3` command-line tool (bundled on macOS; available via package managers on Linux/Windows).
-* DB file: `app.db` (or any name you choose).
-* SQL scripts:
+## 0) What You’ll Use
 
-  * `plan.sql` — emits human-readable log lines and only the DDL you actually need.
-  * `migrations/` — folder where each run’s applied SQL is saved as an audit artifact.
+* Tool: `sqlite3` CLI
+* Database file: `app.db` (or any name)
+* Scripts & dirs:
 
-> We do not create any permanent tables for migration tracking. All state is inferred from `sqlite_schema` and PRAGMAs. One TEMP table is used per run for a session id and disappears automatically.
+  * `plan.sql` — the planner that *emits* comments + only the DDL you need
+  * `migrations/` — folder where each run’s applied SQL is saved as an audit artifact
 
-Install / Verify the SQLite CLI:
+> We do not keep any permanent “migration” tables. A TEMP table is used only to print a per-run session id; it disappears when the connection closes.
 
-* macOS: `brew install sqlite` (if not already present).
+## 1) Install / Verify SQLite CLI
+
+* macOS: `brew install sqlite` (if needed)
 * Ubuntu/Debian: `sudo apt-get install sqlite3`
 * Fedora/CentOS: `sudo dnf install sqlite` or `sudo yum install sqlite`
 * Windows:
 
-  1. Download “sqlite-tools” zip from the official SQLite site.
-  2. Unzip into `C:\sqlite\` and add that folder to your PATH.
+  1. Download the “sqlite-tools” zip from the official site.
+  2. Unzip into `C:\sqlite\` and add it to PATH.
   3. Verify: open PowerShell → `sqlite3 --version`
 
-Folder Layout:
+## 2) Repository Layout
 
 ```
 your-project/
-  app.db              # your SQLite database (or create on first run)
-  plan.sql            # migration planner (provided below)
-  migrations/         # auto-created; holds applied logs per run
+  app.db              # SQLite database (created on first run if missing)
+  plan.sql            # migration planner (below)
+  migrations/         # run artifacts (applied SQL & optional trace)
 ```
 
-Create the folder for logs:
+Create the `migrations/` folder:
 
 ```bash
 mkdir -p migrations
@@ -43,17 +45,20 @@ Windows PowerShell:
 New-Item -ItemType Directory -Force -Path migrations | Out-Null
 ```
 
-## How To Run (Plan → Log → Apply)
+## 3) How To Run (Plan → Log → Apply)
 
-### macOS / Linux (Bash/Zsh)
+### macOS / Linux
 
 ```bash
 ts="migrations/applied-$(date +%F-%H%M%S).sql"
 
-# Plan → log to file → Apply to DB
+# Plan → save output → Apply
 sqlite3 app.db < plan.sql | tee "$ts" | sqlite3 app.db
 
-# (Optional) Execution trace from the CLI processing that file
+# (Optional) sanity check: ensure the applied file alone is valid SQL
+sqlite3 app.db -cmd ".bail on" < "$ts"
+
+# (Optional) execution trace of applying that file
 sqlite3 app.db -cmd ".trace '$ts.trace'" < "$ts" >/dev/null
 
 echo "Migration applied. Log: $ts  Trace: $ts.trace"
@@ -64,63 +69,67 @@ echo "Migration applied. Log: $ts  Trace: $ts.trace"
 ```powershell
 $ts = "migrations/applied-$(Get-Date -Format 'yyyy-MM-dd-HHmmss').sql"
 
-# Plan → log → Apply
+# Plan → save output → Apply
 cmd /c "sqlite3 app.db < plan.sql" | Tee-Object -FilePath $ts | cmd /c "sqlite3 app.db"
 
-# (Optional) Execution trace
+# (Optional) sanity check
+cmd /c "sqlite3 app.db -cmd '.bail on' < $ts > NUL"
+
+# (Optional) trace
 cmd /c "sqlite3 app.db -cmd '.trace $ts.trace' < $ts > NUL"
 
 "Migration applied. Log: $ts  Trace: $ts.trace"
 ```
 
-> Dry-run: run only the first half (don’t pipe into the second `sqlite3`). You’ll still get the complete “would-apply” file.
+> Dry-run: run only the first `sqlite3` (don’t pipe into the second). You’ll still get the fully annotated applied file to review.
 
-## The `plan.sql` (Self-Describing, Idempotent, Transactional)
+## 4) `plan.sql` (emit-as-comments, fully valid SQL)
 
-Drop this file into your repo as `plan.sql`. It includes:
-
-* Run header (session id, start time, SQLite version)
-* Pre-schema listing
-* Transaction wrapper (`BEGIN IMMEDIATE … COMMIT`)
-* Guarded DDL blocks that print `APPLY` or `NOOP`
-* Post-schema listing and footer
+* All human-readable lines are SQL comments emitted by `SELECT '-- …'`.
+* All executable statements are plain SQL text emitted by `SELECT '…;'`.
+* The second pass sees a stream of valid SQL (comments + statements).
 
 ```sql
+-- Generator-side CLI setup (only affects this first sqlite3 process)
 .bail on
-.timer on
-.echo off
+.timer off
+.headers off
+.mode list
 
--- Per-run session id in TEMP (auto-disappears at connection close)
+-- Per-run session id in TEMP (disappears at connection close)
 CREATE TEMP TABLE IF NOT EXISTS _mig_session(id TEXT);
 DELETE FROM _mig_session;
 INSERT INTO _mig_session(id) SELECT lower(hex(randomblob(16)));
 
--- Recommended safety: enable FK checks if you use FKs
-PRAGMA foreign_keys=ON;
+-- Optional but recommended if you use FKs: enforce FK checks
+SELECT 'PRAGMA foreign_keys=ON;';
 
-.print ---- MIGRATION BEGIN ----
-.print session:  (SELECT id FROM _mig_session)
-.print started:  (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-.print sqlite:   (SELECT sqlite_version())
-.print ----------------------------------------------------.print pre-schema objects:
+-- ---- SELF-DESCRIBING HEADER (as SQL comments) ------------------------------
+SELECT '-- MIGRATION BEGIN';
+SELECT '-- session:  '||(SELECT id FROM _mig_session);
+SELECT '-- started:  '||strftime('%Y-%m-%dT%H:%M:%fZ','now');
+SELECT '-- sqlite:   '||sqlite_version();
+SELECT '-- -------------------------------------------------------';
+
+-- Pre-schema snapshot (comments only)
+SELECT '-- pre-schema objects:';
 SELECT '--   '||type||' '||name
 FROM sqlite_schema
 WHERE name NOT LIKE 'sqlite_%'
 ORDER BY type, name;
 
--- Always do DDL atomically
+-- Always do DDL atomically (emit BEGIN as SQL)
 SELECT 'BEGIN IMMEDIATE;';
 
--- ===================== EXAMPLE STEPS =======================
+-- ======================= EXAMPLE STEPS ======================================
 
 -- 1) Create table if missing
 WITH need AS (
-  SELECT 1
-  WHERE NOT EXISTS (
+  SELECT 1 WHERE NOT EXISTS (
     SELECT 1 FROM sqlite_schema WHERE type='table' AND name='user'
   )
 )
-SELECT '.print APPLY  : create table user' FROM need
+SELECT '-- APPLY  : create table user' FROM need
 UNION ALL
 SELECT 'CREATE TABLE IF NOT EXISTS user (
            id INTEGER PRIMARY KEY,
@@ -130,156 +139,145 @@ SELECT 'CREATE TABLE IF NOT EXISTS user (
            )
         );' FROM need
 UNION ALL
-SELECT '.print NOOP   : create table user (already exists)'
+SELECT '-- NOOP   : create table user (already exists)'
 WHERE NOT EXISTS (SELECT 1 FROM need);
 
 -- 2) Add column if missing
 WITH need AS (
-  SELECT 1
-  WHERE NOT EXISTS (
+  SELECT 1 WHERE NOT EXISTS (
     SELECT 1 FROM pragma_table_info('user') WHERE name='last_login'
   )
 )
-SELECT '.print APPLY  : add column user.last_login' FROM need
+SELECT '-- APPLY  : add column user.last_login' FROM need
 UNION ALL
 SELECT 'ALTER TABLE user ADD COLUMN last_login TEXT;' FROM need
 UNION ALL
-SELECT '.print NOOP   : add column user.last_login (already present)'
+SELECT '-- NOOP   : add column user.last_login (already present)'
 WHERE NOT EXISTS (SELECT 1 FROM need);
 
 -- 3) Create index if missing
 WITH need AS (
-  SELECT 1
-  WHERE NOT EXISTS (
+  SELECT 1 WHERE NOT EXISTS (
     SELECT 1 FROM sqlite_schema WHERE type='index' AND name='idx_user_email'
   )
 )
-SELECT '.print APPLY  : create index idx_user_email on user(email)' FROM need
+SELECT '-- APPLY  : create index idx_user_email on user(email)' FROM need
 UNION ALL
 SELECT 'CREATE INDEX IF NOT EXISTS idx_user_email ON user(email);' FROM need
 UNION ALL
-SELECT '.print NOOP   : create index idx_user_email (already exists)'
+SELECT '-- NOOP   : create index idx_user_email (already exists)'
 WHERE NOT EXISTS (SELECT 1 FROM need);
 
--- =================== END EXAMPLE STEPS =====================
+-- ===================== END EXAMPLE STEPS ====================================
 
--- Commit the transaction emitted above
+-- Commit the transaction (emit as SQL)
 SELECT 'COMMIT;';
 
-.print post-schema objects:
+-- Post-schema snapshot (comments only)
+SELECT '-- post-schema objects:';
 SELECT '--   '||type||' '||name
 FROM sqlite_schema
 WHERE name NOT LIKE 'sqlite_%'
 ORDER BY type, name;
 
-.print -------------------------------------------------------
-.print finished: (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-.print ---- MIGRATION END ----
+SELECT '-- -------------------------------------------------------';
+SELECT '-- finished: '||strftime('%Y-%m-%dT%H:%M:%fZ','now');
+SELECT '-- MIGRATION END';
 ```
 
-## Reading the Output (What Good Looks Like)
+## 5) Reading the Output
 
-A typical run writes a file like `migrations/applied-2025-10-03-211523.sql`:
+A typical `migrations/applied-…sql` looks like:
 
-```
----- MIGRATION BEGIN ----
-session:  5b3d9cfe2ab142ac85fba7b4d690f009
-started:  2025-10-03T21:15:23Z
-sqlite:   3.46.0
--------------------------------------------------------
-pre-schema objects:
+```sql
+-- MIGRATION BEGIN
+-- session:  5b3d9cfe2ab142ac85fba7b4d690f009
+-- started:  2025-10-03T21:15:23Z
+-- sqlite:   3.46.0
+-- -------------------------------------------------------
+-- pre-schema objects:
 --   table user
 --   index idx_user_email
 BEGIN IMMEDIATE;
-.print NOOP   : create table user (already exists)
-.print APPLY  : add column user.last_login
+-- NOOP   : create table user (already exists)
+-- APPLY  : add column user.last_login
 ALTER TABLE user ADD COLUMN last_login TEXT;
-.print NOOP   : create index idx_user_email (already exists)
+-- NOOP   : create index idx_user_email (already exists)
 COMMIT;
-post-schema objects:
+-- post-schema objects:
 --   table user
 --   index idx_user_email
--------------------------------------------------------
-finished: 2025-10-03T21:15:23Z
----- MIGRATION END ----
+-- -------------------------------------------------------
+-- finished: 2025-10-03T21:15:23Z
+-- MIGRATION END
 ```
 
-* `APPLY` lines mean we executed a statement (the statement is right below).
-* `NOOP` means the step wasn’t needed (already in desired state).
-* `BEGIN/COMMIT` brackets ensure atomicity.
+* `-- APPLY` lines precede the exact SQL that will run.
+* `-- NOOP` lines indicate guarded steps that were unnecessary.
+* The file is executable SQL (comments + statements); you can replay it by itself.
 
-> If anything fails, `.bail on` makes the CLI stop with a non-zero exit code. Nothing partial should be left behind because DDL was inside a transaction.
+## 6) Engineer Safety Playbook
 
-## Safety Playbook (Memorize These)
+1. Guard every DDL
 
-1. Always guard DDL
+   * New table: check `sqlite_schema`
+   * New column: check `pragma_table_info('T')`
+   * Index: `CREATE INDEX IF NOT EXISTS ...`
 
-   * New table: `WHERE NOT EXISTS (…sqlite_schema…)`
-   * New column: `WHERE NOT EXISTS (SELECT 1 FROM pragma_table_info('T') WHERE name='c')`
-   * Index: `CREATE INDEX IF NOT EXISTS`
+2. Transactional changes
 
-2. Always wrap in a transaction
+   * Emit `BEGIN IMMEDIATE;` before the first DDL and `COMMIT;` after the last.
 
-   * Emit `BEGIN IMMEDIATE;` before any DDL and `COMMIT;` at the end.
+3. Never emit raw prose
 
-3. Never use `PRAGMA writable_schema=ON`
+   * Comments must be `--` lines, *emitted via* `SELECT '-- ...'`.
+   * Executable lines must be real SQL ending with `;`, *emitted via* `SELECT '…;'`.
 
-   * It bypasses safety checks. Avoid for routine migrations.
+4. Foreign keys
 
-4. Prefer additive changes
+   * If you depend on FKs, emit `PRAGMA foreign_keys=ON;` near the top (as an SQL statement via `SELECT 'PRAGMA ...';`).
 
-   * Columns: add new columns; avoid destructive changes.
-   * For incompatible changes, do a guarded rebuild (template below).
+5. Prefer additive changes
 
-5. Enable foreign keys if you use them
+   * Add columns instead of changing types in place.
+   * For incompatible changes, use a guarded rebuild (below).
 
-   * `PRAGMA foreign_keys=ON;` at the top ensures FK constraints are enforced.
+6. Backups on prod
 
-6. Backups for production
+   * Before first rollout:
 
-   * Before first rollout on prod:
+     * macOS/Linux: `cp app.db "app.db.bak.$(date +%F-%H%M%S)"`
+     * PowerShell: `Copy-Item app.db "app.db.bak.$(Get-Date -Format 'yyyy-MM-dd-HHmmss')"`
 
-     ```bash
-     cp app.db "app.db.bak.$(date +%F-%H%M%S)"
-     ```
+7. WAL mode (optional)
 
-     PowerShell:
-
-     ```powershell
-     Copy-Item app.db "app.db.bak.$(Get-Date -Format 'yyyy-MM-dd-HHmmss')"
-     ```
-
-7. WAL mode (optional, improves concurrency)
-
-   * Good for apps doing reads/writes while migrating:
+   * For concurrent reads during migration: set once in environment setup (not required in `plan.sql`):
 
      ```sql
      PRAGMA journal_mode=WAL;
      ```
-   * You can place this near the top of `plan.sql` if desired.
 
-## Patterns for Tricky Cases (Templates)
+## 7) Tricky but Common Patterns (Templates)
 
-### Add a NOT NULL column safely
+### 7.1 Add a NOT NULL-like constraint safely
 
-SQLite can’t `ADD COLUMN ... NOT NULL` without a default unless the table is empty. Use this pattern:
+SQLite can’t `ALTER COLUMN` to add `NOT NULL`. Use DEFAULT + optional rebuild with `CHECK`.
 
 ```sql
--- Step 1: add with a DEFAULT (so existing rows get a value)
+-- Add with DEFAULT so existing rows are valid
 WITH need AS (
   SELECT 1 WHERE NOT EXISTS (
     SELECT 1 FROM pragma_table_info('user') WHERE name='timezone'
   )
 )
-SELECT '.print APPLY  : add user.timezone TEXT DEFAULT ''UTC''' FROM need
+SELECT '-- APPLY  : add user.timezone TEXT DEFAULT ''UTC''' FROM need
 UNION ALL
 SELECT 'ALTER TABLE user ADD COLUMN timezone TEXT DEFAULT ''UTC'';' FROM need
 UNION ALL
-SELECT '.print NOOP   : add user.timezone (already present)'
+SELECT '-- NOOP   : add user.timezone (already present)'
 WHERE NOT EXISTS (SELECT 1 FROM need);
 
--- Step 2 (optional): strengthen via CHECK instead of NOT NULL
--- (SQLite lacks ALTER COLUMN to add NOT NULL; use CHECK to enforce non-empty)
+/* If later you need strict enforcement, rebuild with CHECK or real NOT NULL: */
 WITH need AS (
   SELECT 1 WHERE NOT EXISTS (
     SELECT 1
@@ -288,16 +286,16 @@ WITH need AS (
       AND sql LIKE '%CHECK( (timezone) IS NOT NULL AND (length(timezone) > 0) )%'
   )
 )
-SELECT '.print APPLY  : enforce timezone not null via CHECK (rebuild)' FROM need
+SELECT '-- APPLY  : enforce timezone non-empty via CHECK (rebuild)' FROM need
 UNION ALL
 SELECT 'ALTER TABLE user RENAME TO user__old;' FROM need
 UNION ALL
 SELECT 'CREATE TABLE user (
-           id INTEGER PRIMARY KEY,
-           email TEXT UNIQUE NOT NULL,
-           created_at TEXT NOT NULL DEFAULT (strftime(''%%Y-%%m-%%dT%%H:%%M:%%fZ'',''now'')),
-           timezone TEXT DEFAULT ''UTC'',
-           CHECK( (timezone) IS NOT NULL AND (length(timezone) > 0) )
+          id INTEGER PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (strftime(''%%Y-%%m-%%dT%%H:%%M:%%fZ'',''now'')),
+          timezone TEXT DEFAULT ''UTC'',
+          CHECK( (timezone) IS NOT NULL AND (length(timezone) > 0) )
         );' FROM need
 UNION ALL
 SELECT 'INSERT INTO user(id,email,created_at,timezone)
@@ -306,18 +304,15 @@ SELECT 'INSERT INTO user(id,email,created_at,timezone)
 UNION ALL
 SELECT 'DROP TABLE user__old;' FROM need
 UNION ALL
-SELECT '.print NOOP   : timezone CHECK already enforced'
+SELECT '-- NOOP   : timezone CHECK already enforced'
 WHERE NOT EXISTS (SELECT 1 FROM need);
 ```
 
-> Why CHECK? SQLite can’t ALTER a column to add NOT NULL. Rebuild is the canonical path to strengthen constraints.
+### 7.2 Guarded table rebuild for incompatible column changes
 
-### Guarded table rebuild for incompatible changes
-
-Use this when types/constraints must change. The block emits nothing unless a mismatch is detected.
+Only rebuild if a mismatch is detected.
 
 ```sql
--- Detect a mismatch and only then rebuild
 WITH desired AS (
   SELECT 'id' AS name, 'INTEGER' AS type, 1 AS pk, 1 AS nn, NULL AS dv UNION ALL
   SELECT 'email','TEXT',0,1,NULL UNION ALL
@@ -338,7 +333,7 @@ mismatch AS (
      OR COALESCE(l.dv,'') <> COALESCE(d.dv,'')
   LIMIT 1
 )
-SELECT '.print APPLY  : rebuild user (incompatible columns)' FROM mismatch
+SELECT '-- APPLY  : rebuild user (incompatible columns)' FROM mismatch
 UNION ALL
 SELECT 'ALTER TABLE user RENAME TO user__old;' FROM mismatch
 UNION ALL
@@ -354,76 +349,81 @@ SELECT 'INSERT INTO user (id,email,created_at,last_login)
 UNION ALL
 SELECT 'DROP TABLE user__old;' FROM mismatch
 UNION ALL
-SELECT '.print NOOP   : rebuild user (schema already matches)'
+SELECT '-- NOOP   : rebuild user (schema already matches)'
 WHERE NOT EXISTS (SELECT 1 FROM mismatch);
 ```
 
-> This stays idempotent: if the live schema already matches, you’ll only see a NOOP line.
+### 7.3 Views & triggers (easy idempotence)
 
-### Views & triggers (always safe)
-
-* Views: always replace
+* Views: replace with drop/recreate (safe to re-run)
 
   ```sql
-  SELECT '.print APPLY  : recreate view v_user_active';
+  SELECT '-- APPLY  : recreate view v_user_active';
   SELECT 'DROP VIEW IF EXISTS v_user_active;';
   SELECT 'CREATE VIEW v_user_active AS
           SELECT * FROM user WHERE last_login IS NOT NULL;';
   ```
-* Triggers: safe create (or drop/recreate to modify)
+
+* Triggers: create if not exists, or drop/recreate to modify
 
   ```sql
-  SELECT '.print APPLY  : create trigger if not exists t_user_ai';
+  SELECT '-- APPLY  : create trigger if not exists t_user_ai';
   SELECT 'CREATE TRIGGER IF NOT EXISTS t_user_ai
           AFTER INSERT ON user BEGIN
             UPDATE user SET last_login = NEW.created_at WHERE id = NEW.id;
           END;';
   ```
 
-## Version Notes (Avoid Surprises)
+## 8) Concurrency & Locking
 
-* SQLite version (printed in header) matters for certain DDL features (e.g., `ALTER TABLE ... RENAME COLUMN` needs ≥3.25).
-* If you’re unsure about fleet versions in the field, prefer rebuild patterns which work across older versions.
+* We emit `BEGIN IMMEDIATE;` so the migration obtains a write lock up front, keeping the run atomic.
+* If another writer is active, the CLI may error after waiting; re-run once the writer finishes.
+* If your app runs migrations at startup, ensure only one instance runs `plan.sql` at a time.
 
-## Concurrency & Locking
+## 9) CI / Automation Recipe
 
-* We emit `BEGIN IMMEDIATE;` so the migration obtains a write lock before generating DDL statements, keeping the run atomic.
-* If another process holds a write lock, the CLI will wait briefly and then error. Rerun after other writers finish.
-* For services with concurrent traffic, consider setting WAL mode ahead of time (`PRAGMA journal_mode=WAL;`) during environment setup (not necessarily inside migrations).
-
-## CI / Automation Recipe
-
-* Dry-run in CI: verify `plan.sql` produces valid SQL and sensible `APPLY/NOOP` lines without changing a shared database.
+* Dry-run check (syntax + guards):
 
   ```bash
   sqlite3 ci-test.db < plan.sql > /dev/null
   test $? -eq 0 || (echo "Plan failed" && exit 1)
   ```
-* Apply on ephemeral DBs to catch syntax errors and ensure idempotence (run `plan.sql` twice; second run should be mostly NOOPs):
+
+* Idempotence check (should mostly emit `-- NOOP` on 2nd run):
 
   ```bash
   sqlite3 ci-test.db < plan.sql | sqlite3 ci-test.db
-  sqlite3 ci-test.db < plan.sql | sqlite3 ci-test.db  # should be NOOPs
+  sqlite3 ci-test.db < plan.sql | sqlite3 ci-test.db
   ```
 
-## Common Pitfalls (and How We Avoid Them)
+* Replay check (applied file alone is valid SQL):
 
-* “Cannot add NOT NULL column without default” → Use the add with DEFAULT then CHECK or rebuild pattern.
-* “Duplicate index/table” errors → Always guard with `IF NOT EXISTS` or `WHERE NOT EXISTS` queries.
-* Partial migrations → We wrap DDL in a single transaction (`BEGIN IMMEDIATE … COMMIT`).
-* Foreign keys not enforced → Ensure `PRAGMA foreign_keys=ON;` at the top of `plan.sql`.
-* Tooling differences on Windows → Use PowerShell `Tee-Object` equivalent shown above.
+  ```bash
+  ts="migrations/ci-$(date +%F-%H%M%S).sql"
+  sqlite3 ci-test.db < plan.sql | tee "$ts" | sqlite3 ci-test.db
+  sqlite3 ci-test.db -cmd ".bail on" < "$ts"
+  ```
 
-## Engineering Checklist (Before Merging)
+## 10) Common Pitfalls (and our prevention)
+
+* “This isn’t valid SQL” → Every emitted line is either a `-- comment` or a real SQL statement ending in `;`.
+* “Duplicate table/index” → Guard with `WHERE NOT EXISTS` checks or `IF NOT EXISTS`.
+* “Cannot add NOT NULL column” → Use DEFAULT then CHECK or a rebuild.
+* “Foreign keys not enforced” → Emit `PRAGMA foreign_keys=ON;`.
+* “Partial migration” → We bracket with `BEGIN IMMEDIATE; … COMMIT;`.
+
+## 11) Engineering Checklist (Before Merging)
 
 * [ ] I can run `sqlite3 --version`.
-* [ ] I created `migrations/` in the repo.
-* [ ] I ran the migration once; I see `APPLY` lines only where needed.
-* [ ] I ran it a second time; I see `NOOP` lines (idempotent).
-* [ ] I reviewed `migrations/applied-*.sql` and, if needed, `.trace`.
-* [ ] My changes are wrapped in a single transaction and use guards.
-* [ ] If I changed constraints or types, I used the guarded rebuild template.
+* [ ] I created `migrations/` and can write to it.
+* [ ] First run emitted sensible `-- APPLY` lines and executed successfully.
+* [ ] Second run emitted only `-- NOOP` lines (idempotent).
+* [ ] The saved file in `migrations/` is executable SQL (replay succeeds).
+* [ ] For any incompatible change, I used the guarded rebuild template.
+* [ ] If I rely on foreign keys, I included `PRAGMA foreign_keys=ON;`.
 
-### Final Word
+### Final Notes
 
-This approach gives you exact audit logs, no hidden state, and repeatable migrations—all with the vanilla SQLite CLI. If a future change feels “destructive,” convert it into a guarded rebuild so re-runs remain safe and self-documenting.
+* This approach provides exact audit logs, no hidden state, and repeatable migrations—all with vanilla SQLite.
+* If a change can’t be done additively, use the guarded rebuild pattern so that re-runs remain safe and self-documenting.
+* Keep `plan.sql` small, readable, and organized into clearly labeled guarded blocks.
