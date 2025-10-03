@@ -1,0 +1,39 @@
+/* Balanced typography scale for Pico.css overrides */
+
+html {
+  font-size: 15px;       /* Base ~15px (between 14px and 16px) */
+  line-height: 1.5;
+}
+
+body {
+  font-size: 1rem;       /* ~15px */
+  line-height: 1.55;
+}
+
+/* Headings: scale them down from Pico’s defaults, but keep hierarchy */
+h1 { font-size: 1.8rem; margin-bottom: 0.6rem; }   /* ~27px */
+h2 { font-size: 1.45rem; margin-bottom: 0.5rem; }  /* ~22px */
+h3 { font-size: 1.2rem; margin-bottom: 0.4rem; }   /* ~18px */
+h4, h5, h6 { font-size: 1rem; margin-bottom: 0.3rem; }
+
+/* Paragraphs and lists */
+p, li {
+  font-size: 1rem;   /* same as body */
+  margin-bottom: 0.7rem;
+}
+
+/* Form inputs and buttons */
+input, select, textarea, button {
+  font-size: 0.95rem;     /* ~14.5px */
+  padding: 0.4rem 0.6rem;
+}
+
+/* Sidebar, small text */
+aside, small, .muted {
+  font-size: 0.9rem;      /* ~13.5px */
+}
+
+/* Placeholder list items */
+.placeholder-list code {
+  font-size: 0.9rem;
+}

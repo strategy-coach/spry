@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Policy Generator — Markdown + Mustache + JSON</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Minimal, classless CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.0.6/css/pico.min.css">
+    <link rel="stylesheet" href="./index.css">
+
+    <!-- Tiny libs -->
+    <script src="https://cdn.jsdelivr.net/npm/mustache@4.2.0/mustache.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" defer></script>
+
+    <!-- Inline manifest of available markdown files -->
+    <script type="application/json" id="docs">
+  [
+    { "id": "example1", "file": "example1.md", "title": "Acceptable Use Policy" },
+    { "id": "example2", "file": "example2.md", "title": "Incident Response Plan" },
+    { "id": "example3", "file": "example3.md", "title": "Vendor Management Policy" }
+  ]
+  </script>
+
+    <style>
+        .layout {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 1rem;
+            min-height: calc(100dvh - 40px);
+        }
+
+        aside {
+            border-right: 1px solid var(--muted-border-color, #dde1e6);
+            padding-right: 1rem;
+        }
+
+        .docs-list button {
+            width: 100%;
+        }
+
+        .muted {
+            opacity: .75;
+        }
+
+        .preview-toolbar {
+            display: flex;
+            gap: .5rem;
+            justify-content: flex-end;
+            margin-bottom: .5rem;
+        }
+
+        .placeholder-list code {
+            font-size: .9em;
+        }
+
+        .missing {
+            color: #b54708;
+        }
+
+        /* amber-ish */
+        .ok {
+            color: #157f3b;
+        }
+
+        /* green-ish */
+        .stack {
+            display: grid;
+            gap: .75rem;
+        }
+    </style>
+</head>
+
+<body>
+    <main class="container">
+        <header>
+            <hgroup>
+                <h1>Policy Generator</h1>
+                <p class="muted">Enter company info once; pick any policy to see it filled. Data auto-saves in your
+                    browser.</p>
+            </hgroup>
+        </header>
+
+        <section class="layout" aria-label="Workspace">
+            <aside>
+                <div class="stack">
+                    <button id="show-form-btn" class="contrast">Enter Your Company Information</button>
+
+                    <h3>Policies</h3>
+                    <div id="docs-list" class="docs-list" role="list"></div>
+
+                    <h4 style="margin-top:1rem;">Placeholders</h4>
+                    <small class="muted">Detected in selected Markdown</small>
+                    <ul id="placeholder-list" class="placeholder-list"></ul>
+                </div>
+            </aside>
+
+            <section>
+                <div id="policy-toolbar" class="preview-toolbar" hidden>
+                    <button id="copy-btn" class="secondary">Copy rendered content</button>
+                    <button id="download-html-btn" class="secondary">Download .html</button>
+                    <button id="download-md-btn" class="secondary">Download .md</button>
+                </div>
+                <article id="content" aria-live="polite">
+                    <p class="muted">Click <strong>Enter Your Company Information</strong> to fill details, or select a
+                        policy to preview.</p>
+                </article>
+            </section>
+        </section>
+    </main>
+
+    <!-- Form lives as a template; it renders in the right panel when requested -->
+    <template id="form-template">
+        <form id="policy-form" class="stack">
+            <h2>Company Information</h2>
+            <p class="muted">These values are saved locally and used across all policies.</p>
+
+            <div class="grid">
+                <div>
+                    <label>Organization Name
+                        <input type="text" data-path="org.name" placeholder="Acme, Inc." />
+                    </label>
+                </div>
+                <div>
+                    <label>Organization Address
+                        <input type="text" data-path="org.address" placeholder="123 Main St, Springfield" />
+                    </label>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Primary Contact Name
+                        <input type="text" data-path="contact.name" placeholder="Jane Doe" />
+                    </label>
+                </div>
+                <div>
+                    <label>Primary Contact Email
+                        <input type="email" data-path="contact.email" placeholder="jane@example.com" />
+                    </label>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Security Officer Name
+                        <input type="text" data-path="securityOfficer.name" placeholder="John Smith" />
+                    </label>
+                </div>
+                <div>
+                    <label>Security Officer Email
+                        <input type="email" data-path="securityOfficer.email" placeholder="john@example.com" />
+                    </label>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div>
+                    <label>Policy Effective Date
+                        <input type="date" data-path="policy.effectiveDate" />
+                    </label>
+                </div>
+                <div>
+                    <label>Policy Version
+                        <input type="text" data-path="policy.version" placeholder="1.0.0" />
+                    </label>
+                </div>
+            </div>
+
+            <footer class="grid">
+                <small class="muted">Changes auto-save. Switch to a policy from the left to preview.</small>
+                <div></div>
+            </footer>
+        </form>
+    </template>
+
+    <script type="module" src="./index.js"></script>
+</body>
+
+</html>
