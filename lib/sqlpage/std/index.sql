@@ -8,7 +8,7 @@ SELECT 'dynamic' AS component, sqlpage.run_sql('spry/shell.sql') AS properties;
 
 SELECT
    'title' AS component,
-   'Resources annotated with @spry.* or @route.* tags in comments' AS contents,
+   'Assembled Resources Manifest' AS contents,
    1 AS level;
 
 SET resources_json = sqlpage.read_file_as_text('spry.d/auto/resource/resources-catalog.auto.json');
@@ -41,7 +41,7 @@ SELECT
   item ->> '$.isSystemGenerated'   AS "Sys?",
   item ->> '$.nature'              AS "Nature",
   item ->> '$.route.caption'       AS "Route Caption",
-  item ->> '$.webPath'             AS "SQLPage Path",
-  item ->> '$.relFsPath'           AS "Project Path"
+  item ->> '$.path'                AS "SQLPage Path",
+  item ->> '$.srcCodeLanguage'     AS "SrcCode"
 FROM json_src
 ORDER BY "Nature";
