@@ -117,6 +117,68 @@ import JSON5 from "npm:json5@^2";
 import { toString as mdToString } from "npm:mdast-util-to-string@^4";
 import type { Root, RootContent } from "npm:@types/mdast@^4";
 
+/* =============================== Issues ================================== */
+
+/** Final disposition recorded on each issue (can be overridden by handler). */
+export type IssueDisposition = "error" | "warning" | "lint";
+
+/** Common location context for issues. */
+export interface IssueLocation {
+  readonly filename: string;
+  readonly startLine?: number;
+  readonly endLine?: number;
+  readonly blockIndex?: number;
+  readonly langHint?: string;
+}
+
+/** Discriminated union of all issues we can emit. */
+export type Issue =
+  | ({
+    kind: "frontmatter-parse";
+    message: string;
+    raw: unknown;
+    error: unknown; // typically z.ZodError | Error | string
+  } & IssueLocation)
+  | ({
+    kind: "fence-attrs-json5-parse";
+    message: string;
+    metaText: string | undefined;
+    error: unknown; // Error | string
+  } & IssueLocation)
+  | ({
+    kind: "fence-attrs-validate";
+    message: string;
+    lang: string;
+    candidate: unknown;
+    zodError: unknown; // z.ZodError when available
+  } & IssueLocation)
+  | ({
+    kind: "instruction-defaults-parse";
+    message: string;
+    codeSample: string;
+    error: unknown; // Error | string
+  } & IssueLocation)
+  | ({
+    kind: "unknown-language";
+    message: string;
+    lang: string;
+    note?: string;
+  } & IssueLocation);
+
+/** Handler can override the disposition per issue. */
+export type IssueHandler =
+  | ((
+    issue: Issue,
+  ) => IssueDisposition | void | Promise<IssueDisposition | void>)
+  | undefined;
+
+export type EmittedIssue = Issue & {
+  /** Final disposition after the handler override (if any). */
+  readonly disposition: IssueDisposition;
+};
+
+/* ============================ Core Types ================================= */
+
 /** Instructions delimiter configuration */
 export type InstructionsDelimiter =
   | { kind: "hr" }
@@ -160,20 +222,23 @@ export type FencedBlockTyped<M extends LangAttrMap> =
   }[keyof M & string];
 
 /** Minimal Notebook resource */
-export interface Notebook<FM, Ast, M extends LangAttrMap> {
+export interface Notebook<FM, Ast, M = LangAttrMap> {
   readonly filename: string;
   readonly source: string;
   readonly ast: Ast;
-  readonly fm: FM; // Zod-validated FM
-  readonly blocks: readonly FencedBlockTyped<M>[];
+  readonly fm: FM; // Zod-validated FM (or `{}` if invalid but handler downgraded)
+  readonly blocks: readonly FencedBlockTyped<M & LangAttrMap>[];
 
   /** Module-level regions */
   readonly moduleInstructions?: Instructions;
   readonly moduleAppendix?: Instructions;
+
+  /** All issues captured during parsing/validation, with final dispositions. */
+  readonly issues: readonly EmittedIssue[];
 }
 
 /** Plan interface (execution-free) */
-export interface MarkdownPlan<FM, Ast, M extends LangAttrMap> {
+export interface MarkdownPlan<FM, Ast, M = LangAttrMap> {
   readonly filename: string;
   readonly fm: FM;
   readonly count: number;
@@ -182,11 +247,19 @@ export interface MarkdownPlan<FM, Ast, M extends LangAttrMap> {
   readonly moduleInstructions?: Instructions;
   readonly moduleAppendix?: Instructions;
 
-  blocks(): AsyncGenerator<FencedBlockTyped<M>, void, unknown>;
-  select(pred: (b: FencedBlockTyped<M>) => boolean): FencedBlockTyped<M>[];
+  /** Enumerate all parsed blocks. */
+  blocks(): AsyncGenerator<FencedBlockTyped<M & LangAttrMap>, void, unknown>;
+
+  /** Filter convenience. */
+  select(
+    pred: (b: FencedBlockTyped<M & LangAttrMap>) => boolean,
+  ): FencedBlockTyped<M & LangAttrMap>[];
+
+  /** Retrieve issues collected during parse. */
+  issues(): readonly EmittedIssue[];
 }
 
-/** Parse JSON5 attributes from code fence meta */
+/** Parse JSON5 attributes from code fence meta (throws on error). */
 export function parseFenceAttributes(
   s: string | undefined,
 ): Record<string, unknown> {
@@ -203,28 +276,29 @@ export function parseFenceAttributes(
   }
 }
 
-/** NotebookContent: immutable product of the builder */
-export class NotebookContent<Ast, FM, M extends LangAttrMap>
+/* =========================== NotebookContent ============================= */
+
+export class NotebookContent<Ast, FM, M = LangAttrMap>
   implements Notebook<FM, Ast, M> {
   constructor(
     public readonly filename: string,
     public readonly source: string,
     public readonly ast: Ast,
     public readonly fm: FM,
-    public readonly blocks: readonly FencedBlockTyped<M>[],
-    public readonly moduleInstructions?: Instructions,
-    public readonly moduleAppendix?: Instructions,
+    public readonly blocks: readonly FencedBlockTyped<M & LangAttrMap>[],
+    public readonly moduleInstructions: Instructions | undefined,
+    public readonly moduleAppendix: Instructions | undefined,
+    public readonly issues: readonly EmittedIssue[],
   ) {}
   toPlan() {
     return new TypicalMarkdownPlan<Ast, FM, M>(this);
   }
 }
 
-/** Builder: parse FM, collect blocks, capture per-block instructions + optional resolution + typed attrs */
-export class NotebookBuilder<
-  Ast = Root,
-  M extends LangAttrMap = Record<PropertyKey, unknown>,
-> {
+/* ============================== Builder ================================== */
+
+/** Builder: parse FM, collect blocks, capture per-block instructions + optional resolution + typed attrs + issues */
+export class NotebookBuilder<Ast = Root, M = Record<PropertyKey, unknown>> {
   #source?: string;
   #filename?: string;
 
@@ -241,6 +315,9 @@ export class NotebookBuilder<
     z.ZodTypeAny | ((ctx: { fm: unknown; lang: string }) => z.ZodTypeAny)
   >();
 
+  // Issues
+  #issueHandler: IssueHandler;
+
   withInstructionsDelimiter(delimiter: InstructionsDelimiter) {
     this.#delimiter = delimiter;
     return this;
@@ -255,6 +332,10 @@ export class NotebookBuilder<
   }
   withShebang(enable = true) {
     this.#enableShebang = enable;
+    return this;
+  }
+  withIssueHandler(handler: IssueHandler) {
+    this.#issueHandler = handler;
     return this;
   }
 
@@ -277,6 +358,7 @@ export class NotebookBuilder<
     next.#enableAttrResolution = this.#enableAttrResolution;
     next.#enableFrontmatterMirror = this.#enableFrontmatterMirror;
     next.#enableShebang = this.#enableShebang;
+    next.#issueHandler = this.#issueHandler;
     // copy schemas then add
     for (const [k, v] of this.#attrSchemas) next.#attrSchemas.set(k, v);
     next.#attrSchemas.set(lang, schemaOrFactory);
@@ -299,7 +381,7 @@ export class NotebookBuilder<
     if (!this.#source || !this.#filename) {
       throw new Error("Call fromFile()/fromString() first.");
     }
-    const parsed = await parseMinimal<FM, M>(
+    const parsed = await parseMinimal<FM, M & LangAttrMap>(
       this.#source,
       schema,
       {
@@ -308,7 +390,12 @@ export class NotebookBuilder<
         enableFrontmatterMirror: this.#enableFrontmatterMirror,
         enableShebang: this.#enableShebang,
       },
-      this.#attrSchemas,
+      this.#attrSchemas as Map<
+        string,
+        z.ZodTypeAny | ((ctx: { fm: unknown; lang: string }) => z.ZodTypeAny)
+      >,
+      this.#filename,
+      this.#issueHandler,
     );
     return new NotebookContent<Ast, FM, M>(
       this.#filename,
@@ -318,11 +405,12 @@ export class NotebookBuilder<
       parsed.blocks,
       parsed.moduleInstructions,
       parsed.moduleAppendix,
+      parsed.issues,
     );
   }
 }
 
-/* ----------------------------- Type guards ------------------------------ */
+/* ============================ Type guards ================================ */
 
 type WithType = { type?: unknown };
 type WithValue = { value?: unknown };
@@ -331,33 +419,29 @@ function isYamlNode(n: unknown): n is { type: "yaml"; value?: string } {
   return typeof n === "object" && n !== null &&
     (n as WithType).type === "yaml";
 }
-
 function isHeadingNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "heading" }> {
   return n.type === "heading";
 }
-
 function isCodeNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "code" }> {
   return n.type === "code";
 }
-
 function isHrNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "thematicBreak" }> {
   return n.type === "thematicBreak";
 }
 
-/* ------------------------- Attr resolution helpers ---------------------- */
+/* ===================== Attr resolution helpers =========================== */
 
 type Dict = Record<string, unknown>;
 
 function isRecord(v: unknown): v is Dict {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-
 function getAtPath(obj: unknown, path: string): unknown {
   if (!isRecord(obj)) return undefined;
   return path.split(".").reduce<unknown>((acc, key) => {
@@ -365,7 +449,6 @@ function getAtPath(obj: unknown, path: string): unknown {
     return (acc as Dict)[key];
   }, obj);
 }
-
 function deepMerge<A extends Dict, B extends Dict>(a: A, b: B): A & B {
   const out: Dict = { ...a };
   for (const [k, v] of Object.entries(b)) {
@@ -379,7 +462,14 @@ function deepMerge<A extends Dict, B extends Dict>(a: A, b: B): A & B {
   return out as A & B;
 }
 
-function collectInstructionDefaults(nodes: ReadonlyArray<RootContent>): Dict {
+function collectInstructionDefaults(
+  nodes: ReadonlyArray<RootContent>,
+  ctx: {
+    filename: string;
+    issues: EmittedIssue[];
+    handler: IssueHandler | undefined;
+  },
+): Dict {
   let acc: Dict = {};
   for (const n of nodes) {
     if (isCodeNode(n)) {
@@ -387,19 +477,41 @@ function collectInstructionDefaults(nodes: ReadonlyArray<RootContent>): Dict {
       if (!meta) continue;
 
       const m = meta.match(/\{.*\}$/);
-      const attrs = m ? parseFenceAttributes(m[0]) : {};
-      const role = isRecord(attrs) && typeof attrs.role === "string"
-        ? String(attrs.role)
+      const attrs = m
+        ? safeParseFenceAttributes(
+          m[0],
+          {
+            filename: ctx.filename,
+            startLine: n.position?.start?.line,
+            endLine: n.position?.end?.line,
+            langHint: n.lang ?? undefined,
+          },
+          ctx,
+        )
+        : {};
+      const role = isRecord(attrs) && typeof (attrs as Dict).role === "string"
+        ? String((attrs as Dict).role)
         : undefined;
       if (role !== "section-defaults") continue;
 
+      const codeText = String(n.value ?? "{}");
       try {
-        const body = JSON5.parse(String(n.value ?? "{}"));
-        if (isRecord(body)) {
-          acc = deepMerge(acc, body);
-        }
-      } catch {
-        // ignore malformed section defaults
+        const body = JSON5.parse(codeText);
+        if (isRecord(body)) acc = deepMerge(acc, body);
+      } catch (error) {
+        emitIssue(
+          {
+            kind: "instruction-defaults-parse",
+            message: "Failed to parse section-defaults JSON5 body.",
+            codeSample: codeText.slice(0, 2000),
+            error,
+            filename: ctx.filename,
+            startLine: n.position?.start?.line,
+            endLine: n.position?.end?.line,
+          },
+          "warning",
+          ctx,
+        );
       }
     }
   }
@@ -472,7 +584,95 @@ function resolveBlockAttrs(
   return acc;
 }
 
-/** Internal parse options */
+/* =========================== Issue emission ============================== */
+
+function defaultDispositionFor(issue: Issue): IssueDisposition {
+  switch (issue.kind) {
+    case "frontmatter-parse":
+    case "fence-attrs-validate":
+      return "error";
+    case "fence-attrs-json5-parse":
+    case "instruction-defaults-parse":
+      return "warning";
+    case "unknown-language":
+      return "lint";
+  }
+}
+
+async function finalizeIssue(
+  issue: Issue,
+  handler: IssueHandler | undefined,
+): Promise<EmittedIssue> {
+  const base = defaultDispositionFor(issue);
+  let disp = base;
+  if (handler) {
+    const override = await handler(issue);
+    if (override === "error" || override === "warning" || override === "lint") {
+      disp = override;
+    }
+  }
+  return Object.freeze({ ...issue, disposition: disp });
+}
+
+function pushIssueSync(
+  issue: Issue,
+  disp: IssueDisposition,
+  store: EmittedIssue[],
+) {
+  store.push(Object.freeze({ ...issue, disposition: disp }));
+}
+
+function emitIssue(
+  issue: Issue,
+  baseDisposition: IssueDisposition,
+  ctx: {
+    filename: string;
+    issues: EmittedIssue[];
+    handler: IssueHandler | undefined;
+  },
+) {
+  // Synchronous emission; handler overrides are applied where we can await (e.g., frontmatter, zod validation)
+  pushIssueSync(issue, baseDisposition, ctx.issues);
+}
+
+function safeParseFenceAttributes(
+  metaText: string | undefined,
+  loc: IssueLocation,
+  ctx: {
+    filename: string;
+    issues: EmittedIssue[];
+    handler: IssueHandler | undefined;
+  },
+): Record<string, unknown> {
+  if (!metaText) return {};
+  const trimmed = metaText.trim();
+  const inBraces = trimmed.startsWith("{") && trimmed.endsWith("}")
+    ? trimmed
+    : `{${trimmed}}`;
+  try {
+    return JSON5.parse(inBraces);
+  } catch (error) {
+    emitIssue(
+      {
+        kind: "fence-attrs-json5-parse",
+        message: "Invalid JSON5 in fence attributes.",
+        metaText,
+        error,
+        filename: loc.filename,
+        startLine: loc.startLine,
+        endLine: loc.endLine,
+        blockIndex: loc.blockIndex,
+        langHint: loc.langHint,
+      },
+      "warning",
+      ctx,
+    );
+    return {};
+  }
+}
+
+/* ============================= Parse core ================================ */
+
 interface ParseOptions {
   delimiter: InstructionsDelimiter;
   enableAttrResolution: boolean;
@@ -480,8 +680,6 @@ interface ParseOptions {
   enableShebang: boolean;
 }
 
-/** Parse using remark + frontmatter + basic instructions + resolution + per-lang typed attrs */
-// deno-lint-ignore require-await
 async function parseMinimal<FM, M extends LangAttrMap>(
   source: string,
   fmSchema: z.ZodType<FM>,
@@ -490,7 +688,12 @@ async function parseMinimal<FM, M extends LangAttrMap>(
     string,
     z.ZodTypeAny | ((ctx: { fm: unknown; lang: string }) => z.ZodTypeAny)
   >,
+  filename: string,
+  issueHandler: IssueHandler | undefined,
 ) {
+  const issues: EmittedIssue[] = [];
+  const ctx = { filename, issues, handler: issueHandler };
+
   const processor = remark().use(remarkFrontmatter).use(remarkGfm).use(
     remarkStringify,
   );
@@ -510,7 +713,7 @@ async function parseMinimal<FM, M extends LangAttrMap>(
 
   // --- Frontmatter: first yaml node only & compute FM end index
   let fmRaw: Record<string, unknown> = {};
-  let fmEndIdx = 0; // index in children where frontmatter "header" section ends
+  let fmEndIdx = 0; // index where the "header" section ends
   if (Array.isArray(tree.children)) {
     for (let i = 0; i < tree.children.length; i++) {
       const n = tree.children[i];
@@ -520,7 +723,6 @@ async function parseMinimal<FM, M extends LangAttrMap>(
           : "";
         fmRaw = (YAMLparse(raw) as Record<string, unknown>) ?? {};
         fmEndIdx = i + 1;
-        // continue scanning header-only elements (hr/html/definition) to find the true start
         continue;
       }
       if (
@@ -530,14 +732,38 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         fmEndIdx = i + 1;
         continue;
       }
-      // first non-header node found
       fmEndIdx = i;
       break;
     }
-    // If doc was only header-like nodes, fmEndIdx may be at the end
     if (fmEndIdx === 0) fmEndIdx = 0;
   }
-  const fm = fmSchema.parse(fmRaw);
+
+  // Validate frontmatter with issues
+  let fm: FM;
+  {
+    const res = (fmSchema as z.ZodTypeAny).safeParse(fmRaw);
+    if (res.success) {
+      fm = res.data as FM;
+    } else {
+      const issue: Issue = {
+        kind: "frontmatter-parse",
+        message: "Frontmatter failed schema validation.",
+        raw: fmRaw,
+        error: res.error,
+        filename,
+      };
+      const final = await finalizeIssue(issue, issueHandler);
+      issues.push(final);
+      if (final.disposition === "error") {
+        // Preserve strong typing of fm by throwing in the error case
+        throw new Error("Frontmatter validation failed.");
+      } else {
+        // Continue with empty fm; consumers must consult issues().
+        fm = {} as FM;
+      }
+    }
+  }
+
   const fmAsDict: Dict = isRecord(fm) ? (fm as Dict) : {};
 
   // --- Delimiter helper
@@ -551,7 +777,7 @@ async function parseMinimal<FM, M extends LangAttrMap>(
 
   // --- Collect fenced blocks and per-block instructions
   const instrBuf: RootContent[] = [];
-  const blocks: FencedBlockTyped<M>[] = [];
+  const blocks: FencedBlockTyped<M & LangAttrMap>[] = [];
   let idx = 0;
 
   // Track first and last code indices to compute module-level regions
@@ -572,19 +798,29 @@ async function parseMinimal<FM, M extends LangAttrMap>(
       lastCodeIdx = i;
 
       const lang: string = n.lang ?? "text";
-      const meta: string | undefined = typeof n.meta === "string"
+      const metaRaw: string | undefined = typeof n.meta === "string"
         ? n.meta
         : undefined;
 
       let attrs: Record<string, unknown> = {};
       let info: string | undefined;
-      if (meta) {
-        const m = meta.match(/\{.*\}$/);
+      if (metaRaw) {
+        const m = metaRaw.match(/\{.*\}$/);
         if (m) {
-          attrs = parseFenceAttributes(m[0]);
-          info = meta.replace(m[0], "").trim() || undefined;
+          attrs = safeParseFenceAttributes(
+            m[0],
+            {
+              filename,
+              startLine: n.position?.start?.line,
+              endLine: n.position?.end?.line,
+              blockIndex: idx,
+              langHint: lang,
+            },
+            ctx,
+          );
+          info = metaRaw.replace(m[0], "").trim() || undefined;
         } else {
-          info = meta.trim();
+          info = metaRaw.trim();
         }
       }
 
@@ -604,7 +840,7 @@ async function parseMinimal<FM, M extends LangAttrMap>(
 
       const instructions = mkInstructions(instrBuf);
       const instrDefaults = opts.enableAttrResolution
-        ? collectInstructionDefaults(instrBuf)
+        ? collectInstructionDefaults(instrBuf, ctx)
         : undefined;
 
       let resolvedAttrs: Record<string, unknown> | undefined;
@@ -626,7 +862,43 @@ async function parseMinimal<FM, M extends LangAttrMap>(
           : schemaOrFactory;
         const candidate: unknown = resolvedAttrs ?? attrs;
         const res = (schema as z.ZodTypeAny).safeParse(candidate);
-        if (res.success) attrsSafe = res.data;
+        if (res.success) {
+          attrsSafe = res.data;
+        } else {
+          const issue: Issue = {
+            kind: "fence-attrs-validate",
+            message:
+              `Attributes failed schema validation for language "${lang}".`,
+            lang,
+            candidate,
+            zodError: res.error,
+            filename,
+            startLine: n.position?.start?.line,
+            endLine: n.position?.end?.line,
+            blockIndex: idx,
+            langHint: lang,
+          };
+          const final = await finalizeIssue(issue, issueHandler);
+          issues.push(final);
+          // continue without attrsSafe
+        }
+      } else if (lang && lang !== "text") {
+        emitIssue(
+          {
+            kind: "unknown-language",
+            message:
+              `No safe-attributes schema registered for language "${lang}".`,
+            lang,
+            filename,
+            startLine: n.position?.start?.line,
+            endLine: n.position?.end?.line,
+            blockIndex: idx,
+            langHint: lang,
+            note: "attrsSafe will be undefined; raw attrs are available.",
+          },
+          "lint",
+          ctx,
+        );
       }
 
       const block: FencedBlockBase = {
@@ -642,22 +914,32 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         instructions,
       };
 
-      // Ensure attrsSafe is undefined for languages not in M
       if (attrSchemas.has(lang)) {
         blocks.push(
           {
-            ...(block as unknown as FencedBlockTyped<M>),
+            ...(block as unknown as FencedBlockTyped<M & LangAttrMap>),
             attrsSafe,
-          } as FencedBlockTyped<M>,
+          } as FencedBlockTyped<M & LangAttrMap>,
         );
       } else {
         blocks.push(
           {
-            ...(block as unknown as FencedBlockTyped<M>),
+            ...(block as unknown as FencedBlockTyped<M & LangAttrMap>),
             attrsSafe: undefined,
-          } as FencedBlockTyped<M>,
+          } as FencedBlockTyped<M & LangAttrMap>,
         );
       }
+
+      // Allow "section-defaults" fenced blocks to influence the *next* code fence.
+      if (
+        isRecord(attrs) && typeof (attrs as Dict).role === "string" &&
+        String((attrs as Dict).role) === "section-defaults"
+      ) {
+        // Carry this fence forward in the instruction buffer so collectInstructionDefaults()
+        // can parse its body (and emit issues) when the next fence is processed.
+        instrBuf.push(n);
+      }
+
       continue;
     }
 
@@ -667,62 +949,66 @@ async function parseMinimal<FM, M extends LangAttrMap>(
   }
 
   // --- Module-level regions
-  // Compute moduleInstructions: after FM "header" section → before first code node
   let moduleInstructions: Instructions | undefined;
   if (firstCodeIdx !== undefined) {
     const preNodes = tree.children.slice(fmEndIdx, firstCodeIdx);
     const filtered = preNodes.filter((n): n is RootContent => !isYamlNode(n));
     moduleInstructions = mkInstructions(filtered as RootContent[]);
-  } else {
-    // No code blocks: by definition there is no "first fenced block", so we treat entire body
-    // (after FM) as moduleAppendix, and moduleInstructions remains undefined.
   }
 
-  // Compute moduleAppendix: after last code node → end of doc
   let moduleAppendix: Instructions | undefined;
   if (lastCodeIdx !== undefined) {
     const postNodes = tree.children.slice(lastCodeIdx + 1);
     const filtered = postNodes.filter((n): n is RootContent => !isYamlNode(n));
     moduleAppendix = mkInstructions(filtered as RootContent[]);
   } else {
-    // If there are no code blocks, consider all content after FM as appendix
     const postNodes = tree.children.slice(fmEndIdx);
     const filtered = postNodes.filter((n): n is RootContent => !isYamlNode(n));
     moduleAppendix = mkInstructions(filtered as RootContent[]);
   }
 
-  return { ast: tree, fm, blocks, moduleInstructions, moduleAppendix };
+  return { ast: tree, fm, blocks, moduleInstructions, moduleAppendix, issues };
 }
 
-export class TypicalMarkdownPlan<Ast, FM, M extends LangAttrMap>
+/* ============================= Plan class ================================ */
+
+export class TypicalMarkdownPlan<Ast, FM, M = LangAttrMap>
   implements MarkdownPlan<FM, Ast, M> {
   constructor(private readonly nb: Notebook<FM, Ast, M>) {}
 
   get filename() {
     return this.nb.filename;
   }
-
   get fm() {
     return this.nb.fm;
   }
-
   get count() {
     return this.nb.blocks.length;
   }
-
   get moduleInstructions() {
     return this.nb.moduleInstructions;
   }
-
-  async *blocks(): AsyncGenerator<FencedBlockTyped<M>, void, unknown> {
-    for (const b of this.nb.blocks) yield b;
+  get moduleAppendix() {
+    return this.nb.moduleAppendix;
   }
 
-  select(pred: (b: FencedBlockTyped<M>) => boolean): FencedBlockTyped<M>[] {
+  async *blocks(): AsyncGenerator<
+    FencedBlockTyped<M & LangAttrMap>,
+    void,
+    unknown
+  > {
+    for (const b of this.nb.blocks) {
+      yield b as FencedBlockTyped<M & LangAttrMap>;
+    }
+  }
+
+  select(
+    pred: (b: FencedBlockTyped<M & LangAttrMap>) => boolean,
+  ): FencedBlockTyped<M & LangAttrMap>[] {
     return this.nb.blocks.filter(pred);
   }
 
-  get moduleAppendix() {
-    return this.nb.moduleAppendix;
+  issues(): readonly EmittedIssue[] {
+    return this.nb.issues;
   }
 }

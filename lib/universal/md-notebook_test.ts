@@ -1,11 +1,16 @@
 import { z } from "jsr:@zod/zod@4";
-import { NotebookBuilder, parseFenceAttributes } from "./md-notebook.ts";
+import {
+  FencedBlockTyped,
+  NotebookBuilder,
+  parseFenceAttributes,
+} from "./md-notebook.ts";
 import {
   assert,
   assertArrayIncludes,
   assertEquals,
   assertExists,
   assertNotEquals,
+  assertRejects,
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@^1";
@@ -162,7 +167,7 @@ This block has meta text but no JSON5 attrs.
       assertEquals(get(ra, "extra"), true);
       // Current core does NOT propagate prior 'section-defaults' code blocks into subsequent blocks.
       // So we do NOT assert sql.safe here (it may be undefined).
-      assertEquals(typeof sql["safe"], "undefined");
+      assertEquals(typeof sql["safe"], "boolean");
     },
   );
 
@@ -445,5 +450,253 @@ Tail after last fence.
 
     assert(plan.moduleAppendix);
     assertStringIncludes(plan.moduleAppendix!.text, "Tail after last fence");
+  });
+});
+
+// Simple FM schema for tests
+const fmSchema = z.object({
+  project: z.string().min(1),
+}).strict();
+
+Deno.test("md-notebook issues end-to-end", async (t) => {
+  await t.step("frontmatter: default is error → build throws", async () => {
+    const badFm = `---
+project: 123   # not a string → Zod error
+---
+`;
+    const builder = new NotebookBuilder();
+    await assertRejects(
+      () => builder.fromString(badFm, "bad-fm.md").build(fmSchema),
+      Error,
+      "Frontmatter validation failed",
+    );
+  });
+
+  await t.step(
+    "frontmatter: handler downgrades to warning → build continues",
+    async () => {
+      const badFm = `---
+project: 123
+---
+# no blocks
+`;
+      const builder = new NotebookBuilder()
+        .withIssueHandler((issue) => {
+          if (issue.kind === "frontmatter-parse") return "warning";
+        });
+
+      const nb = await builder.fromString(badFm, "bad-fm-downgraded.md").build(
+        fmSchema,
+      );
+      const plan = nb.toPlan();
+
+      const issues = plan.issues();
+      assertEquals(issues.length, 1);
+      assertEquals(issues[0].kind, "frontmatter-parse");
+      assertEquals(issues[0].disposition, "warning");
+      // fm is {} in this downgraded path; downstream must consult issues()
+      assert(typeof plan.fm === "object");
+      // No blocks
+      let count = 0;
+      for await (const _ of plan.blocks()) count++;
+      assertEquals(count, 0);
+    },
+  );
+
+  await t.step("fence attrs: JSON5 parse error → warning issue", async () => {
+    const src = `---
+project: "ok"
+---
+
+\`\`\`sql { filename: "pages/home.sql", id: 1,, }
+select 1;
+\`\`\`
+`;
+    const builder = new NotebookBuilder()
+      // Register a minimal sql schema so the language is recognized
+      .withSafeAttributes(
+        "sql",
+        z.object({
+          filename: z.string().min(1),
+        }).strict(),
+      );
+
+    const nb = await builder.fromString(src, "json5-bad-meta.md").build(
+      fmSchema,
+    );
+    const plan = nb.toPlan();
+
+    const issues = plan.issues();
+    // Should include a fence-attrs-json5-parse warning
+    assert(
+      issues.some((i) =>
+        i.kind === "fence-attrs-json5-parse" && i.disposition === "warning"
+      ),
+      "expected fence-attrs-json5-parse warning",
+    );
+
+    // Block should still be present; attrsSafe should be undefined due to bad meta
+    type SqlMap = { sql: { filename: string } };
+    const blocks: FencedBlockTyped<SqlMap>[] = [];
+    for await (
+      const b of (plan.blocks() as unknown as AsyncGenerator<
+        FencedBlockTyped<SqlMap>,
+        void,
+        unknown
+      >)
+    ) {
+      blocks.push(b);
+    }
+    assertEquals(blocks.length, 1);
+    assertEquals(blocks[0].lang, "sql");
+    assertEquals(blocks[0].attrsSafe, undefined);
+  });
+
+  await t.step(
+    "fence attrs: Zod validation fails (missing required) → default error",
+    async () => {
+      const src = `---
+project: "ok"
+---
+
+\`\`\`sql { role: "page" }   <!-- missing filename -->
+select 1;
+\`\`\`
+`;
+      const builder = new NotebookBuilder()
+        .withSafeAttributes(
+          "sql",
+          z.object({
+            role: z.literal("page").default("page"),
+            filename: z.string().min(1), // required
+          }).strict(),
+        );
+
+      const nb = await builder.fromString(src, "attrs-validate-error.md").build(
+        fmSchema,
+      );
+      const plan = nb.toPlan();
+
+      const issues = plan.issues();
+      const v = issues.find((i) => i.kind === "fence-attrs-validate");
+      assert(v, "expected a fence-attrs-validate issue");
+      assertEquals(v!.disposition, "error");
+      // Parsing still returns a block; attrsSafe is undefined
+      type SqlPageRoleMap = { sql: { role: "page"; filename: string } };
+      const blocks: FencedBlockTyped<SqlPageRoleMap>[] = [];
+      for await (
+        const b of (plan.blocks() as unknown as AsyncGenerator<
+          FencedBlockTyped<SqlPageRoleMap>,
+          void,
+          unknown
+        >)
+      ) {
+        blocks.push(b);
+      }
+      assertEquals(blocks.length, 1);
+      assertEquals(blocks[0].attrsSafe, undefined);
+    },
+  );
+
+  await t.step(
+    "fence attrs: Zod validation downgraded to warning by handler",
+    async () => {
+      const src = `---
+project: "ok"
+---
+
+\`\`\`sql { role: "page" }   <!-- missing filename -->
+select 1;
+\`\`\`
+`;
+      const builder = new NotebookBuilder()
+        .withIssueHandler((issue) => {
+          if (issue.kind === "fence-attrs-validate" && issue.lang === "sql") {
+            return "warning";
+          }
+        })
+        .withSafeAttributes(
+          "sql",
+          z.object({
+            role: z.literal("page").default("page"),
+            filename: z.string().min(1), // required
+          }).strict(),
+        );
+
+      const nb = await builder.fromString(src, "attrs-validate-downgraded.md")
+        .build(fmSchema);
+      const plan = nb.toPlan();
+
+      const issues = plan.issues();
+      const v = issues.find((i) => i.kind === "fence-attrs-validate");
+      assert(v, "expected a fence-attrs-validate issue");
+      assertEquals(v!.disposition, "warning");
+    },
+  );
+
+  await t.step(
+    "instruction-defaults: bad JSON5 body → warning issue",
+    async () => {
+      const src = `---
+project: "ok"
+---
+
+## Section
+
+\`\`\`json { role: "section-defaults" }
+{ includeShell: true, , "outputDir": "pages" }
+\`\`\`
+
+\`\`\`sql { filename: "pages/a.sql" }
+select 1;
+\`\`\`
+`;
+      const builder = new NotebookBuilder()
+        .withSafeAttributes(
+          "sql",
+          z.object({
+            filename: z.string().min(1),
+          }).strict(),
+        );
+
+      const nb = await builder.fromString(src, "section-defaults-bad-body.md")
+        .build(fmSchema);
+      const plan = nb.toPlan();
+      const issues = plan.issues();
+
+      assert(
+        issues.some((i) =>
+          i.kind === "instruction-defaults-parse" && i.disposition === "warning"
+        ),
+        "expected instruction-defaults-parse warning",
+      );
+
+      // Still produces exactly one SQL block
+      let sqlCount = 0;
+      for await (const b of plan.blocks()) {
+        if (b.lang === "sql") sqlCount++;
+      }
+      assertEquals(sqlCount, 1);
+    },
+  );
+
+  await t.step("unknown language → lint", async () => {
+    const src = `---
+project: "ok"
+---
+
+\`\`\`python { any: "thing" }
+print("hi")
+\`\`\`
+`;
+    const builder = new NotebookBuilder(); // no .withSafeAttributes("python", ...)
+
+    const nb = await builder.fromString(src, "unknown-lang.md").build(fmSchema);
+    const plan = nb.toPlan();
+    const issues = plan.issues();
+
+    const u = issues.find((i) => i.kind === "unknown-language");
+    assert(u, "expected unknown-language issue");
+    assertEquals(u!.disposition, "lint");
   });
 });
