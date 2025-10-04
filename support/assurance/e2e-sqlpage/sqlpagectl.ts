@@ -27,9 +27,7 @@ export class SqlPageStarter extends SqlPageAssembler<Resource> {
 if (import.meta.main) {
   if (Deno.args.length) {
     await new SqlPageCLI((init) => new SqlPageStarter(init)).cli()
-      .parse(
-        Deno.args,
-      );
+      .parse(Deno.args);
   } else {
     await new SqlPageStarter({ sideAffectsAllowed: { materialize: true } })
       .materialize();
