@@ -9,7 +9,7 @@ import {
 } from "jsr:@std/fmt@1/colors";
 import { basename, relative } from "jsr:@std/path@1";
 import { ColumnDef, ListerBuilder, TreeLister } from "../universal/ls/mod.ts";
-import { Assembler, SideAffects } from "./assembler.ts";
+import { Assembler, SideEffects } from "./assembler.ts";
 import { isFsFileResource } from "./fs.ts";
 import { Resource } from "./resource.ts";
 import { AnnotatedRoute, isRouteSupplier, Routes } from "./route.ts";
@@ -67,7 +67,7 @@ export function upsertMissingAncestors<T>(
 export class CLI<R extends Resource, A extends Assembler<R>> {
   constructor(
     readonly freshAssembler: (
-      init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
+      init: { sideEffectsAllowed: SideEffects; cleaningRequested?: boolean },
     ) => A,
   ) {
   }
@@ -241,7 +241,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
     auto?: true | undefined;
   }) {
     const assembler = this.freshAssembler({
-      sideAffectsAllowed: { materialize: false },
+      sideEffectsAllowed: { materialize: false },
     });
     const summary = this.summaryHooks(assembler);
     await assembler.materialize();
@@ -319,7 +319,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
 
   async lsRoutes(opts?: { json?: boolean }) {
     const assembler = this.freshAssembler({
-      sideAffectsAllowed: { materialize: false },
+      sideEffectsAllowed: { materialize: false },
     });
     assembler.resourceBus.on("assembler:state:mutated", async (ev) => {
       if (ev.current.step === "final") {
@@ -347,7 +347,7 @@ export class CLI<R extends Resource, A extends Assembler<R>> {
 
   async foundry(opts: { env?: true | undefined }) {
     const assembler = this.freshAssembler({
-      sideAffectsAllowed: { materialize: false },
+      sideEffectsAllowed: { materialize: false },
     });
     if (opts.env) {
       const env = assembler.projectStateEnvVars({ debug: true });

@@ -3,7 +3,7 @@
 import {
   assemblerBusesInit,
   Resource,
-  SideAffects,
+  SideEffects,
 } from "../../../lib/assembler/mod.ts";
 import { SqlPageAssembler, SqlPageCLI } from "../../../lib/sqlpage/mod.ts";
 
@@ -12,7 +12,7 @@ import { SqlPageAssembler, SqlPageCLI } from "../../../lib/sqlpage/mod.ts";
 
 export class SqlPageStarter extends SqlPageAssembler<Resource> {
   constructor(
-    init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
+    init: { sideEffectsAllowed: SideEffects; cleaningRequested?: boolean },
   ) {
     super(
       "e2e-sqlpage",
@@ -29,7 +29,7 @@ if (import.meta.main) {
     await new SqlPageCLI((init) => new SqlPageStarter(init)).cli()
       .parse(Deno.args);
   } else {
-    await new SqlPageStarter({ sideAffectsAllowed: { materialize: true } })
+    await new SqlPageStarter({ sideEffectsAllowed: { materialize: true } })
       .materialize();
   }
 }

@@ -115,7 +115,7 @@ export type WorkflowStep =
     readonly materialized: ResourcesCollection<Any>;
   };
 
-export type SideAffects = {
+export type SideEffects = {
   readonly materialize: boolean;
 };
 
@@ -124,7 +124,7 @@ export class AssemblerState {
 
   constructor(
     readonly init: {
-      sideAffectsAllowed: SideAffects;
+      sideEffectsAllowed: SideEffects;
       cleaningRequested?: boolean;
     },
   ) {
@@ -388,7 +388,7 @@ export class Assembler<R extends Resource> {
     readonly moduleHome: string, // import.meta.resolve('./') from module
     readonly assemblerBuses: AssemblerBusesInit<R>,
     readonly init: {
-      sideAffectsAllowed: SideAffects;
+      sideEffectsAllowed: SideEffects;
       cleaningRequested?: boolean;
     },
   ) {
@@ -548,7 +548,7 @@ export class Assembler<R extends Resource> {
       const result = await replacer.processToString(original, state);
       let written = false;
       if (
-        this.#state.init.sideAffectsAllowed.materialize &&
+        this.#state.init.sideEffectsAllowed.materialize &&
         (result.changed && result.after != result.before)
       ) {
         await resource.writeText(result.after);
@@ -589,7 +589,7 @@ export class Assembler<R extends Resource> {
             matAbsFsPath,
             env,
             cwd,
-            dryRun: this.#state.init.sideAffectsAllowed.materialize
+            dryRun: this.#state.init.sideEffectsAllowed.materialize
               ? false
               : true,
           }, (err) => error = err);

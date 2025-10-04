@@ -15,7 +15,7 @@ import {
   ResourcesCollection,
   routeAnnSchema,
   Routes,
-  SideAffects,
+  SideEffects,
   typicalAssemblerProjectPropsSchema,
 } from "../assembler/mod.ts";
 import {
@@ -141,7 +141,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     moduleHome: string, // import.meta.resolve('./') from module
     assemblerBuses: AssemblerBusesInit<R>,
     readonly stdlibSymlinkDest: string,
-    init: { sideAffectsAllowed: SideAffects; cleaningRequested?: boolean },
+    init: { sideEffectsAllowed: SideEffects; cleaningRequested?: boolean },
   ) {
     super(projectId, moduleHome, assemblerBuses, init);
 
@@ -191,7 +191,7 @@ export class SqlPageAssembler<R extends Resource> extends Assembler<R> {
     this.resourceBus.on("assembler:state:mutated", async (ev) => {
       if (
         ev.current.step === "final" &&
-        ev.assemblerState.init.sideAffectsAllowed.materialize
+        ev.assemblerState.init.sideEffectsAllowed.materialize
       ) {
         try {
           await Deno.mkdir(paths.projectSrcHome, { recursive: true });
