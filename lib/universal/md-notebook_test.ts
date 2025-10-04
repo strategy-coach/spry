@@ -92,8 +92,7 @@ This block has meta text but no JSON5 attrs.
   const builder = new NotebookBuilder()
     .withInstructionsDelimiter({ kind: "heading", level: 2 })
     .withAttrResolution(true)
-    .withFrontmatterMirror(true)
-    .withShebang(true);
+    .withFrontmatterMirror(true);
 
   const nb = await builder.fromString(md, "synthetic.md").build(fmSchema);
   const plan = nb.toPlan();
@@ -188,19 +187,6 @@ This block has meta text but no JSON5 attrs.
     assertNotEquals(fmAfter["title"], "mutated");
   });
 
-  await t.step("shebang captured & stripped from bash block", () => {
-    const bashA = nb.blocks[2];
-    assertEquals(bashA.lang, "bash");
-    assertExists(bashA.shebang);
-    assert(bashA.shebang!.startsWith("#!/usr/bin/env bash"));
-    assertEquals(bashA.code.includes("#!/usr/bin/env bash"), false);
-    const ra = asDict(bashA.resolvedAttrs);
-    assert(
-      "frontmatter" in ra,
-      "frontmatter mirror missing in bash block resolvedAttrs",
-    );
-  });
-
   await t.step("meta without braces treated as info-only", () => {
     const textBlock = nb.blocks[5];
     assertEquals(textBlock.lang, "text");
@@ -239,7 +225,6 @@ This block has meta text but no JSON5 attrs.
       const nb2 = await new NotebookBuilder()
         .withAttrResolution(false)
         .withFrontmatterMirror(false)
-        .withShebang(false)
         .fromString(md, "no-resolve.md")
         .build(fmSchema);
 
@@ -268,7 +253,6 @@ This block has meta text but no JSON5 attrs.
         .withInstructionsDelimiter({ kind: "heading", level: 2 })
         .withAttrResolution(true)
         .withFrontmatterMirror(true)
-        .withShebang(true)
         .withSafeAttributes("sql", sqlAttrs)
         .fromString(md, "typed.md")
         .build(fmSchema);
@@ -306,7 +290,6 @@ This block has meta text but no JSON5 attrs.
         .withInstructionsDelimiter({ kind: "heading", level: 2 })
         .withAttrResolution(true)
         .withFrontmatterMirror(true)
-        .withShebang(true)
         .withSafeAttributes("bash", bashFactory)
         .fromString(md, "typed-bash.md")
         .build(fmSchema);

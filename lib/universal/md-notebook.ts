@@ -195,13 +195,12 @@ export interface Instructions {
 export interface FencedBlockBase {
   readonly index: number;
   readonly lang: string; // e.g., "sql", "bash"
-  readonly code: string; // content (post-shebang strip if enabled)
+  readonly code: string;
   readonly attrs: Record<string, unknown>; // raw JSON5 attrs from meta {...}
   readonly resolvedAttrs?: Record<string, unknown>; // after FM spreads/merges (if enabled)
   readonly info?: string; // meta string without trailing {...}
   readonly startLine?: number;
   readonly endLine?: number;
-  readonly shebang?: string; // captured if withShebang(true)
   readonly instructions?: Instructions; // optional, from delimiter logic
 }
 
@@ -307,7 +306,6 @@ export class NotebookBuilder<Ast = Root, M = Record<PropertyKey, unknown>> {
   // Resolution features
   #enableAttrResolution = true; // compute resolvedAttrs using FM spreads/merges
   #enableFrontmatterMirror = false; // include read-only `frontmatter` inside resolvedAttrs
-  #enableShebang = false; // capture & strip first-line shebangs
 
   // Per-language safe attrs schema or factory
   #attrSchemas = new Map<
@@ -328,10 +326,6 @@ export class NotebookBuilder<Ast = Root, M = Record<PropertyKey, unknown>> {
   }
   withFrontmatterMirror(enable = true) {
     this.#enableFrontmatterMirror = enable;
-    return this;
-  }
-  withShebang(enable = true) {
-    this.#enableShebang = enable;
     return this;
   }
   withIssueHandler(handler: IssueHandler) {
@@ -357,7 +351,6 @@ export class NotebookBuilder<Ast = Root, M = Record<PropertyKey, unknown>> {
     next.#delimiter = this.#delimiter;
     next.#enableAttrResolution = this.#enableAttrResolution;
     next.#enableFrontmatterMirror = this.#enableFrontmatterMirror;
-    next.#enableShebang = this.#enableShebang;
     next.#issueHandler = this.#issueHandler;
     // copy schemas then add
     for (const [k, v] of this.#attrSchemas) next.#attrSchemas.set(k, v);
@@ -388,7 +381,6 @@ export class NotebookBuilder<Ast = Root, M = Record<PropertyKey, unknown>> {
         delimiter: this.#delimiter,
         enableAttrResolution: this.#enableAttrResolution,
         enableFrontmatterMirror: this.#enableFrontmatterMirror,
-        enableShebang: this.#enableShebang,
       },
       this.#attrSchemas as Map<
         string,
@@ -677,7 +669,6 @@ interface ParseOptions {
   delimiter: InstructionsDelimiter;
   enableAttrResolution: boolean;
   enableFrontmatterMirror: boolean;
-  enableShebang: boolean;
 }
 
 async function parseMinimal<FM, M extends LangAttrMap>(
@@ -824,20 +815,7 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         }
       }
 
-      const rawCode = String(n.value ?? "");
-      let shebang: string | undefined;
-      let code = rawCode;
-      if (opts.enableShebang) {
-        const firstLineEnd = rawCode.indexOf("\n");
-        const firstLine = firstLineEnd === -1
-          ? rawCode
-          : rawCode.slice(0, firstLineEnd);
-        if (firstLine.startsWith("#!")) {
-          shebang = firstLine;
-          code = firstLineEnd === -1 ? "" : rawCode.slice(firstLineEnd + 1);
-        }
-      }
-
+      const code = String(n.value ?? "");
       const instructions = mkInstructions(instrBuf);
       const instrDefaults = opts.enableAttrResolution
         ? collectInstructionDefaults(instrBuf, ctx)
@@ -910,7 +888,6 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         info,
         startLine: n.position?.start?.line,
         endLine: n.position?.end?.line,
-        shebang,
         instructions,
       };
 
