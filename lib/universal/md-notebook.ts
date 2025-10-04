@@ -216,7 +216,7 @@ export class NotebookContent<Ast, FM, M extends LangAttrMap>
     public readonly moduleAppendix?: Instructions,
   ) {}
   toPlan() {
-    return new CoreMarkdownPlan<Ast, FM, M>(this);
+    return new TypicalMarkdownPlan<Ast, FM, M>(this);
   }
 }
 
@@ -331,16 +331,19 @@ function isYamlNode(n: unknown): n is { type: "yaml"; value?: string } {
   return typeof n === "object" && n !== null &&
     (n as WithType).type === "yaml";
 }
+
 function isHeadingNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "heading" }> {
   return n.type === "heading";
 }
+
 function isCodeNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "code" }> {
   return n.type === "code";
 }
+
 function isHrNode(
   n: RootContent,
 ): n is Extract<RootContent, { type: "thematicBreak" }> {
@@ -354,6 +357,7 @@ type Dict = Record<string, unknown>;
 function isRecord(v: unknown): v is Dict {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
+
 function getAtPath(obj: unknown, path: string): unknown {
   if (!isRecord(obj)) return undefined;
   return path.split(".").reduce<unknown>((acc, key) => {
@@ -361,6 +365,7 @@ function getAtPath(obj: unknown, path: string): unknown {
     return (acc as Dict)[key];
   }, obj);
 }
+
 function deepMerge<A extends Dict, B extends Dict>(a: A, b: B): A & B {
   const out: Dict = { ...a };
   for (const [k, v] of Object.entries(b)) {
@@ -689,32 +694,35 @@ async function parseMinimal<FM, M extends LangAttrMap>(
   return { ast: tree, fm, blocks, moduleInstructions, moduleAppendix };
 }
 
-/** Execution-free plan */
-export class CoreMarkdownPlan<Ast, FM, M extends LangAttrMap>
+export class TypicalMarkdownPlan<Ast, FM, M extends LangAttrMap>
   implements MarkdownPlan<FM, Ast, M> {
   constructor(private readonly nb: Notebook<FM, Ast, M>) {}
+
   get filename() {
     return this.nb.filename;
   }
+
   get fm() {
     return this.nb.fm;
   }
+
   get count() {
     return this.nb.blocks.length;
   }
 
-  /** Module-level regions */
   get moduleInstructions() {
     return this.nb.moduleInstructions;
-  }
-  get moduleAppendix() {
-    return this.nb.moduleAppendix;
   }
 
   async *blocks(): AsyncGenerator<FencedBlockTyped<M>, void, unknown> {
     for (const b of this.nb.blocks) yield b;
   }
+
   select(pred: (b: FencedBlockTyped<M>) => boolean): FencedBlockTyped<M>[] {
     return this.nb.blocks.filter(pred);
+  }
+
+  get moduleAppendix() {
+    return this.nb.moduleAppendix;
   }
 }
