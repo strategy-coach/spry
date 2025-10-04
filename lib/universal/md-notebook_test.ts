@@ -6,6 +6,7 @@ import {
   assertEquals,
   assertExists,
   assertNotEquals,
+  assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@^1";
 
@@ -313,4 +314,136 @@ This block has meta text but no JSON5 attrs.
       assert("sql" in bSafe);
     },
   );
+});
+
+Deno.test("moduleInstructions and moduleAppendix behavior", async (t) => {
+  const fmSchema = z.object({ title: z.string().optional() }).strict();
+
+  await t.step(
+    "standard case: intro + appendix around fenced blocks",
+    async () => {
+      const md = `---
+title: Demo
+---
+
+Intro paragraph for the module.
+- bullet A
+- bullet B
+
+## Section A
+
+\`\`\`sql { id: 1 }
+SELECT 1;
+\`\`\`
+
+Some mid-body prose after the first fence.
+
+\`\`\`bash
+echo "hi"
+\`\`\`
+
+Closing thoughts in the appendix with **emphasis**.
+`;
+
+      const nb = await new NotebookBuilder()
+        .withInstructionsDelimiter({ kind: "heading", level: 2 })
+        .fromString(md, "demo.md")
+        .build(fmSchema);
+      const plan = nb.toPlan();
+
+      assertEquals(plan.count, 2);
+
+      // Module Instructions: after FM → before first fence
+      assert(plan.moduleInstructions);
+      const instrText = plan.moduleInstructions!.text;
+      assertStringIncludes(instrText, "Intro paragraph for the module.");
+      assertStringIncludes(instrText, "bullet A");
+      assertStringIncludes(instrText, "Section A");
+
+      // Module Appendix: after last fence → EOF
+      assert(plan.moduleAppendix);
+      const appendixMd = plan.moduleAppendix!.markdown;
+      assertStringIncludes(appendixMd, "Closing thoughts in the appendix");
+      assertStringIncludes(appendixMd, "**emphasis**");
+
+      // Per-block instructions
+      const blocks: unknown[] = [];
+      for await (const b of plan.blocks()) blocks.push(b);
+
+      const firstBlock = blocks[0] as { instructions?: { text: string } };
+      assert(firstBlock.instructions);
+      assertStringIncludes(firstBlock.instructions!.text, "Section A");
+
+      const secondBlock = blocks[1] as { instructions?: { text: string } };
+      assert(secondBlock.instructions);
+      assertStringIncludes(
+        secondBlock.instructions!.text,
+        "Some mid-body prose",
+      );
+    },
+  );
+
+  await t.step("no fences: appendix only", async () => {
+    const md = `---
+title: No Fences
+---
+
+This file has no code fences, just narrative text.
+
+- It should place everything after FM into the appendix.
+- moduleInstructions should be undefined.
+`;
+
+    const nb = await new NotebookBuilder()
+      .fromString(md, "nofences.md")
+      .build(fmSchema);
+    const plan = nb.toPlan();
+
+    assertEquals(plan.count, 0);
+    assertEquals(plan.moduleInstructions, undefined);
+
+    assert(plan.moduleAppendix);
+    const appendixText = plan.moduleAppendix!.text;
+    assertStringIncludes(appendixText, "This file has no code fences");
+    assertStringIncludes(
+      appendixText,
+      "place everything after FM into the appendix",
+    );
+  });
+
+  await t.step("delimiters do not affect module boundaries", async () => {
+    const md = `---
+title: Delimiter Demo
+---
+
+Intro before HR.
+
+---
+
+Heading that should still be included before first fence
+
+\`\`\`json
+{ "ok": true }
+\`\`\`
+
+Tail after last fence.
+`;
+
+    const nb = await new NotebookBuilder()
+      .withInstructionsDelimiter({ kind: "hr" })
+      .fromString(md, "delims.md")
+      .build(fmSchema);
+    const plan = nb.toPlan();
+
+    assert(plan.moduleInstructions);
+    const preMd = plan.moduleInstructions!.markdown;
+    assertStringIncludes(preMd, "Intro before HR.");
+    assertStringIncludes(
+      preMd,
+      "Heading that should still be included before first fence",
+    );
+
+    assert(plan.moduleAppendix);
+    assertStringIncludes(plan.moduleAppendix!.text, "Tail after last fence");
+  });
 });

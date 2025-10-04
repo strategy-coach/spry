@@ -21,7 +21,9 @@
  * - Notebook<FM, Ast>: Immutable product containing filename, original source, the mdast tree,
  *   parsed frontmatter (FM), and all collected blocks.
  * - MarkdownPlan<FM, Ast>: An execution-free view to iterate or filter blocks without exposing
- *   internals.
+ *   internals. ALSO includes module-level instruction regions:
+ *     - moduleInstructions?: Instructions (after frontmatter, before first code fence)
+ *     - moduleAppendix?: Instructions (after last code fence)
  * - NotebookBuilder: Fluent builder to load from file or string, set instruction delimiter
  *   policy, apply a Zod schema to frontmatter, and produce a NotebookContent that can be turned
  *   into a CoreMarkdownPlan.
@@ -43,6 +45,11 @@
  *   delimiter. When a fenced `code` node is encountered, the current buffer is converted into an
  *   Instructions and attached to that block. Delimiters clear the buffer; a heading delimiter
  *   also contributes the heading node to the new buffer.
+ *
+ * Module-level regions
+ * - moduleInstructions captures everything after frontmatter up to (but not including) the first
+ *   fenced code block (regardless of delimiter behavior).
+ * - moduleAppendix captures everything after the last fenced code block to the end of the file.
  *
  * Immutability and safety
  * - Instruction node snapshots are shallow-frozen to discourage mutation.
@@ -73,7 +80,7 @@
  * const nb = await builder.fromFile("example.md").build(fmSchema);
  * const plan = nb.toPlan();
  *
- * console.log(plan.filename, plan.fm, plan.count);
+ * console.log(plan.filename, plan.fm, plan.count, plan.moduleInstructions?.text);
  *
  * for await (const b of plan.blocks()) {
  *   if (b.lang === "sql") {
@@ -115,7 +122,7 @@ export type InstructionsDelimiter =
   | { kind: "hr" }
   | { kind: "heading"; level?: 1 | 2 | 3 | 4 | 5 | 6 };
 
-/** Strongly-typed instruction payload for a block */
+/** Strongly-typed instruction payload for a block or module region */
 export interface Instructions {
   readonly nodes: ReadonlyArray<RootContent>; // mdast nodes (shallow frozen)
   readonly markdown: string; // normalized markdown
@@ -135,6 +142,9 @@ export interface FencedBlockBase {
   readonly shebang?: string; // captured if withShebang(true)
   readonly instructions?: Instructions; // optional, from delimiter logic
 }
+
+/** Helper type: language → inferred attrs type */
+export type LangAttrMap = Record<string, unknown>;
 
 /** Typed fenced code block: narrows attrsSafe by language map M */
 export type FencedBlockTyped<M extends LangAttrMap> =
@@ -156,6 +166,10 @@ export interface Notebook<FM, Ast, M extends LangAttrMap> {
   readonly ast: Ast;
   readonly fm: FM; // Zod-validated FM
   readonly blocks: readonly FencedBlockTyped<M>[];
+
+  /** Module-level regions */
+  readonly moduleInstructions?: Instructions;
+  readonly moduleAppendix?: Instructions;
 }
 
 /** Plan interface (execution-free) */
@@ -163,12 +177,14 @@ export interface MarkdownPlan<FM, Ast, M extends LangAttrMap> {
   readonly filename: string;
   readonly fm: FM;
   readonly count: number;
+
+  /** Module-level regions */
+  readonly moduleInstructions?: Instructions;
+  readonly moduleAppendix?: Instructions;
+
   blocks(): AsyncGenerator<FencedBlockTyped<M>, void, unknown>;
   select(pred: (b: FencedBlockTyped<M>) => boolean): FencedBlockTyped<M>[];
 }
-
-/** Helper type: language → inferred attrs type */
-export type LangAttrMap = Record<string, unknown>;
 
 /** Parse JSON5 attributes from code fence meta */
 export function parseFenceAttributes(
@@ -196,6 +212,8 @@ export class NotebookContent<Ast, FM, M extends LangAttrMap>
     public readonly ast: Ast,
     public readonly fm: FM,
     public readonly blocks: readonly FencedBlockTyped<M>[],
+    public readonly moduleInstructions?: Instructions,
+    public readonly moduleAppendix?: Instructions,
   ) {}
   toPlan() {
     return new CoreMarkdownPlan<Ast, FM, M>(this);
@@ -281,7 +299,7 @@ export class NotebookBuilder<
     if (!this.#source || !this.#filename) {
       throw new Error("Call fromFile()/fromString() first.");
     }
-    const { ast, fm, blocks } = await parseMinimal<FM, M>(
+    const parsed = await parseMinimal<FM, M>(
       this.#source,
       schema,
       {
@@ -295,9 +313,11 @@ export class NotebookBuilder<
     return new NotebookContent<Ast, FM, M>(
       this.#filename,
       this.#source,
-      ast as unknown as Ast,
-      fm,
-      blocks,
+      parsed.ast as unknown as Ast,
+      parsed.fm,
+      parsed.blocks,
+      parsed.moduleInstructions,
+      parsed.moduleAppendix,
     );
   }
 }
@@ -355,12 +375,12 @@ function deepMerge<A extends Dict, B extends Dict>(a: A, b: B): A & B {
 }
 
 function collectInstructionDefaults(nodes: ReadonlyArray<RootContent>): Dict {
-  // Merge JSON/JSON5 code blocks scoped to the instruction region when meta role: "section-defaults"
   let acc: Dict = {};
   for (const n of nodes) {
     if (isCodeNode(n)) {
       const meta = typeof n.meta === "string" ? n.meta : undefined;
       if (!meta) continue;
+
       const m = meta.match(/\{.*\}$/);
       const attrs = m ? parseFenceAttributes(m[0]) : {};
       const role = isRecord(attrs) && typeof attrs.role === "string"
@@ -389,26 +409,28 @@ function resolveBlockAttrs(
 ): Dict {
   let acc: Dict = {};
 
-  // 1) $preset
-  if (typeof rawAttrs.$preset === "string" && isRecord(presets)) {
-    const p = presets[rawAttrs.$preset];
+  const presetKey = rawAttrs["$preset"];
+  if (typeof presetKey === "string" && isRecord(presets)) {
+    const p = presets[presetKey];
     if (isRecord(p)) acc = deepMerge(acc, p);
   }
 
-  // 2) $spread
-  if (Array.isArray(rawAttrs.$spread)) {
-    for (const p of rawAttrs.$spread) {
+  const spreadList = rawAttrs["$spread"];
+  if (Array.isArray(spreadList)) {
+    for (const p of spreadList) {
       if (typeof p !== "string") continue;
       const v = getAtPath(fm, p);
       if (isRecord(v)) acc = deepMerge(acc, v);
     }
   }
 
-  // 3) $merge
-  if (Array.isArray(rawAttrs.$merge)) {
-    for (const m of rawAttrs.$merge) {
-      if (isRecord(m) && typeof (m as Dict).$fm === "string") {
-        const v = getAtPath(fm, String((m as Dict).$fm));
+  const mergeList = rawAttrs["$merge"];
+  if (Array.isArray(mergeList)) {
+    for (const m of mergeList) {
+      const mAsDict = isRecord(m) ? (m as Dict) : undefined;
+      const fmPath = mAsDict?.["$fm"];
+      if (typeof fmPath === "string") {
+        const v = getAtPath(fm, fmPath);
         if (isRecord(v)) acc = deepMerge(acc, v);
       } else if (isRecord(m)) {
         acc = deepMerge(acc, m);
@@ -416,18 +438,16 @@ function resolveBlockAttrs(
     }
   }
 
-  // 4) $fm (single)
-  if (typeof rawAttrs.$fm === "string") {
-    const v = getAtPath(fm, rawAttrs.$fm);
+  const fmPathSingle = rawAttrs["$fm"];
+  if (typeof fmPathSingle === "string") {
+    const v = getAtPath(fm, fmPathSingle);
     if (isRecord(v)) acc = deepMerge(acc, v);
   }
 
-  // 5) instruction-scope defaults
   if (opts.instructionDefaults) {
     acc = deepMerge(acc, opts.instructionDefaults);
   }
 
-  // 6) literal attrs last (highest precedence), excluding reserved keys
   const reserved = new Set(["$preset", "$spread", "$merge", "$fm"]);
   const rawFinal: Dict = {};
   for (const [k, v] of Object.entries(rawAttrs)) {
@@ -471,42 +491,8 @@ async function parseMinimal<FM, M extends LangAttrMap>(
   );
   const tree = processor.parse(source) as Root;
 
-  // --- Frontmatter: first yaml node only
-  let fmRaw: Record<string, unknown> = {};
-  if (Array.isArray(tree.children)) {
-    for (const n of tree.children) {
-      if (isYamlNode(n)) {
-        const raw = typeof (n as WithValue).value === "string"
-          ? (n as { value: string }).value
-          : "";
-        fmRaw = (YAMLparse(raw) as Record<string, unknown>) ?? {};
-        break;
-      }
-      if (
-        !isYamlNode(n) && !isHrNode(n) && n.type !== "html" &&
-        n.type !== "definition"
-      ) {
-        break;
-      }
-    }
-  }
-  const fm = fmSchema.parse(fmRaw);
-  const fmAsDict: Dict = isRecord(fm) ? (fm as Dict) : {};
-
-  // --- Instructions delimiting
-  const isDelimiterNode = (node: RootContent): boolean => {
-    if (opts.delimiter.kind === "heading") {
-      return isHeadingNode(node) &&
-        node.depth === (opts.delimiter.level ?? 2);
-    }
-    return isHrNode(node); // hr
-  };
-
-  // Buffer of instruction nodes since last delimiter
-  const instrBuf: RootContent[] = [];
-  const mkInstructions = (
-    nodes: RootContent[],
-  ): Instructions | undefined => {
+  // Helper to build Instructions from nodes
+  const mkInstructions = (nodes: RootContent[]): Instructions | undefined => {
     if (!nodes.length) return undefined;
     const root: Root = { type: "root", children: nodes };
     const markdown = String(processor.stringify(root));
@@ -517,24 +503,74 @@ async function parseMinimal<FM, M extends LangAttrMap>(
     return { nodes: frozen, markdown, text };
   };
 
-  // --- Collect fenced blocks
+  // --- Frontmatter: first yaml node only & compute FM end index
+  let fmRaw: Record<string, unknown> = {};
+  let fmEndIdx = 0; // index in children where frontmatter "header" section ends
+  if (Array.isArray(tree.children)) {
+    for (let i = 0; i < tree.children.length; i++) {
+      const n = tree.children[i];
+      if (isYamlNode(n)) {
+        const raw = typeof (n as WithValue).value === "string"
+          ? (n as { value: string }).value
+          : "";
+        fmRaw = (YAMLparse(raw) as Record<string, unknown>) ?? {};
+        fmEndIdx = i + 1;
+        // continue scanning header-only elements (hr/html/definition) to find the true start
+        continue;
+      }
+      if (
+        isYamlNode(n) || isHrNode(n) || n.type === "html" ||
+        n.type === "definition"
+      ) {
+        fmEndIdx = i + 1;
+        continue;
+      }
+      // first non-header node found
+      fmEndIdx = i;
+      break;
+    }
+    // If doc was only header-like nodes, fmEndIdx may be at the end
+    if (fmEndIdx === 0) fmEndIdx = 0;
+  }
+  const fm = fmSchema.parse(fmRaw);
+  const fmAsDict: Dict = isRecord(fm) ? (fm as Dict) : {};
+
+  // --- Delimiter helper
+  const isDelimiterNode = (node: RootContent): boolean => {
+    if (opts.delimiter.kind === "heading") {
+      return isHeadingNode(node) &&
+        node.depth === (opts.delimiter.level ?? 2);
+    }
+    return isHrNode(node); // hr
+  };
+
+  // --- Collect fenced blocks and per-block instructions
+  const instrBuf: RootContent[] = [];
   const blocks: FencedBlockTyped<M>[] = [];
   let idx = 0;
 
-  for (const n of tree.children) {
+  // Track first and last code indices to compute module-level regions
+  let firstCodeIdx: number | undefined = undefined;
+  let lastCodeIdx: number | undefined = undefined;
+
+  for (let i = 0; i < tree.children.length; i++) {
+    const n = tree.children[i];
+
     if (isDelimiterNode(n)) {
       instrBuf.length = 0;
-      if (isHeadingNode(n)) instrBuf.push(n); // include heading itself
+      if (isHeadingNode(n)) instrBuf.push(n);
       continue;
     }
 
     if (isCodeNode(n)) {
+      if (firstCodeIdx === undefined) firstCodeIdx = i;
+      lastCodeIdx = i;
+
       const lang: string = n.lang ?? "text";
       const meta: string | undefined = typeof n.meta === "string"
         ? n.meta
         : undefined;
 
-      // raw attrs + info
       let attrs: Record<string, unknown> = {};
       let info: string | undefined;
       if (meta) {
@@ -547,7 +583,6 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         }
       }
 
-      // shebang handling
       const rawCode = String(n.value ?? "");
       let shebang: string | undefined;
       let code = rawCode;
@@ -563,27 +598,18 @@ async function parseMinimal<FM, M extends LangAttrMap>(
       }
 
       const instructions = mkInstructions(instrBuf);
-
-      // instruction-scope defaults from the buffer
       const instrDefaults = opts.enableAttrResolution
         ? collectInstructionDefaults(instrBuf)
         : undefined;
 
-      // resolved attrs (optional)
       let resolvedAttrs: Record<string, unknown> | undefined;
       if (opts.enableAttrResolution) {
-        const presets = isRecord(fmAsDict.presets)
-          ? (fmAsDict.presets as Dict)
-          : undefined;
-        resolvedAttrs = resolveBlockAttrs(
-          attrs,
-          fmAsDict,
-          presets,
-          {
-            mirrorFM: opts.enableFrontmatterMirror,
-            instructionDefaults: instrDefaults,
-          },
-        );
+        const presetsRaw = (fmAsDict as Dict)["presets"];
+        const presets = isRecord(presetsRaw) ? (presetsRaw as Dict) : undefined;
+        resolvedAttrs = resolveBlockAttrs(attrs, fmAsDict, presets, {
+          mirrorFM: opts.enableFrontmatterMirror,
+          instructionDefaults: instrDefaults,
+        });
       }
 
       // per-language safe attrs (validate resolved if present, else raw)
@@ -593,8 +619,8 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         const schema = typeof schemaOrFactory === "function"
           ? schemaOrFactory({ fm, lang })
           : schemaOrFactory;
-        const candidate = resolvedAttrs ?? attrs;
-        const res = schema.safeParse(candidate);
+        const candidate: unknown = resolvedAttrs ?? attrs;
+        const res = (schema as z.ZodTypeAny).safeParse(candidate);
         if (res.success) attrsSafe = res.data;
       }
 
@@ -611,13 +637,22 @@ async function parseMinimal<FM, M extends LangAttrMap>(
         instructions,
       };
 
-      // Type assertion is safe due to construction logic above
-      blocks.push(
-        {
-          ...(block as unknown as FencedBlockTyped<M>),
-          attrsSafe,
-        } as FencedBlockTyped<M>,
-      );
+      // Ensure attrsSafe is undefined for languages not in M
+      if (attrSchemas.has(lang)) {
+        blocks.push(
+          {
+            ...(block as unknown as FencedBlockTyped<M>),
+            attrsSafe,
+          } as FencedBlockTyped<M>,
+        );
+      } else {
+        blocks.push(
+          {
+            ...(block as unknown as FencedBlockTyped<M>),
+            attrsSafe: undefined,
+          } as FencedBlockTyped<M>,
+        );
+      }
       continue;
     }
 
@@ -626,7 +661,32 @@ async function parseMinimal<FM, M extends LangAttrMap>(
     }
   }
 
-  return { ast: tree, fm, blocks };
+  // --- Module-level regions
+  // Compute moduleInstructions: after FM "header" section → before first code node
+  let moduleInstructions: Instructions | undefined;
+  if (firstCodeIdx !== undefined) {
+    const preNodes = tree.children.slice(fmEndIdx, firstCodeIdx);
+    const filtered = preNodes.filter((n): n is RootContent => !isYamlNode(n));
+    moduleInstructions = mkInstructions(filtered as RootContent[]);
+  } else {
+    // No code blocks: by definition there is no "first fenced block", so we treat entire body
+    // (after FM) as moduleAppendix, and moduleInstructions remains undefined.
+  }
+
+  // Compute moduleAppendix: after last code node → end of doc
+  let moduleAppendix: Instructions | undefined;
+  if (lastCodeIdx !== undefined) {
+    const postNodes = tree.children.slice(lastCodeIdx + 1);
+    const filtered = postNodes.filter((n): n is RootContent => !isYamlNode(n));
+    moduleAppendix = mkInstructions(filtered as RootContent[]);
+  } else {
+    // If there are no code blocks, consider all content after FM as appendix
+    const postNodes = tree.children.slice(fmEndIdx);
+    const filtered = postNodes.filter((n): n is RootContent => !isYamlNode(n));
+    moduleAppendix = mkInstructions(filtered as RootContent[]);
+  }
+
+  return { ast: tree, fm, blocks, moduleInstructions, moduleAppendix };
 }
 
 /** Execution-free plan */
@@ -641,6 +701,14 @@ export class CoreMarkdownPlan<Ast, FM, M extends LangAttrMap>
   }
   get count() {
     return this.nb.blocks.length;
+  }
+
+  /** Module-level regions */
+  get moduleInstructions() {
+    return this.nb.moduleInstructions;
+  }
+  get moduleAppendix() {
+    return this.nb.moduleAppendix;
   }
 
   async *blocks(): AsyncGenerator<FencedBlockTyped<M>, void, unknown> {
