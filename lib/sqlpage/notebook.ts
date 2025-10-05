@@ -148,19 +148,6 @@
  * @see FencedBlockTyped
  * @see sqlPageContent
  */
-/**
- * @module sqlpage/notebook
- *
- * A tiny, DX-first wrapper that turns one or more Markdown sources into a
- * stream of **typed SQL fenced blocks** which can be used to materialize into a
- * partial or full SQLPage application without having to write each SQL file
- * individually.
- *
- * Nothing here performs execution or output planning. No I/O is done other
- * than reading the provided source content. Use the stream in your kernel
- * to perform downstream work.
- */
-
 import { dirname, isAbsolute, resolve } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import type { Root } from "npm:@types/mdast@^4";
@@ -716,9 +703,6 @@ if (import.meta.main) {
         null,
         2,
       ));
-      if (res.issues.length) {
-        console.dir(res.issues);
-      }
       Deno.exit(res.error ? 1 : 0);
     })
     .catch((e) => {
