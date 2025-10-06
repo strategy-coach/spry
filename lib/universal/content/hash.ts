@@ -97,3 +97,36 @@ export function createHashingTap(alg: HashAlg = "SHA-256"): {
 
   return { transform, digest: done };
 }
+
+/**
+ * Generates a Git-like SHA-1 hash for a given content string.
+ *
+ * This function emulates how Git calculates the hash for a `blob` object.
+ * It adds a header to the content, encodes it, and then computes the SHA-1 hash.
+ *
+ * @param content - The content for which the hash will be generated.
+ *
+ * @returns A promise that resolves to the SHA-1 hash of the content in hexadecimal format.
+ *
+ * @example
+ * // Example usage:
+ * const hash = await gitLikeHash('Hello, World!');
+ * console.log(hash); // Outputs the SHA-1 hash as a hexadecimal string
+ */
+export async function gitLikeHash(
+  content: string,
+  nature: "blob" | "commit" | "tree" = "blob",
+) {
+  // Git header for a blob object (change 'blob' to 'commit' or 'tree' for those objects)
+  // This assumes the content is plain text, so we can get its length as a string
+  const header = `${nature} ${content.length}\0`;
+  const hashHex = Array.from(
+    new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-1",
+        new TextEncoder().encode(header + content),
+      ),
+    ),
+  ).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hashHex;
+}
