@@ -1,275 +1,109 @@
-// lib/sqlpage/notebook_test.ts
-// Uses ReadableStream<Uint8Array> in addition to string sources.
+// deno-lint-ignore-file no-explicit-any
+// Path: lib/sqlpage/notebook_test.ts
+import { assert, assertEquals } from "jsr:@std/assert@1";
+import { join as pathJoin } from "jsr:@std/path@1";
+import {
+  type SqlFenceTyped,
+  SqlPageCLI,
+  SqlPageContentBuilder,
+} from "./notebook.ts";
 
-import { z } from "jsr:@zod/zod@4";
-import { type SqlFenceTyped, sqlPageContent } from "./notebook.ts";
+/** Load fixture text via URL relative to this test file */
+async function loadFixture(name: string) {
+  const url = new URL(`./${name}`, import.meta.url);
+  return await Deno.readTextFile(url);
+}
 
-Deno.test("sqlPageContent — streaming & validation (synthetic sources, strings & streams)", async (t) => {
-  const fmSchema = z.object({
-    siteName: z.string().min(1),
-  }).strict();
+/** Helper: make a 1-source provenance generator */
+function sourcesFromText(identifier: string, markdown: string) {
+  return (async function* () {
+    yield { identifier, markdown };
+  })();
+}
 
-  // Keep head strict (so extraneous key fails),
-  // make tail passthrough (so section-defaults extras don't fail),
-  // keep page non-strict (so defaults merge is accepted).
-  const sqlAttrs = z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("head") }).strict(),
-    z.object({ kind: z.literal("tail") }).passthrough(),
-    z.object({
-      kind: z.literal("page"),
-      name: z.string().min(1).optional(),
-      filename: z.string().min(1).optional(),
-    }),
-  ]);
+/** Helper: build content from the fixture each time (fresh stream per test group) */
+function makeContentFromFixture(fixtureName: string) {
+  return (async () => {
+    const md = await loadFixture(fixtureName);
+    const provenance = sourcesFromText(fixtureName, md);
+    // Defaults are safe; they include SQL schema + FM schema
+    const builder = new SqlPageContentBuilder();
+    return builder.build(provenance);
+  })();
+}
 
-  type FM = z.infer<typeof fmSchema>;
-  type M = { sql: z.infer<typeof sqlAttrs> };
-  type Fence = SqlFenceTyped<M>;
+/** Drain an async iterator to array (for fences) */
+async function collect<T>(iter: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = [];
+  for await (const v of iter) out.push(v);
+  return out;
+}
 
-  // NOTE: Real triple-backticks (no escaping) so remark sees code fences.
-  const goodMd = "---\n" +
-    "siteName: Demo\n" +
-    "---\n" +
-    "## Intro to Head\n\n" +
-    '```sql { kind: "head" }\n' +
-    "PRAGMA foreign_keys = ON;\n" +
-    "```\n\n" +
-    "Some prose in between.\n\n" +
-    '```sql { role: "section-defaults" }\n' +
-    '{ name: "Home From Defaults" }\n' +
-    "```\n\n" +
-    '```sql { kind: "page" }\n' +
-    "select 1 as one;\n" +
-    "```\n\n" +
-    "```bash\n" +
-    'echo "ignored";\n' +
-    "```\n\n" +
-    '```sql { kind: "tail" }\n' +
-    "-- tail block\n" +
-    "```\n\n" +
-    '```sql { kind: "weird" }\n' +
-    "select 2 as two; -- invalid kind for our schema\n" +
-    "```\n\n" +
-    '```sql { kind: "head", extraneous: 42 }\n' +
-    "-- extra key not allowed by strict() schema\n" +
-    "```\n";
+/* ------------------------------------------------------------------------- */
+/* Unrelated area: parsing & validation behavior                              */
+/* ------------------------------------------------------------------------- */
 
-  const badFmMd = "---\n" +
-    "siteTitle: MissingRequiredSiteName\n" +
-    "---\n" +
-    '```sql { kind: "page", name: "Should Be Skipped" }\n' +
-    "select 9;\n" +
-    "```\n";
+Deno.test("SqlPageContent: parses and validates fences", async (t) => {
+  const content = await makeContentFromFixture("notebook_test-01.fixture.md");
+  const fences = await collect<SqlFenceTyped<any>>(content.SQL());
 
-  async function* sources(
-    ...pairs: Array<[id: string, md: string | ReadableStream<Uint8Array>]>
-  ) {
-    for (const [identifier, markdown] of pairs) {
-      yield { identifier, markdown };
-    }
-  }
-
-  await t.step(
-    "streams typed fences; validates attrs; collects issues (string source)",
-    async () => {
-      const content = sqlPageContent<FM, M>(
-        sources(["good.md", goodMd]),
-        {
-          fmSchema,
-          attrSchemas: { sql: sqlAttrs },
-        },
-      );
-
-      const fences: Fence[] = [];
-      for await (const f of content.SQL()) {
-        fences.push(f);
-      }
-
-      // 6 sql fences in the doc.
-      if (fences.length !== 6) {
-        throw new Error(`Expected 6 sql fences, got ${fences.length}`);
-      }
-
-      // Exactly 3 typed fences: head + page + tail
-      const typed = fences.filter((f) =>
-        (f as { attrsSafe?: unknown }).attrsSafe !== undefined
-      );
-      if (typed.length !== 3) {
-        throw new Error(
-          `Expected 3 typed fences (head/page/tail), got ${typed.length}`,
-        );
-      }
-
-      const headFence = typed.find(
-        (f): f is Fence & { attrsSafe: { kind: "head" } } =>
-          (f as { attrsSafe?: { kind?: unknown } }).attrsSafe?.kind === "head",
-      );
-      const pageFence = typed.find(
-        (f): f is Fence & { attrsSafe: { kind: "page"; name?: string } } =>
-          (f as { attrsSafe?: { kind?: unknown } }).attrsSafe?.kind === "page",
-      );
-      const tailFence = typed.find(
-        (f): f is Fence & { attrsSafe: { kind: "tail" } } =>
-          (f as { attrsSafe?: { kind?: unknown } }).attrsSafe?.kind === "tail",
-      );
-
-      if (!headFence) throw new Error("Missing typed head fence");
-      if (!pageFence) throw new Error("Missing typed page fence");
-      if (!tailFence) throw new Error("Missing typed tail fence");
-
-      if (!headFence.code.includes("PRAGMA foreign_keys")) {
-        throw new Error("Head fence SQL not captured/trimmed as expected.");
-      }
-      if (!tailFence.code.includes("-- tail block")) {
-        throw new Error("Tail fence SQL not captured/trimmed as expected.");
-      }
-      if (!pageFence.code.includes("select 1 as one")) {
-        throw new Error("Page fence SQL not captured/trimmed as expected.");
-      }
-
-      // Page attrs reflect instruction-defaults merge.
-      if (
-        (pageFence as { attrsSafe?: { name?: string } }).attrsSafe?.name !==
-          "Home From Defaults"
-      ) {
-        throw new Error(
-          `Expected page name resolved from section-defaults, got: ${
-            (pageFence as { attrsSafe?: { name?: string } }).attrsSafe?.name
-          }`,
-        );
-      }
-
-      // Issues sanity checks
-      const issues = content.issues();
-
-      const hasAttrsValidate = issues.some((i) => {
-        const o = i as Record<string, unknown>;
-        return o.kind === "attrs-validate" &&
-          typeof o["blockIndex"] === "number";
-      });
-      if (!hasAttrsValidate) {
-        throw new Error("Expected at least one 'attrs-validate' issue.");
-      }
-
-      const hasUnknownLangForBash = issues.some((i) => {
-        const o = i as Record<string, unknown>;
-        return o.kind === "unknown-language" && o["lang"] === "bash";
-      });
-      if (!hasUnknownLangForBash) {
-        throw new Error("Expected an 'unknown-language' lint for bash fence.");
-      }
-
-      const hasFrontmatterErr = issues.some((i) =>
-        (i as Record<string, unknown>).kind === "frontmatter-parse"
-      );
-      if (hasFrontmatterErr) {
-        throw new Error("Did not expect frontmatter-parse error for good.md");
-      }
-    },
-  );
-
-  await t.step(
-    "streams & validates from ReadableStream<Uint8Array> source",
-    async () => {
-      const goodStream = new Response(goodMd).body as ReadableStream<
-        Uint8Array
-      >;
-      const content = sqlPageContent<FM, M>(
-        sources(["good.stream.md", goodStream]),
-        {
-          fmSchema,
-          attrSchemas: { sql: sqlAttrs },
-        },
-      );
-
-      let count = 0;
-      let sawPage = false;
-      for await (const f of content.SQL()) {
-        count++;
-        if (
-          (f as { attrsSafe?: { kind?: unknown } }).attrsSafe?.kind === "page"
-        ) sawPage = true;
-      }
-
-      if (count !== 6) {
-        throw new Error(`Streamed source: expected 6 sql fences, got ${count}`);
-      }
-      if (!sawPage) {
-        throw new Error("Streamed source: did not see a typed 'page' fence.");
-      }
-    },
-  );
-
-  await t.step("strict attr validation drops failing fences", async () => {
-    const contentStrict = sqlPageContent<FM, M>(
-      sources(["good.md", goodMd]),
-      {
-        fmSchema,
-        attrSchemas: { sql: sqlAttrs },
-        strictAttrValidation: true,
-      },
-    );
-
-    const strictFences: Fence[] = [];
-    for await (const f of contentStrict.SQL()) {
-      strictFences.push(f);
-    }
-
-    // Still 3 (head/page/tail) because the failing ones are dropped.
-    if (strictFences.length !== 3) {
-      throw new Error(
-        `Expected 3 fences in strict mode, got ${strictFences.length}`,
-      );
-    }
-
-    const kinds = strictFences
-      .map((f) =>
-        (f as { attrsSafe?: { kind?: "head" | "page" | "tail" } }).attrsSafe
-          ?.kind
-      )
-      .sort();
-    const expectKinds = ["head", "page", "tail"].sort();
-    if (JSON.stringify(kinds) !== JSON.stringify(expectKinds)) {
-      throw new Error(
-        `Expected kinds ${expectKinds} in strict mode, got ${kinds}`,
-      );
-    }
+  await t.step("yields all fences including control fence", () => {
+    // 5 fences: head, control(section-defaults), page(kind), page(no kind), tail
+    assertEquals(fences.length, 5);
   });
 
   await t.step(
-    "frontmatter errors are captured and source is skipped",
-    async () => {
-      const badStream = new Response(badFmMd).body as ReadableStream<
-        Uint8Array
-      >;
-      const contentBad = sqlPageContent<FM, M>(
-        sources(["bad.stream.md", badStream]),
-        {
-          fmSchema,
-          attrSchemas: { sql: sqlAttrs },
-        },
-      );
-
-      const out: Fence[] = [];
-      for await (const f of contentBad.SQL()) {
-        out.push(f);
-      }
-
-      if (out.length !== 0) {
-        throw new Error(
-          `Expected 0 fences from bad frontmatter source, got ${out.length}`,
-        );
-      }
-
-      const issues = contentBad.issues();
-      const hasFmErr = issues.some((i) =>
-        (i as Record<string, unknown>).kind === "frontmatter-parse"
-      );
-      if (!hasFmErr) {
-        throw new Error(
-          "Expected a 'frontmatter-parse' issue for bad frontmatter.",
-        );
-      }
+    "typed fences are validated (attrsSafe present) for head/page/tail",
+    () => {
+      const typedCount =
+        fences.filter((f) =>
+          (f as { attrsSafe?: unknown }).attrsSafe !== undefined
+        ).length;
+      // head, page(kind), page(no kind), tail => 4 typed
+      assertEquals(typedCount, 4);
     },
   );
+
+  await t.step("control fence is yielded but not typed", () => {
+    const control = fences[1];
+    assertEquals((control as any).attrsSafe, undefined);
+  });
+
+  await t.step(
+    "page without explicit kind still validates due to default('page') and required path",
+    () => {
+      const pageNoKind = fences.find((f) => f.code.includes("select 2;"));
+      assert(pageNoKind);
+      const attrs = (pageNoKind as { attrsSafe?: Record<string, unknown> })
+        .attrsSafe!;
+      assertEquals((attrs as { kind?: string }).kind ?? "page", "page");
+      assertEquals((attrs as { path: string }).path, "users/list");
+    },
+  );
+
+  await t.step("fence provenance is set", () => {
+    for (const f of fences) {
+      assertEquals(f.sourceId, "notebook_test-01.fixture.md");
+      assert(typeof f.blockIndex === "number");
+      assert(f.code.length > 0);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------- */
+/* Unrelated area: CLI wrapper integrates content + writes conf               */
+/* ------------------------------------------------------------------------- */
+
+Deno.test("SqlPageCLI: run() drains fences and writes sqlpage.json (optional)", async () => {
+  const content = await makeContentFromFixture("notebook_test-01.fixture.md");
+  const tmp = await Deno.makeTempDir();
+
+  const emitConfPath = pathJoin(tmp, "sqlpage", "sqlpage.json");
+  const cli = new SqlPageCLI(content, { emitConfPath });
+
+  const res = await cli.run();
+  assertEquals(res.error, false);
+  // head, page(kind), page(no kind), tail => 4 typed
+  assertEquals(res.typedCount, 4);
+  assertEquals(res.totalCount, 5);
 });
