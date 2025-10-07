@@ -19,7 +19,6 @@
  *   applicable.
  * - Stays side-effect free; does not evaluate or transform code, does not assign
  *   identifiers, and does not validate schemas.
- * - Produces shallow-frozen notebooks, cells, and issues to discourage mutation.
  *
  * Non-goals:
  * - No execution, no kernel or runtime metadata, no schema validation, and no
@@ -44,7 +43,7 @@ export type SourceStream =
   | AsyncIterable<Source>
   | AsyncIterator<Source>;
 
-/** Now includes "lint" for enrichment/lint-stage findings. */
+/** Includes "lint" for enrichment/lint-stage findings. */
 export type IssueDisposition = "error" | "warning" | "lint";
 
 /** Built-in issue variants (non-generic) */
@@ -104,6 +103,18 @@ export type Cell<
   | CodeCell<Attrs>
   | MarkdownCell;
 
+/** Per-notebook, cache of top-level mdast computed during parse (no need to re-parse later). */
+export type NotebookAstCache = {
+  /** For each notebook cell index: markdown cells -> mdast nodes; code cells -> null */
+  readonly mdastByCell: ReadonlyArray<ReadonlyArray<RootContent> | null>;
+  /** All mdast nodes after frontmatter up to (not including) the first code cell */
+  readonly nodesBeforeFirstCode: ReadonlyArray<RootContent>;
+  /** All mdast nodes after the last code cell (appendix) */
+  readonly nodesAfterLastCode: ReadonlyArray<RootContent>;
+  /** Indices of code cells in `cells` */
+  readonly codeCellIndices: ReadonlyArray<number>;
+};
+
 export type Notebook<
   FM extends Record<string, unknown> = Record<string, unknown>,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
@@ -112,6 +123,8 @@ export type Notebook<
   fm: FM; // {} if none/empty
   cells: Cell<Attrs>[];
   issues: I[]; // allows extended issue types that include the base Issue shape
+  /** mdast cache produced by the core parser (no need to re-parse later) */
+  ast: NotebookAstCache;
 };
 
 /* =========================== Public API ============================== */
@@ -227,6 +240,8 @@ function parseDocument<
     return { fm: fmRaw as FM, fmEndIdx } as FMParseResult;
   })();
 
+  // Helpers local to this parse:
+
   const isTopLevelDelimiter = (n: RootContent) =>
     (n.type === "heading" && n.depth === 2) || n.type === "thematicBreak";
 
@@ -272,7 +287,16 @@ function parseDocument<
   };
 
   const cells: Cell<Attrs>[] = [];
+
+  // mdast cache we’ll fill during parse
+  const mdastByCell: Array<ReadonlyArray<RootContent> | null> = [];
+  const codeCellIndices: number[] = [];
+  const nodesBeforeFirstCode: RootContent[] = [];
+  const nodesAfterLastCode: RootContent[] = [];
+
+  // We keep only location state for markdown slices: start index in tree.children
   let sliceStart: number | null = null;
+  let seenFirstCode = false;
 
   const flushMarkdown = (endExclusive: number) => {
     if (sliceStart === null || endExclusive <= sliceStart) {
@@ -290,6 +314,10 @@ function parseDocument<
       sliceStart = null;
       return;
     }
+
+    // Record into "before first code" if we haven't seen any code yet
+    if (!seenFirstCode) nodesBeforeFirstCode.push(...nodes);
+
     const markdown = stringifyNodes(nodes);
     const text = plainTextOfNodes(nodes);
     const { start, end } = rangePos(nodes);
@@ -301,6 +329,7 @@ function parseDocument<
       endLine: end,
     };
     cells.push(mdCell);
+    mdastByCell.push(nodes); // cache mdast for this markdown cell
     sliceStart = null;
   };
 
@@ -308,22 +337,29 @@ function parseDocument<
   for (let i = fmEndIdx; i < tree.children.length; i++) {
     const maybeNode = tree.children[i] as unknown;
 
-    if (isYamlNode(maybeNode)) continue; // skip header artifacts
+    // Skip YAML nodes entirely (they are header artifacts)
+    if (isYamlNode(maybeNode)) {
+      continue;
+    }
 
+    // We can only treat non-yaml as RootContent now.
     const node = maybeNode as RootContent;
 
     if (isTopLevelDelimiter(node)) {
+      // delimiter splits markdown cells; delimiter itself belongs to the following slice
       flushMarkdown(i);
-      sliceStart = i;
+      sliceStart = i; // start new markdown slice at this delimiter
       continue;
     }
 
     if (isCodeNode(node)) {
+      // close any open markdown cell before emitting a code cell
       flushMarkdown(i);
 
       const lang = node.lang ?? "text";
       const metaRaw = typeof node.meta === "string" ? node.meta : undefined;
 
+      // Extract trailing {...} JSON5 as attrs; prefix (if any) as info
       let attrs = {} as Attrs;
       let info: string | undefined;
       if (metaRaw) {
@@ -346,22 +382,204 @@ function parseDocument<
         endLine: posEndLine(node),
       };
       cells.push(codeCell);
+      mdastByCell.push(null); // code cell: no mdast nodes
+      codeCellIndices.push(cells.length - 1);
+      seenFirstCode = true;
       continue;
     }
 
+    // Accumulate into current markdown slice
     if (sliceStart === null) sliceStart = i;
   }
 
+  // Flush trailing markdown slice
   flushMarkdown(tree.children.length);
-  return { fm, cells, issues } as Notebook<FM, Attrs, I>;
+
+  // Compute appendix after last code cell
+  if (codeCellIndices.length > 0) {
+    const last = codeCellIndices[codeCellIndices.length - 1];
+    for (let idx = last + 1; idx < cells.length; idx++) {
+      const nodes = mdastByCell[idx];
+      if (nodes) nodesAfterLastCode.push(...nodes);
+    }
+  }
+
+  return {
+    fm,
+    cells,
+    issues,
+    ast: {
+      mdastByCell,
+      nodesBeforeFirstCode,
+      nodesAfterLastCode,
+      codeCellIndices,
+    },
+  } as Notebook<FM, Attrs, I>;
+}
+
+/* =========================== Instructions API ======================= */
+
+/** Instructions delimiter configuration */
+export type InstructionsDelimiter =
+  | { kind: "hr" }
+  | { kind: "heading"; level?: 1 | 2 | 3 | 4 | 5 | 6 };
+
+/** Strongly-typed instruction payload for a block or module region */
+export interface Instructions {
+  readonly nodes: ReadonlyArray<RootContent>;
+  readonly markdown: string;
+  readonly text: string;
+}
+
+/** A documented code cell: base CodeCell plus optional instructions */
+export type DocumentedCodeCell<
+  Attrs extends Record<string, unknown> = Record<string, unknown>,
+> = CodeCell<Attrs> & { readonly instructions?: Instructions };
+
+/** Discriminated union: narrowing by `kind` gives you the right shape */
+export type DocumentedCell<
+  Attrs extends Record<string, unknown> = Record<string, unknown>,
+> = DocumentedCodeCell<Attrs> | MarkdownCell;
+
+/** Notebook annotated with header/appendix instructions and documented cells */
+export type DocumentedNotebook<
+  FM extends Record<string, unknown>,
+  Attrs extends Record<string, unknown>,
+  I extends Issue = Issue,
+> = {
+  readonly notebook: Notebook<FM, Attrs, I>;
+  readonly cells: ReadonlyArray<DocumentedCell<Attrs>>;
+  readonly instructions?: Instructions;
+  readonly appendix?: Instructions;
+};
+
+function stringifyNodesForInstr(nodes: ReadonlyArray<RootContent>): string {
+  const root: Root = { type: "root", children: nodes.slice() as RootContent[] };
+  return String(processor.stringify(root));
+}
+
+function textOfNodesForInstr(nodes: ReadonlyArray<RootContent>): string {
+  return nodes.map((n) => mdToString(n)).join("\n").trim();
+}
+
+function mkInstructions(
+  nodes: ReadonlyArray<RootContent>,
+): Instructions | undefined {
+  if (!nodes.length) return undefined;
+  return {
+    nodes,
+    markdown: stringifyNodesForInstr(nodes),
+    text: textOfNodesForInstr(nodes),
+  };
+}
+
+function isDelimiterNode(
+  n: RootContent,
+  delim: InstructionsDelimiter,
+): boolean {
+  if (delim.kind === "hr") return n.type === "thematicBreak";
+  if (n.type !== "heading") return false;
+  return typeof delim.level === "number" ? n.depth === delim.level : true;
+}
+
+function isAsyncIterable<T>(
+  obj: unknown,
+): obj is AsyncIterable<T> {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    typeof (obj as { [Symbol.asyncIterator]?: () => AsyncIterator<unknown> })[
+        Symbol.asyncIterator
+      ] === "function"
+  );
+}
+
+/**
+ * documentedNotebooks
+ * -------------------
+ * Uses the mdast cache inside Notebook.ast to:
+ * - Build notebook-level `instructions` (header) from ast.nodesBeforeFirstCode
+ * - Build notebook-level `appendix`   from ast.nodesAfterLastCode
+ * - Walk markdown cells (via ast.mdastByCell) with a buffer that resets at delimiters.
+ *   When a code cell is hit, attach the buffered nodes as `instructions` to that cell.
+ *
+ * Default delimiter: heading level 2 (##).
+ */
+export async function* documentedNotebooks<
+  FM extends Record<string, unknown>,
+  Attrs extends Record<string, unknown>,
+  I extends Issue = Issue,
+>(
+  input:
+    | AsyncIterable<Notebook<FM, Attrs, I>>
+    | Iterable<Notebook<FM, Attrs, I>>,
+  delimiter: InstructionsDelimiter = { kind: "heading", level: 2 },
+): AsyncIterable<DocumentedNotebook<FM, Attrs, I>> {
+  const iterable: AsyncIterable<Notebook<FM, Attrs, I>> = isAsyncIterable<
+      Notebook<FM, Attrs, I>
+    >(input)
+    ? (input as AsyncIterable<Notebook<FM, Attrs, I>>)
+    : (async function* () {
+      for (const n of input as Iterable<Notebook<FM, Attrs, I>>) yield n;
+    })();
+
+  for await (const nb of iterable) {
+    const { mdastByCell, nodesBeforeFirstCode, nodesAfterLastCode } = nb.ast;
+
+    // Notebook-level regions (ignore delimiters for these)
+    const headerInstr = mkInstructions(nodesBeforeFirstCode);
+    const appendixInstr = mkInstructions(nodesAfterLastCode);
+
+    // Per-code-cell buffer logic over markdown cells
+    const buffer: RootContent[] = [];
+    const outCells: DocumentedCell<Attrs>[] = [];
+
+    for (let i = 0; i < nb.cells.length; i++) {
+      const c = nb.cells[i];
+      const nodes = mdastByCell[i]; // null for code, mdast[] for markdown
+
+      if (nodes) {
+        // markdown cell -> feed nodes into buffer with delimiter behavior
+        for (const n of nodes) {
+          if (isDelimiterNode(n, delimiter)) {
+            buffer.length = 0; // clear
+            if (delimiter.kind === "heading" && n.type === "heading") {
+              buffer.push(n); // seed with heading
+            }
+            continue;
+          }
+          buffer.push(n);
+        }
+        outCells.push(c); // unchanged markdown cell
+        continue;
+      }
+
+      // code cell -> attach current buffer (if any), then clear
+      const instr = mkInstructions(buffer);
+      const docCell: DocumentedCell<Attrs> = c.kind === "code" && instr
+        ? { ...c, instructions: instr }
+        : c;
+      outCells.push(docCell);
+      buffer.length = 0;
+    }
+
+    yield {
+      notebook: nb,
+      cells: outCells,
+      instructions: headerInstr,
+      appendix: appendixInstr,
+    };
+  }
 }
 
 /* =========================== Tiny Runtime & Type Guards ============== */
 
+/** mdast position helper shapes (kept local, no `any`) */
 type Pos = { line?: number };
 type Position = { start?: Pos; end?: Pos };
 type WithPosition = { position?: Position };
 
+/** Treat unknown node shapes safely */
 type YamlNode = { type: "yaml"; value?: string } & WithPosition;
 type HrNode = { type: "thematicBreak" } & WithPosition;
 type HtmlNode = { type: "html" } & WithPosition;
@@ -406,7 +624,9 @@ function isReadableStream(x: unknown): x is ReadableStream<Uint8Array> {
   return typeof ReadableStream !== "undefined" && x instanceof ReadableStream;
 }
 
-async function readStreamToText(rs: ReadableStream<Uint8Array>) {
+async function readStreamToText(
+  rs: ReadableStream<Uint8Array>,
+): Promise<string> {
   const reader = rs.getReader();
   const chunks: Uint8Array[] = [];
   try {
