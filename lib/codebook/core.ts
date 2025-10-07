@@ -37,18 +37,23 @@ import { remark } from "npm:remark@^15";
 
 /* =========================== Public Types =========================== */
 
-export type Source = string | ReadableStream<Uint8Array>;
-export type SourceStream =
-  | Source
-  | AsyncIterable<Source>
-  | AsyncIterator<Source>;
+export type Source<Provenance> = {
+  provenance: Provenance;
+  content: string | ReadableStream<Uint8Array>;
+};
+
+export type SourceStream<Provenance> =
+  | Source<Provenance>
+  | AsyncIterable<Source<Provenance>>
+  | AsyncIterator<Source<Provenance>>;
 
 /** Includes "lint" for enrichment/lint-stage findings. */
 export type IssueDisposition = "error" | "warning" | "lint";
 
 /** Built-in issue variants (non-generic) */
-export type FrontmatterIssue = {
+export type FrontmatterIssue<Provenance> = {
   kind: "frontmatter-parse";
+  provenance: Provenance;
   message: string;
   raw: unknown;
   error: unknown;
@@ -57,8 +62,9 @@ export type FrontmatterIssue = {
   disposition: IssueDisposition;
 };
 
-export type FenceAttrsIssue = {
+export type FenceAttrsIssue<Provenance> = {
   kind: "fence-attrs-json5-parse";
+  provenance: Provenance;
   message: string;
   metaText?: string;
   error: unknown;
@@ -68,7 +74,9 @@ export type FenceAttrsIssue = {
 };
 
 /** Base Issue union (non-generic) */
-export type Issue = FrontmatterIssue | FenceAttrsIssue;
+export type Issue<Provenance> =
+  | FrontmatterIssue<Provenance>
+  | FenceAttrsIssue<Provenance>;
 
 /**
  * DX note:
@@ -78,9 +86,11 @@ export type Issue = FrontmatterIssue | FenceAttrsIssue;
  *     type MyNotebook = Notebook<FM, Attrs, MyIssue>;
  */
 export type CodeCell<
+  Provenance,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
 > = {
   kind: "code";
+  provenance: Provenance;
   language: string; // fence lang or "text"
   source: string; // fence body
   attrs: Attrs; // JSON5 from fence meta {...}
@@ -89,8 +99,9 @@ export type CodeCell<
   endLine?: number;
 };
 
-export type MarkdownCell = {
+export type MarkdownCell<Provenance> = {
   kind: "markdown";
+  provenance: Provenance;
   markdown: string; // normalized markdown slice
   text: string; // plain text best-effort
   startLine?: number;
@@ -98,10 +109,11 @@ export type MarkdownCell = {
 };
 
 export type Cell<
+  Provenance,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
 > =
-  | CodeCell<Attrs>
-  | MarkdownCell;
+  | CodeCell<Provenance, Attrs>
+  | MarkdownCell<Provenance>;
 
 /** Per-notebook, cache of top-level mdast computed during parse (no need to re-parse later). */
 export type NotebookAstCache = {
@@ -116,45 +128,62 @@ export type NotebookAstCache = {
 };
 
 export type Notebook<
+  Provenance,
   FM extends Record<string, unknown> = Record<string, unknown>,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
-  I extends Issue = Issue,
+  I extends Issue<Provenance> = Issue<Provenance>,
 > = {
   fm: FM; // {} if none/empty
-  cells: Cell<Attrs>[];
+  cells: Cell<Provenance, Attrs>[];
   issues: I[]; // allows extended issue types that include the base Issue shape
   /** mdast cache produced by the core parser (no need to re-parse later) */
   ast: NotebookAstCache;
+  provenance: Provenance;
 };
 
 /* =========================== Public API ============================== */
 
-/** Normalize heterogeneous inputs to full-document strings. */
-export async function* normalizeSources(
-  input: SourceStream,
-): AsyncIterable<string> {
-  if (typeof input === "string") {
-    yield input;
-    return;
-  }
-  if (isReadableStream(input)) {
-    yield await readStreamToText(input);
-    return;
+function isSourceObject<Provenance>(x: unknown): x is Source<Provenance> {
+  return typeof x === "object" && x !== null &&
+    "content" in (x as Record<string, unknown>);
+}
+
+/**
+ * Normalize heterogeneous inputs of { content: string|ReadableStream } to full-document strings.
+ * Note: We intentionally *do not* propagate `identity` here to keep the downstream API stable.
+ * If you later want identity-aware parsing, we can thread it through a separate helper.
+ */
+export async function* normalizeSources<Provenance>(
+  input: SourceStream<Provenance>,
+): AsyncIterable<[Provenance, string]> {
+  // Single Source object
+  if (isSourceObject(input)) {
+    const { provenance, content } = input;
+    if (typeof content === "string") {
+      yield [provenance, content];
+      return;
+    }
+    throw new TypeError("Unsupported Source.content type");
   }
 
+  // Async iterator / async iterable of Source
   const it = isAsyncIterator(input)
-    ? (input as AsyncIterator<Source>)
-    : (input as AsyncIterable<Source>)[Symbol.asyncIterator]();
+    ? (input as AsyncIterator<Source<Provenance>>)
+    : (input as AsyncIterable<Source<Provenance>>)[Symbol.asyncIterator]();
 
   while (true) {
     const { value, done } = await it.next();
     if (done) break;
-    if (typeof value === "string") {
-      yield value;
-    } else if (isReadableStream(value)) {
-      yield await readStreamToText(value);
+    if (!isSourceObject(value)) {
+      throw new TypeError("Stream yielded a non-Source value");
+    }
+    const { provenance, content } = value;
+    if (typeof content === "string") {
+      yield [provenance, content];
+    } else if (isReadableStream(content)) {
+      yield [provenance, await readStreamToText(content)];
     } else {
-      throw new TypeError("Unsupported source in stream");
+      throw new TypeError("Unsupported Source.content type");
     }
   }
 }
@@ -164,12 +193,15 @@ export async function* normalizeSources(
  * `FM` and `Attrs` are inferred; `I` allows extended issue shapes (defaults to base `Issue`).
  */
 export async function* notebooks<
+  Provenance,
   FM extends Record<string, unknown> = Record<string, unknown>,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
-  I extends Issue = Issue,
->(input: SourceStream): AsyncGenerator<Notebook<FM, Attrs, I>> {
-  for await (const text of normalizeSources(input)) {
-    const nb = parseDocument<FM, Attrs, I>(text);
+  I extends Issue<Provenance> = Issue<Provenance>,
+>(
+  input: SourceStream<Provenance>,
+): AsyncGenerator<Notebook<Provenance, FM, Attrs, I>> {
+  for await (const [provenance, src] of normalizeSources(input)) {
+    const nb = parseDocument<Provenance, FM, Attrs, I>(provenance, src);
     yield nb;
   }
 }
@@ -182,10 +214,11 @@ const processor = remark().use(remarkFrontmatter).use(remarkGfm).use(
 
 /** Parse a single Markdown document into a Notebook<FM, Attrs, I>. */
 function parseDocument<
+  Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
-  I extends Issue,
->(source: string): Notebook<FM, Attrs, I> {
+  I extends Issue<Provenance>,
+>(provenance: Provenance, source: string) {
   type Dict = Record<string, unknown>;
 
   const issues: I[] = [];
@@ -208,8 +241,9 @@ function parseDocument<
         try {
           fmRaw = (YAMLparse(raw) as Dict) ?? {};
         } catch (error) {
-          const base: FrontmatterIssue = {
+          const base: FrontmatterIssue<Provenance> = {
             kind: "frontmatter-parse",
+            provenance,
             message: "Frontmatter YAML failed to parse.",
             raw,
             error,
@@ -274,8 +308,9 @@ function parseDocument<
     try {
       return JSON5.parse(jsonish) as Attrs;
     } catch (error) {
-      const base: FenceAttrsIssue = {
+      const base: FenceAttrsIssue<Provenance> = {
         kind: "fence-attrs-json5-parse",
+        provenance,
         message: "Invalid JSON5 in fence attributes.",
         metaText: jsonish,
         error,
@@ -286,7 +321,7 @@ function parseDocument<
     }
   };
 
-  const cells: Cell<Attrs>[] = [];
+  const cells: Cell<Provenance, Attrs>[] = [];
 
   // mdast cache we’ll fill during parse
   const mdastByCell: Array<ReadonlyArray<RootContent> | null> = [];
@@ -321,8 +356,9 @@ function parseDocument<
     const markdown = stringifyNodes(nodes);
     const text = plainTextOfNodes(nodes);
     const { start, end } = rangePos(nodes);
-    const mdCell: MarkdownCell = {
+    const mdCell: MarkdownCell<Provenance> = {
       kind: "markdown",
+      provenance,
       markdown,
       text,
       startLine: start,
@@ -372,8 +408,9 @@ function parseDocument<
         }
       }
 
-      const codeCell: CodeCell<Attrs> = {
+      const codeCell: CodeCell<Provenance, Attrs> = {
         kind: "code",
+        provenance,
         language: lang,
         source: String(node.value ?? ""),
         attrs,
@@ -414,7 +451,8 @@ function parseDocument<
       nodesAfterLastCode,
       codeCellIndices,
     },
-  } as Notebook<FM, Attrs, I>;
+    provenance,
+  } satisfies Notebook<Provenance, FM, Attrs, I>;
 }
 
 /* =========================== Instructions API ======================= */
@@ -433,22 +471,25 @@ export interface Instructions {
 
 /** A documented code cell: base CodeCell plus optional instructions */
 export type DocumentedCodeCell<
+  Provenance,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
-> = CodeCell<Attrs> & { readonly instructions?: Instructions };
+> = CodeCell<Provenance, Attrs> & { readonly instructions?: Instructions };
 
 /** Discriminated union: narrowing by `kind` gives you the right shape */
 export type DocumentedCell<
+  Provenance,
   Attrs extends Record<string, unknown> = Record<string, unknown>,
-> = DocumentedCodeCell<Attrs> | MarkdownCell;
+> = DocumentedCodeCell<Provenance, Attrs> | MarkdownCell<Provenance>;
 
 /** Notebook annotated with header/appendix instructions and documented cells */
 export type DocumentedNotebook<
+  Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
-  I extends Issue = Issue,
+  I extends Issue<Provenance> = Issue<Provenance>,
 > = {
-  readonly notebook: Notebook<FM, Attrs, I>;
-  readonly cells: ReadonlyArray<DocumentedCell<Attrs>>;
+  readonly notebook: Notebook<Provenance, FM, Attrs, I>;
+  readonly cells: ReadonlyArray<DocumentedCell<Provenance, Attrs>>;
   readonly instructions?: Instructions;
   readonly appendix?: Instructions;
 };
@@ -506,22 +547,26 @@ function isAsyncIterable<T>(
  * Default delimiter: heading level 2 (##).
  */
 export async function* documentedNotebooks<
+  Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
-  I extends Issue = Issue,
+  I extends Issue<Provenance> = Issue<Provenance>,
 >(
   input:
-    | AsyncIterable<Notebook<FM, Attrs, I>>
-    | Iterable<Notebook<FM, Attrs, I>>,
+    | AsyncIterable<Notebook<Provenance, FM, Attrs, I>>
+    | Iterable<Notebook<Provenance, FM, Attrs, I>>,
   delimiter: InstructionsDelimiter = { kind: "heading", level: 2 },
-): AsyncIterable<DocumentedNotebook<FM, Attrs, I>> {
-  const iterable: AsyncIterable<Notebook<FM, Attrs, I>> = isAsyncIterable<
-      Notebook<FM, Attrs, I>
-    >(input)
-    ? (input as AsyncIterable<Notebook<FM, Attrs, I>>)
-    : (async function* () {
-      for (const n of input as Iterable<Notebook<FM, Attrs, I>>) yield n;
-    })();
+): AsyncIterable<DocumentedNotebook<Provenance, FM, Attrs, I>> {
+  const iterable: AsyncIterable<Notebook<Provenance, FM, Attrs, I>> =
+    isAsyncIterable<
+        Notebook<Provenance, FM, Attrs, I>
+      >(input)
+      ? (input as AsyncIterable<Notebook<Provenance, FM, Attrs, I>>)
+      : (async function* () {
+        for (const n of input as Iterable<Notebook<Provenance, FM, Attrs, I>>) {
+          yield n;
+        }
+      })();
 
   for await (const nb of iterable) {
     const { mdastByCell, nodesBeforeFirstCode, nodesAfterLastCode } = nb.ast;
@@ -532,10 +577,10 @@ export async function* documentedNotebooks<
 
     // Per-code-cell buffer logic over markdown cells
     const buffer: RootContent[] = [];
-    const outCells: DocumentedCell<Attrs>[] = [];
+    const outCells: DocumentedCell<Provenance, Attrs>[] = [];
 
     for (let i = 0; i < nb.cells.length; i++) {
-      const c = nb.cells[i];
+      const c = nb.cells[i] as unknown as Cell<Provenance, Attrs>;
       const nodes = mdastByCell[i]; // null for code, mdast[] for markdown
 
       if (nodes) {
@@ -556,9 +601,8 @@ export async function* documentedNotebooks<
 
       // code cell -> attach current buffer (if any), then clear
       const instr = mkInstructions(buffer);
-      const docCell: DocumentedCell<Attrs> = c.kind === "code" && instr
-        ? { ...c, instructions: instr }
-        : c;
+      const docCell: DocumentedCell<Provenance, Attrs> =
+        c.kind === "code" && instr ? { ...c, instructions: instr } : c;
       outCells.push(docCell);
       buffer.length = 0;
     }

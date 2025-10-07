@@ -18,14 +18,14 @@ import {
 
 // Generic, attrs-preserving type guards
 function isCode<T extends Record<string, unknown>>(
-  c: Cell<T>,
-): c is CodeCell<T> {
+  c: Cell<string, T>,
+): c is CodeCell<string, T> {
   return c.kind === "code";
 }
 
 function isMarkdown<T extends Record<string, unknown>>(
-  c: Cell<T>,
-): c is MarkdownCell {
+  c: Cell<string, T>,
+): c is MarkdownCell<string> {
   return c.kind === "markdown";
 }
 
@@ -39,8 +39,10 @@ Deno.test("Markdown Notebook core - complex fixture", async (t) => {
   const md = await loadFixture();
 
   // Parse with the core — pass a single string (valid Source)
-  const out: Notebook[] = [];
-  for await (const nb of notebooks(md)) out.push(nb);
+  const out: Notebook<string>[] = [];
+  for await (const nb of notebooks({ provenance: "prime", content: md })) {
+    out.push(nb);
+  }
 
   assertEquals(out.length, 1, "expected exactly one notebook");
   const nb = out[0];
@@ -79,14 +81,16 @@ Deno.test("Markdown Notebook core - complex fixture", async (t) => {
 
   await t.step("sql code cell - language, info, attrs, and content", () => {
     const cell = nb.cells[3];
-    assert(isCode(cell));
-    assertEquals(cell.language, "sql");
-    assertEquals(cell.info, "attrs");
-    assertEquals(cell.attrs, { id: 1, name: "patients", dryRun: true });
-    assertMatch(cell.source, /SELECT\s+id/i);
-    assert(
-      typeof cell.startLine === "number" && typeof cell.endLine === "number",
-    );
+    assert(isCode(cell as Cell<string, Record<string, unknown>>));
+    if (isCode(cell)) {
+      assertEquals(cell.language, "sql");
+      assertEquals(cell.info, "attrs");
+      assertEquals(cell.attrs, { id: 1, name: "patients", dryRun: true });
+      assertMatch(cell.source, /SELECT\s+id/i);
+      assert(
+        typeof cell.startLine === "number" && typeof cell.endLine === "number",
+      );
+    }
   });
 
   await t.step("markdown after sql - narrative preserved", () => {
@@ -161,8 +165,10 @@ Deno.test("documentedNotebooks — default delimiter (H2 headings)", async () =>
   const md = await loadFixture();
 
   // Parse with core (generic defaults OK: FM/Attrs inferred, Issue = base Issue)
-  const parsed: Notebook[] = [];
-  for await (const nb of notebooks(md)) parsed.push(nb);
+  const parsed: Notebook<string>[] = [];
+  for await (const nb of notebooks({ provenance: "prime", content: md })) {
+    parsed.push(nb);
+  }
 
   assertEquals(parsed.length, 1);
   const nb = parsed[0];
@@ -174,9 +180,10 @@ Deno.test("documentedNotebooks — default delimiter (H2 headings)", async () =>
 
   // Enrich with documented notebooks (default delimiter: { kind: "heading", level: 2 })
   const outs: DocumentedNotebook<
+    string,
     Record<string, unknown>,
     Record<string, unknown>,
-    Issue
+    Issue<string>
   >[] = [];
   for await (const out of documentedNotebooks(parsed)) outs.push(out);
 
@@ -207,7 +214,7 @@ Deno.test("documentedNotebooks — default delimiter (H2 headings)", async () =>
 
   // Helper to pick code cells by language in order
   const code = (lang: string, idx = 0) => {
-    const all = doc.cells.filter((c): c is DocumentedCodeCell =>
+    const all = doc.cells.filter((c): c is DocumentedCodeCell<string> =>
       c.kind === "code" && c.language === lang
     );
     return all[idx];
@@ -222,7 +229,8 @@ Deno.test("documentedNotebooks — default delimiter (H2 headings)", async () =>
   const csv = code("csv")!;
   const fish = code("fish")!;
   const plainTextCell = doc.cells.find(
-    (c): c is DocumentedCodeCell => c.kind === "code" && c.language === "text",
+    (c): c is DocumentedCodeCell<string> =>
+      c.kind === "code" && c.language === "text",
   )!;
 
   // ---------- Per-code-cell instructions with H2 delimiter ----------
@@ -265,14 +273,17 @@ Deno.test("documentedNotebooks — default delimiter (H2 headings)", async () =>
 Deno.test("documentedNotebooks — alternative delimiter (thematic breaks / hr)", async () => {
   const md = await loadFixture();
 
-  const parsed: Notebook[] = [];
-  for await (const nb of notebooks(md)) parsed.push(nb);
+  const parsed: Notebook<string>[] = [];
+  for await (const nb of notebooks({ provenance: "prime", content: md })) {
+    parsed.push(nb);
+  }
   assertEquals(parsed.length, 1);
 
   const outs: DocumentedNotebook<
+    string,
     Record<string, unknown>,
     Record<string, unknown>,
-    Issue
+    Issue<string>
   >[] = [];
   for await (const out of documentedNotebooks(parsed, { kind: "hr" })) {
     outs.push(out);
@@ -285,7 +296,8 @@ Deno.test("documentedNotebooks — alternative delimiter (thematic breaks / hr)"
   // should still include the H2 "Section A" heading and its intro paragraph (since they are
   // after that HR). This ensures behavior remains sensible with HR-based delimiting.
   const sql = doc.cells.find(
-    (c): c is DocumentedCodeCell => c.kind === "code" && c.language === "sql",
+    (c): c is DocumentedCodeCell<string> =>
+      c.kind === "code" && c.language === "sql",
   )!;
   assert(
     sql.instructions,

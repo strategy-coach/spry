@@ -1,5 +1,11 @@
 import { z } from "jsr:@zod/zod@4";
-import type { CodeCell, Issue, Notebook } from "./core.ts";
+import type {
+  CodeCell,
+  DocumentedCodeCell,
+  DocumentedNotebook,
+  Issue,
+  Notebook,
+} from "./core.ts";
 
 type Asyncish<T> = AsyncIterable<T> | Iterable<T>;
 
@@ -29,12 +35,13 @@ function toAsync<T>(it: Asyncish<T>): AsyncIterable<T> {
  * - Seniors: provide a custom `I` with extra fields (e.g., origin) and type your stream as Notebook<..., I>.
  */
 export async function* safeFrontmatter<
+  Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
-  I extends Issue = Issue,
+  I extends Issue<Provenance> = Issue<Provenance>,
 >(
   fmSchema: z.ZodSchema<FM>,
-  input: Asyncish<Notebook<FM, Attrs, I>>,
+  input: Asyncish<Notebook<Provenance, FM, Attrs, I>>,
 ) {
   for await (const nb of toAsync(input)) {
     const zodParseResult = fmSchema.safeParse(nb.fm);
@@ -61,8 +68,9 @@ export async function* safeFrontmatter<
           if ("received" in maybe) errPayload.received = maybe.received;
         }
 
-        const issueBase: Issue = {
+        const issueBase: Issue<Provenance> = {
           kind: "frontmatter-parse",
+          provenance: nb.provenance,
           disposition: "error",
           message,
           raw: nb.fm,
@@ -83,19 +91,20 @@ export async function* safeFrontmatter<
  * Supports custom issue shape `I` on the target notebook (extends base Issue).
  */
 export async function* enrichCodeCells<
+  Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
-  I extends Issue = Issue,
+  I extends Issue<Provenance> = Issue<Provenance>,
 >(
   callback: (
-    cell: CodeCell<Attrs>,
+    cell: CodeCell<Provenance, Attrs>,
     ctx: {
       fm: FM;
       cellIndex: number;
       registerIssue: (issue: I) => void;
     },
   ) => void | Promise<void>,
-  input: Asyncish<Notebook<FM, Attrs, I>>,
+  input: Asyncish<Notebook<Provenance, FM, Attrs, I>>,
 ) {
   for await (const nb of toAsync(input)) {
     const registerIssue = (issue: I) => nb.issues.push(issue);
@@ -103,11 +112,45 @@ export async function* enrichCodeCells<
     for (let i = 0; i < nb.cells.length; i++) {
       const c = nb.cells[i];
       if (c.kind !== "code") continue;
-      await callback(c as CodeCell<Attrs>, {
+      await callback(c as CodeCell<Provenance, Attrs>, {
         fm: nb.fm,
         cellIndex: i,
         registerIssue,
       });
+    }
+
+    yield nb;
+  }
+}
+
+/**
+ * Enrich each documented code cell via callback; mutate in place; register
+ * issues. Supports custom issue shape `I` on the target notebook (extends
+ * base Issue).
+ */
+export async function* enrichDocCodeCells<
+  Provenance,
+  FM extends Record<string, unknown>,
+  Attrs extends Record<string, unknown>,
+  I extends Issue<Provenance> = Issue<Provenance>,
+>(
+  callback: (
+    cell: DocumentedCodeCell<Provenance, Attrs>,
+    ctx: {
+      nb: DocumentedNotebook<Provenance, FM, Attrs, I>;
+      cellIndex: number;
+      registerIssue: (issue: I) => void;
+    },
+  ) => void | Promise<void>,
+  input: Asyncish<DocumentedNotebook<Provenance, FM, Attrs, I>>,
+) {
+  for await (const nb of toAsync(input)) {
+    const registerIssue = (issue: I) => nb.notebook.issues.push(issue);
+
+    for (let i = 0; i < nb.cells.length; i++) {
+      const c = nb.cells[i];
+      if (c.kind !== "code") continue;
+      await callback(c, { nb, cellIndex: i, registerIssue });
     }
 
     yield nb;
