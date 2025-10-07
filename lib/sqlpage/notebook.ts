@@ -47,6 +47,7 @@
  * - SqlFenceTyped<M>: SqlFenceBase plus attrsSafe when validation succeeds.
  * - SqlPageContentIssue: Union of core parsing issues and attribute-validation issues.
  * - AttrSchemasConfig<FM, M>: Language to Zod schema (or factory) mapping.
+ * - AttrSetupFn / AttrSetupConfig: Per-language/global callbacks to mutate attrs before validation.
  * - BinaryStream: ReadableStream<Uint8Array> alias for streaming inputs.
  * - SqlPageConf: Type for the validated sqlpage.json configuration object.
  *
@@ -93,8 +94,20 @@
  *   yield { identifier: "inline.md", markdown: md };
  * }
  *
- * // Build content with defaults
- * const content = new SqlPageContentBuilder().build(sources());
+ * // Build content with defaults and a pre-validation setup for sql blocks
+ * const content = new SqlPageContentBuilder()
+ *   .withAttrSetup({
+ *     sql: ({ raw }) => {
+ *       // Example: default 'kind' to 'page' when a path is provided
+ *       if (raw && typeof raw === "object" && "path" in raw && !("kind" in raw)) {
+ *         return { ...raw, kind: "page" };
+ *       }
+ *       return raw;
+ *     },
+ *   })
+ *   // Optional global setup that runs before the per-language setup
+ *   .withGlobalAttrSetup(({ raw }) => raw)
+ *   .build(sources());
  *
  * // Option A: Emit files to a SQLPage-compatible tree
  * const mat = new SqlPageMaterializer(content, { srcHome: "./app" });
@@ -112,6 +125,7 @@
  * console.log(summary);
  */
 import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
+import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 import { dirname, join as pathJoin } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import type { Root } from "npm:@types/mdast@^4";
@@ -123,7 +137,7 @@ import {
   type IssueDisposition,
   NotebookBuilder,
 } from "../universal/md-notebook.ts";
-import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
+import { routeAnnSchema } from "../assembler/mod.ts";
 
 /* ---------------------------------- Types -------------------------------- */
 
@@ -155,67 +169,79 @@ export type SqlPageContentIssue =
     zodError: unknown;
   };
 
+/** Pre-validation setup callback that can mutate attrs before Zod validation. */
+export type AttrSetupFn<FM> = (ctx: {
+  /** Frontmatter (already validated at the doc level) */
+  fm: FM;
+  /** Fenced language (e.g., "sql") */
+  lang: string;
+  /** Source identifier of the markdown being parsed */
+  sourceId: string;
+  /** 0-based index of the block within source */
+  blockIndex: number;
+  /** The fence being validated (without attrsSafe applied) */
+  fence: SqlFenceBase;
+  /**
+   * The merged attributes that would be validated:
+   * resolvedAttrs ?? attrs (i.e., after section-defaults resolution, if enabled)
+   */
+  raw: Record<string, unknown>;
+}) => Record<string, unknown>;
+
+export type AttrSetupConfig<FM> = Partial<Record<string, AttrSetupFn<FM>>>;
+
 /* -------------------------- Default schemas (safe) ------------------------ */
 
 // ----- SQLPage configuration schema (frontmatter-friendly) -----
-// Covers keys documented across SQLPage docs & guides.
-// Notes:
-// - Accepts a nested `oidc` object in frontmatter for ergonomics.
-// - Also accepts flat OIDC keys (`oidc_*`) since SQLPage uses flat keys in json.
-// - `sqlPageConf()` below will flatten `oidc` to the flat keys for the final JSON.
-//
-// Sources (docs):
-// - database_url, listen_on, web_root: quickstart guide. :contentReference[oaicite:0]{index=0}
-// - https_domain: blog post about HTTPS. :contentReference[oaicite:1]{index=1}
-// - site_prefix: reverse proxy/nginx example & routing post. :contentReference[oaicite:2]{index=2}
-// - allow_exec: exec() function docs. :contentReference[oaicite:3]{index=3}
-// - max_uploaded_file_size: doc/blog. :contentReference[oaicite:4]{index=4}
-// - environment (production/development): docker hub env var. :contentReference[oaicite:5]{index=5}
-// - OIDC (issuer/client/secret) & host: SSO page. :contentReference[oaicite:6]{index=6}
-// - database_password: maintainer discussion (newer addition). Treat as optional. :contentReference[oaicite:7]{index=7}
-export const sqlPageConfSchema = z.object({
-  // Core server & DB
-  database_url: z.string().min(1).optional(),
-  database_password: z.string().min(1).optional(), // optional, supported in newer versions
-  listen_on: z.string().min(1).optional(), // e.g. "0.0.0.0:8080"
-  web_root: z.string().min(1).optional(),
+export const sqlPageConfSchema = z
+  .object({
+    // Core server & DB
+    database_url: z.string().min(1).optional(),
+    database_password: z.string().min(1).optional(), // optional, supported in newer versions
+    listen_on: z.string().min(1).optional(), // e.g. "0.0.0.0:8080"
+    web_root: z.string().min(1).optional(),
 
-  // Routing / base path
-  site_prefix: z.string().min(1).optional(), // e.g. "/sqlpage"
+    // Routing / base path
+    site_prefix: z.string().min(1).optional(), // e.g. "/sqlpage"
 
-  // HTTPS / host
-  https_domain: z.string().min(1).optional(), // e.g. "example.com"
-  host: z.string().min(1).optional(), // required by SSO; must match domain exactly
+    // HTTPS / host
+    https_domain: z.string().min(1).optional(), // e.g. "example.com"
+    host: z.string().min(1).optional(), // required by SSO; must match domain exactly
 
-  // Security / limits
-  allow_exec: z.boolean().optional(),
-  max_uploaded_file_size: z.number().int().positive().optional(),
+    // Security / limits
+    allow_exec: z.boolean().optional(),
+    max_uploaded_file_size: z.number().int().positive().optional(),
 
-  // Environment
-  environment: z.enum(["production", "development"]).optional(),
+    // Environment
+    environment: z.enum(["production", "development"]).optional(),
 
-  // Frontmatter-friendly nested OIDC
-  oidc: z.object({
-    issuer_url: z.string().min(1),
-    client_id: z.string().min(1),
-    client_secret: z.string().min(1),
-    scopes: z.array(z.string()).optional(),
-    redirect_path: z.string().min(1).optional(),
-  }).optional(),
+    // Frontmatter-friendly nested OIDC
+    oidc: z
+      .object({
+        issuer_url: z.string().min(1),
+        client_id: z.string().min(1),
+        client_secret: z.string().min(1),
+        scopes: z.array(z.string()).optional(),
+        redirect_path: z.string().min(1).optional(),
+      })
+      .optional(),
 
-  // Also accept already-flat OIDC keys (as SQLPage expects in json)
-  oidc_issuer_url: z.string().min(1).optional(),
-  oidc_client_id: z.string().min(1).optional(),
-  oidc_client_secret: z.string().min(1).optional(),
-}).catchall(z.unknown());
+    // Also accept already-flat OIDC keys (as SQLPage expects in json)
+    oidc_issuer_url: z.string().min(1).optional(),
+    oidc_client_id: z.string().min(1).optional(),
+    oidc_client_secret: z.string().min(1).optional(),
+  })
+  .catchall(z.unknown());
 
 export type SqlPageConf = z.infer<typeof sqlPageConfSchema>;
 
 // --- default frontmatter schema (unchanged except kept .catchall) ---
-const defaultFmSchema = z.object({
-  siteName: z.string().optional(),
-  "sqlpage-conf": sqlPageConfSchema.optional(),
-}).catchall(z.unknown());
+const defaultFmSchema = z
+  .object({
+    siteName: z.string().optional(),
+    "sqlpage-conf": sqlPageConfSchema.optional(),
+  })
+  .catchall(z.unknown());
 
 export const defaultSqlAttrs = z.union([
   // head: strict; optional name
@@ -253,7 +279,8 @@ export const defaultSqlAttrs = z.union([
   z.object({
     kind: z.literal("page").optional().default("page"),
     path: z.string().min(1),
-    shell: z.string().min(1).optional(), // <— NEW: reference a shell by its identifier
+    shell: z.string().min(1).optional(),
+    route: routeAnnSchema.optional(),
   }).catchall(z.unknown()),
 ]);
 
@@ -316,6 +343,12 @@ export class SqlPageContentBuilder<
     ["sql", defaultSqlAttrs as unknown as z.ZodTypeAny],
   ]);
 
+  // NEW: per-language pre-validation setup callbacks
+  #attrSetupMap: Map<string, AttrSetupFn<FM>> = new Map();
+
+  // NEW: optional global setup that runs before per-language setup
+  #globalAttrSetup?: AttrSetupFn<FM>;
+
   #delimiter: InstructionsDelimiter = { kind: "heading", level: 2 };
   #strictAttrValidation = false;
   #enableAttrResolution = true;
@@ -354,6 +387,21 @@ export class SqlPageContentBuilder<
     return this;
   }
 
+  /** Register per-language attribute setup callbacks (run before validation). */
+  withAttrSetup(config: AttrSetupConfig<FM>) {
+    this.#attrSetupMap.clear();
+    for (const [lang, fn] of Object.entries(config)) {
+      if (typeof fn === "function") this.#attrSetupMap.set(lang, fn);
+    }
+    return this;
+  }
+
+  /** Register a global attribute setup callback (runs before per-language setup). */
+  withGlobalAttrSetup(fn?: AttrSetupFn<FM>) {
+    this.#globalAttrSetup = fn;
+    return this;
+  }
+
   withInstructionsDelimiter(d: InstructionsDelimiter) {
     this.#delimiter = d;
     return this;
@@ -383,6 +431,8 @@ export class SqlPageContentBuilder<
     return new SqlPageContent<FM, M>({
       fmSchema: this.#fmSchema,
       attrSchemaMap: new Map(this.#attrSchemaMap),
+      attrSetupMap: new Map(this.#attrSetupMap), // NEW
+      globalAttrSetup: this.#globalAttrSetup, // NEW
       delimiter: this.#delimiter,
       strictAttrValidation: this.#strictAttrValidation,
       enableAttrResolution: this.#enableAttrResolution,
@@ -390,6 +440,28 @@ export class SqlPageContentBuilder<
       confKey: this.#confKey,
       provenance,
     });
+  }
+
+  static typical<
+    FM = z.infer<typeof defaultFmSchema>,
+    M extends AttrMap = { sql: z.infer<typeof defaultSqlAttrs> },
+  >() {
+    return new SqlPageContentBuilder<FM, M>()
+      .withAttrSetup({
+        sql: ({ raw }) => {
+          // the default route.path should be the same as sql path
+          if (
+            raw && typeof raw === "object" && "path" in raw &&
+            ("route" in raw &&
+              (raw.route && typeof raw.route === "object" &&
+                !("path" in raw.route)))
+          ) {
+            const path = (raw as Record<string, unknown>)["path"];
+            return { ...raw, route: { ...raw.route, path } };
+          }
+          return raw;
+        },
+      });
   }
 }
 
@@ -401,6 +473,11 @@ export class SqlPageContent<
 > {
   readonly fmSchema: z.ZodType<FM>;
   readonly attrSchemaMap: Map<string, AttrSchemaEntry<FM>>;
+  /** NEW: per-language pre-validation setup callbacks */
+  readonly attrSetupMap: Map<string, AttrSetupFn<FM>>;
+  /** NEW: global pre-validation setup callback */
+  readonly globalAttrSetup?: AttrSetupFn<FM>;
+
   readonly delimiter: InstructionsDelimiter;
   readonly strictAttrValidation: boolean;
   readonly enableAttrResolution: boolean;
@@ -416,6 +493,10 @@ export class SqlPageContent<
   constructor(init: {
     fmSchema: z.ZodType<FM>;
     attrSchemaMap: Map<string, AttrSchemaEntry<FM>>;
+    /** NEW: per-language setup */
+    attrSetupMap: Map<string, AttrSetupFn<FM>>;
+    /** NEW: global setup */
+    globalAttrSetup?: AttrSetupFn<FM>;
     delimiter: InstructionsDelimiter;
     strictAttrValidation: boolean;
     enableAttrResolution: boolean;
@@ -427,6 +508,8 @@ export class SqlPageContent<
   }) {
     this.fmSchema = init.fmSchema;
     this.attrSchemaMap = init.attrSchemaMap;
+    this.attrSetupMap = init.attrSetupMap;
+    this.globalAttrSetup = init.globalAttrSetup;
     this.delimiter = init.delimiter;
     this.strictAttrValidation = init.strictAttrValidation;
     this.enableAttrResolution = init.enableAttrResolution;
@@ -601,6 +684,61 @@ export class SqlPageContent<
     }) as SqlFenceBase;
   }
 
+  /** Apply global + per-language setup (in that order). */
+  protected applyAttrSetup(
+    fm: FM,
+    base: SqlFenceBase,
+    merged: Record<string, unknown>,
+  ): Record<string, unknown> {
+    let next = merged;
+    // Global first
+    if (this.globalAttrSetup) {
+      next = this.safeSetupInvoke(this.globalAttrSetup, fm, base, next);
+    }
+    // Per-language next
+    const lang = (base as unknown as { lang: string }).lang;
+    const langSetup = this.attrSetupMap.get(lang);
+    if (langSetup) {
+      next = this.safeSetupInvoke(langSetup, fm, base, next);
+    }
+    return next;
+  }
+
+  private safeSetupInvoke(
+    fn: AttrSetupFn<FM>,
+    fm: FM,
+    base: SqlFenceBase,
+    raw: Record<string, unknown>,
+  ): Record<string, unknown> {
+    try {
+      const out = fn({
+        fm,
+        lang: (base as unknown as { lang: string }).lang,
+        sourceId: base.sourceId,
+        blockIndex: base.blockIndex,
+        fence: base,
+        raw,
+      });
+      return isRec(out) ? out : raw;
+    } catch (e) {
+      this.allIssues.push({
+        kind: "attrs-validate",
+        disposition: "warning",
+        message: `Attribute setup callback threw; using original attrs. ${
+          (e as Error)?.message ?? String(e)
+        }`,
+        lang: (base as unknown as { lang: string }).lang,
+        sourceId: base.sourceId,
+        blockIndex: base.blockIndex,
+        startLine: base.startLine,
+        endLine: base.endLine,
+        candidate: raw,
+        zodError: undefined,
+      });
+      return raw;
+    }
+  }
+
   protected validateTypedFence(fm: FM, base: SqlFenceBase) {
     // Control fences should never be typed
     if (this.isControlFence(base)) {
@@ -611,11 +749,18 @@ export class SqlPageContent<
     const sch = this.attrSchemaMap.get(lang);
     if (!sch) return { ok: true as const, attrsSafe: undefined as unknown };
 
-    const merged =
+    const originalMerged =
       ((base as unknown as { resolvedAttrs?: unknown; attrs?: unknown })
         .resolvedAttrs ??
         (base as unknown as { resolvedAttrs?: unknown; attrs?: unknown })
           .attrs) as unknown;
+
+    const merged: Record<string, unknown> = isRec(originalMerged)
+      ? (originalMerged as Record<string, unknown>)
+      : {};
+
+    // NEW: run setup pipeline BEFORE validation
+    const prepared = this.applyAttrSetup(fm, base, merged);
 
     const schema: z.ZodType<unknown> = typeof sch === "function"
       ? (sch as (ctx: { fm: FM; lang: string }) => z.ZodType<unknown>)({
@@ -624,19 +769,20 @@ export class SqlPageContent<
       })
       : (sch as z.ZodType<unknown>);
 
-    const res = (schema as z.ZodTypeAny).safeParse(merged);
+    const res = (schema as z.ZodTypeAny).safeParse(prepared);
     if (res.success) return { ok: true as const, attrsSafe: res.data };
 
     this.allIssues.push({
       kind: "attrs-validate",
       disposition: this.strictAttrValidation ? "error" : "warning",
-      message: `Attributes failed schema validation for language "${lang}".`,
+      message: `Attributes failed schema validation for language "${lang}". ` +
+        z.prettifyError(res.error),
       lang,
       sourceId: (base as unknown as { sourceId: string }).sourceId,
       blockIndex: (base as unknown as { blockIndex: number }).blockIndex,
       startLine: base.startLine,
       endLine: base.endLine,
-      candidate: merged,
+      candidate: prepared, // report the post-setup candidate
       zodError: res.error,
     });
     return { ok: false as const };
@@ -649,9 +795,7 @@ export class SqlPageNotebookCLI<
   FM,
   M extends AttrMap = Record<PropertyKey, never>,
 > {
-  constructor(
-    private readonly builder?: SqlPageContentBuilder<FM, M>,
-  ) {}
+  constructor(private readonly builder?: SqlPageContentBuilder<FM, M>) {}
 
   async run(argv: string[] = Deno.args) {
     const enc = new TextEncoder();
@@ -689,7 +833,7 @@ export class SqlPageNotebookCLI<
             markdown: await Deno.readTextFile(opts.md),
           };
         }
-        const b = this.builder ?? new SqlPageContentBuilder<FM, M>();
+        const b = this.builder ?? SqlPageContentBuilder.typical<FM, M>();
         const content = b.build(sources());
 
         // If --fs is present, materialize files under that root
@@ -715,10 +859,7 @@ export class SqlPageNotebookCLI<
           const json = content.sqlPageConf(fm);
           const dest = opts.conf;
           await ensureDir(dirname(dest));
-          await Deno.writeTextFile(
-            dest,
-            JSON.stringify(json, null, 2),
-          );
+          await Deno.writeTextFile(dest, JSON.stringify(json, null, 2));
         }
       })
       .command("help", new HelpCommand().global())
@@ -967,7 +1108,7 @@ export class SqlPageMaterializer<
       if (kind === "head") {
         // IMPORTANT: name from RAW attrs only (ignore section defaults)
         const rawName = this.asString(
-          ((f as AnyFence<M>).attrs ?? {} as Record<string, unknown>)
+          ((f as AnyFence<M>).attrs ?? ({} as Record<string, unknown>))
             .name as unknown,
         );
         const base = rawName ? sanitizeName(rawName) : zero(headIx++, pad);
@@ -983,7 +1124,7 @@ export class SqlPageMaterializer<
       if (kind === "tail") {
         // IMPORTANT: name from RAW attrs only (ignore section defaults)
         const rawName = this.asString(
-          ((f as AnyFence<M>).attrs ?? {} as Record<string, unknown>)
+          ((f as AnyFence<M>).attrs ?? ({} as Record<string, unknown>))
             .name as unknown,
         );
         const base = rawName ? sanitizeName(rawName) : zero(tailIx++, pad);
@@ -1014,8 +1155,8 @@ export class SqlPageMaterializer<
         (attrsSafe?.path ?? merged.path) as unknown,
       );
       const shellId = this.asString(
-        (attrsSafe as { shell?: unknown })?.shell ??
-          (merged as { shell?: unknown })?.shell,
+        ((attrsSafe as { shell?: unknown })?.shell ??
+          (merged as { shell?: unknown })?.shell) as unknown,
       );
 
       const fileStem = pathAttr ? sanitizeName(pathAttr) : zero(pageIx++, pad);
@@ -1044,8 +1185,11 @@ export class SqlPageMaterializer<
 
       if (
         !kind ||
-        (kind !== "head" && kind !== "tail" && kind !== "page" &&
-          kind !== "shell" && kind !== "partial")
+        (kind !== "head" &&
+          kind !== "tail" &&
+          kind !== "page" &&
+          kind !== "shell" &&
+          kind !== "partial")
       ) {
         await this.handleUnknownKind(f as SqlFenceTyped<M>);
       }

@@ -26,7 +26,7 @@ PRAGMA foreign_keys = ON;
 { name: "defaults-ignored" }
 ```
 
-```sql { kind: "page", path: "admin/index" }
+```sql { kind: "page", path: "admin/index", route: { caption: "test" } }
 select 1;
 ```
 
