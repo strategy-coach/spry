@@ -6,6 +6,7 @@ import {
   type SqlFenceTyped,
   SqlPageCLI,
   SqlPageContentBuilder,
+  SqlPageMaterializer,
 } from "./notebook.ts";
 
 /** Load fixture text via URL relative to this test file */
@@ -106,4 +107,37 @@ Deno.test("SqlPageCLI: run() drains fences and writes sqlpage.json (optional)", 
   // head, page(kind), page(no kind), tail => 4 typed
   assertEquals(res.typedCount, 4);
   assertEquals(res.totalCount, 5);
+});
+
+// NEW top-level test
+Deno.test("SqlPageMaterializer: emitSqlPackage() yields heads, upserts, tails (sqlite)", async () => {
+  const content = await makeContentFromFixture("notebook_test-01.fixture.md");
+  const mat = new SqlPageMaterializer(content, {});
+
+  // Collect the full package stream
+  const parts: string[] = [];
+  for await (const chunk of mat.emitSqlPackage("sqlite")) parts.push(chunk);
+
+  // Sanity: at least head + some upserts + tail
+  assert(parts.length >= 3);
+
+  // Head SQL is first
+  assertEquals(parts[0].trim(), "PRAGMA foreign_keys = ON;");
+
+  // Tail SQL is last
+  assertEquals(parts[parts.length - 1].trim(), "-- done");
+
+  // DML statements are in the middle and target sqlpage_files
+  const dmls = parts.slice(1, -1).filter((s) =>
+    s.startsWith("INSERT INTO sqlpage_files")
+  );
+  // Expect upserts for head, tail, and two pages = 4 statements
+  assertEquals(dmls.length, 4);
+
+  // Paths present in the DML batch
+  const hasHead = dmls.some((s) => s.includes("'sql.d/head/pragma.sql'"));
+  const hasTail = dmls.some((s) => s.includes("'sql.d/tail/000.sql'"));
+  const hasPage1 = dmls.some((s) => s.includes("'admin/index.sql'"));
+  const hasPage2 = dmls.some((s) => s.includes("'users/list.sql'"));
+  assert(hasHead && hasTail && hasPage1 && hasPage2);
 });

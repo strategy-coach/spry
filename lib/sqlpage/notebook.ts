@@ -110,6 +110,7 @@
  * const summary = await cli.run();
  * console.log(summary);
  */
+import { dirname, join as pathJoin } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import type { Root } from "npm:@types/mdast@^4";
 import {
@@ -120,7 +121,6 @@ import {
   type IssueDisposition,
   NotebookBuilder,
 } from "../universal/md-notebook.ts";
-import { dirname, join as pathJoin } from "jsr:@std/path@1";
 
 /* ---------------------------------- Types -------------------------------- */
 
@@ -227,15 +227,30 @@ export const defaultSqlAttrs = z.union([
     name: z.string().min(1).optional(),
   }).catchall(z.unknown()),
 
-  // control fence: never error during core validation
+  // control fence: never typed
   z.object({
     role: z.literal("section-defaults"),
   }).catchall(z.unknown()),
 
-  // page: kind optional with default 'page'; REQUIRED path; allow extras
+  // NEW: shell (regular SQLPage file), track by identifier and path
+  z.object({
+    kind: z.literal("shell"),
+    identifier: z.string().min(1),
+    path: z.string().min(1),
+  }).catchall(z.unknown()),
+
+  // NEW: partial (regular SQLPage file), track by identifier and path
+  z.object({
+    kind: z.literal("partial"),
+    identifier: z.string().min(1),
+    path: z.string().min(1),
+  }).catchall(z.unknown()),
+
+  // page: kind optional; REQUIRED path; may reference a shell by identifier
   z.object({
     kind: z.literal("page").optional().default("page"),
     path: z.string().min(1),
+    shell: z.string().min(1).optional(), // <— NEW: reference a shell by its identifier
   }).catchall(z.unknown()),
 ]);
 
@@ -686,117 +701,174 @@ export class SqlPageCLI<
 
 /* ------------------------------- Materializer ----------------------------- */
 
-export interface SqlPageMaterializerOptions {
-  srcHome: string;
-  padWidth?: number;
-  overwrite?: boolean;
+export interface SqlPageFileEntry {
+  path: string; // relative path (e.g., "sql.d/head/001.sql", "admin/index.sql")
+  contents: string; // file contents
+  lastModified?: Date; // optional timestamp (not used in DML; engine time is used)
+  kind?: "head_sql" | "tail_sql" | "sqlpage_file_insert";
 }
 
+// Internal convenience for attribute access inside the materializer
 type AnyFence<M extends AttrMap> = SqlFenceTyped<M> & {
   attrs?: Record<string, unknown>;
   resolvedAttrs?: Record<string, unknown>;
 };
 
+// ---------- Materializer ----------
 export class SqlPageMaterializer<
   FM,
   M extends AttrMap = Record<PropertyKey, never>,
 > {
+  // cache so we only drain SqlPageContent.SQL() once per instance
+  #entriesCache?: SqlPageFileEntry[];
+
   constructor(
     protected readonly content: SqlPageContent<FM, M>,
-    protected readonly opts: SqlPageMaterializerOptions,
+    protected readonly opts: {
+      padWidth?: number;
+      overwrite?: boolean;
+      srcHome?: string;
+    } = {},
   ) {}
 
-  async emit() {
-    const pad = this.opts.padWidth ?? 3;
+  /**
+   * Async generator that yields the SQLPage files this content would materialize,
+   * without touching the filesystem. Entries have relative paths; callers can
+   * join them to a root with their own logic.
+   *
+   * Order is stable:
+   *  - pass 1: shells/partials (their own files if path provided), then head, then tail
+   *  - pass 2: pages (prepend referenced shell when present)
+   *  - pass 3: unknown kinds (hook only, nothing yielded)
+   */
+  async *collectSqlPageFile(): AsyncGenerator<SqlPageFileEntry, void, unknown> {
+    const list = await this.#getEntries();
+    for (const e of list) yield e;
+  }
+
+  /**
+   * Write collected files to the filesystem under the given root directory.
+   * Returns absolute paths for all written files.
+   */
+  async materializeFs(srcHome: string) {
     const overwrite = this.opts.overwrite ?? true;
-
-    const headDir = pathJoin(this.opts.srcHome, "sql.d", "head");
-    const tailDir = pathJoin(this.opts.srcHome, "sql.d", "tail");
-
-    await ensureDir(headDir);
-    await ensureDir(tailDir);
-
-    let headIx = 0;
-    let tailIx = 0;
-    let pageIx = 0;
-
     const emitted: string[] = [];
-
-    for await (const fence of this.content.SQL()) {
-      const f = fence as AnyFence<M>;
-      const attrsSafe =
-        (f as { attrsSafe?: Record<string, unknown> }).attrsSafe;
-      const merged = (f.resolvedAttrs ?? f.attrs ?? {}) as Record<
-        string,
-        unknown
-      >;
-
-      // Prefer attrsSafe (it contains defaults like kind: "page")
-      const kindVal = attrsSafe?.kind ?? merged.kind;
-      const kind = typeof kindVal === "string" ? kindVal : undefined;
-
-      // head/tail optional name
-      const nameHeadTail = this.asString(
-        (attrsSafe?.name ?? merged.name) as unknown,
+    for await (const f of this.collectSqlPageFile()) {
+      const absPath = pathJoin(srcHome, f.path);
+      await ensureDir(dirname(absPath));
+      const exists = await this.exists(absPath);
+      if (exists && !overwrite) continue;
+      await Deno.writeTextFile(
+        absPath,
+        f.contents.endsWith("\n") ? f.contents : f.contents + "\n",
       );
-
-      // page REQUIRED path (typed fences will always have it)
-      const pathPage = this.asString(
-        (attrsSafe?.path ?? merged.path) as unknown,
-      );
-
-      if (kind === "head") {
-        const baseName = nameHeadTail
-          ? sanitizeName(nameHeadTail)
-          : zero(headIx++, pad);
-        const outPath = pathJoin(headDir, `${baseName}.sql`);
-        await this.write(outPath, f.code, overwrite);
-        emitted.push(outPath);
-        continue;
-      }
-
-      if (kind === "tail") {
-        const baseName = nameHeadTail
-          ? sanitizeName(nameHeadTail)
-          : zero(tailIx++, pad);
-        const outPath = pathJoin(tailDir, `${baseName}.sql`);
-        await this.write(outPath, f.code, overwrite);
-        emitted.push(outPath);
-        continue;
-      }
-
-      if (kind === "page") {
-        // Typed: path must be present by schema; for any non-typed fence, we still
-        // fall back to numeric to be tolerant in non-strict mode.
-        const fileStem = pathPage
-          ? sanitizeName(pathPage)
-          : zero(pageIx++, pad);
-        const outRel = fileStem.endsWith(".sql") ? fileStem : `${fileStem}.sql`;
-        const outPath = pathJoin(this.opts.srcHome, outRel);
-        await ensureDir(dirname(outPath));
-        await this.write(outPath, f.code, overwrite);
-        emitted.push(outPath);
-        continue;
-      }
-
-      await this.handleUnknownKind(f as SqlFenceTyped<M>);
+      emitted.push(absPath);
     }
-
     return { emitted };
   }
+
+  /**
+   * Build DML statements to upsert files into a SQLPage virtual-files table.
+   * dialect "sqlite":
+   *   INSERT INTO sqlpage_files (path, contents, last_modified) VALUES ('…','…', CURRENT_TIMESTAMP)
+   *   ON CONFLICT(path) DO UPDATE
+   *     SET contents = excluded.contents,
+   *         last_modified = CURRENT_TIMESTAMP
+   *     WHERE sqlpage_files.contents <> excluded.contents;
+   *
+   * Returns one object per file, tagged with kind: "sqlpage_file_insert".
+   * On conflict when contents differ, last_modified is set by the SQL engine (CURRENT_TIMESTAMP).
+   * If contents are identical, the row is left unchanged.
+   */
+  // 1) Ensure upserts include tails by ordering the batch
+  async emitSqlPageFilesUpsertDML(
+    dialect: "sqlite",
+  ): Promise<
+    Array<{ kind: "sqlpage_file_insert"; path: string; statement: string }>
+  > {
+    if (dialect !== "sqlite") {
+      throw new Error(`Unsupported dialect: ${dialect}`);
+    }
+
+    const esc = (s: string) => s.replace(/'/g, "''");
+    const outs: Array<
+      { kind: "sqlpage_file_insert"; path: string; statement: string }
+    > = [];
+
+    const list = await this.#getEntries();
+
+    // Classifiers tolerate missing 'kind' by falling back to path prefix.
+    const isHead = (e: SqlPageFileEntry) =>
+      e.kind === "head_sql" || e.path.startsWith("sql.d/head/");
+    const isTail = (e: SqlPageFileEntry) =>
+      e.kind === "tail_sql" || e.path.startsWith("sql.d/tail/");
+
+    // Deterministic order: heads → non-head/tail → tails
+    const ordered = [
+      ...list.filter(isHead),
+      ...list.filter((e) => !isHead(e) && !isTail(e)), // pages, shells, partials, etc.
+      ...list.filter(isTail),
+    ];
+
+    for (const f of ordered) {
+      const pathLit = `'${esc(f.path)}'`;
+      const bodyLit = `'${esc(f.contents)}'`;
+      const statement =
+        `INSERT INTO sqlpage_files (path, contents, last_modified) VALUES (${pathLit}, ${bodyLit}, CURRENT_TIMESTAMP) ` +
+        `ON CONFLICT(path) DO UPDATE SET contents = excluded.contents, last_modified = CURRENT_TIMESTAMP ` +
+        `WHERE sqlpage_files.contents <> excluded.contents`;
+      outs.push({ kind: "sqlpage_file_insert", path: f.path, statement });
+    }
+
+    return outs;
+  }
+
+  /**
+   * Emit a self-contained SQL package:
+   *   1) all HEAD SQL blocks (raw SQL strings),
+   *   2) all sqlpage_files upsert DML statements,
+   *   3) all TAIL SQL blocks (raw SQL strings).
+   *
+   * Intended for single-shot deployment flows: run heads, upsert virtual files,
+   * then run tails.
+   */
+  // 2) Build the package from the ordered upserts so tails are present
+  async *emitSqlPackage(
+    dialect: "sqlite",
+  ): AsyncGenerator<string, void, unknown> {
+    const list = await this.#getEntries();
+
+    // (a) HEADS first
+    for (const e of list) {
+      if (e.kind === "head_sql") {
+        yield e.contents.endsWith("\n") ? e.contents : e.contents + "\n";
+      }
+    }
+
+    // (b) All upserts in deterministic order (includes tails)
+    const dml = await this.emitSqlPageFilesUpsertDML(dialect);
+    for (const row of dml) {
+      yield row.statement.endsWith(";\n") || row.statement.endsWith(";\r\n")
+        ? row.statement
+        : row.statement + ";\n";
+    }
+
+    // (c) TAILS last
+    for (const e of list) {
+      if (e.kind === "tail_sql") {
+        yield e.contents.endsWith("\n") ? e.contents : e.contents + "\n";
+      }
+    }
+  }
+
+  // ---------- helpers & hooks ----------
 
   protected asString(v: unknown) {
     return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
   }
 
   protected async handleUnknownKind(_f: SqlFenceTyped<M>) {
-    // no-op by default
-  }
-
-  protected async write(absFile: string, sql: string, overwrite: boolean) {
-    const exists = await this.exists(absFile);
-    if (exists && !overwrite) return;
-    await Deno.writeTextFile(absFile, sql.endsWith("\n") ? sql : sql + "\n");
+    // override to log/collect diagnostics for custom kinds
   }
 
   protected async exists(absFile: string) {
@@ -806,5 +878,155 @@ export class SqlPageMaterializer<
     } catch {
       return false;
     }
+  }
+
+  // Build and cache the complete list of file entries once per instance.
+  async #getEntries(): Promise<SqlPageFileEntry[]> {
+    if (this.#entriesCache) return this.#entriesCache;
+
+    const pad = this.opts.padWidth ?? 3;
+
+    // Drain once (preserve order)
+    const all: AnyFence<M>[] = [];
+    for await (const fence of this.content.SQL()) {
+      all.push(fence as AnyFence<M>);
+    }
+
+    // Registries
+    const shells = new Map<string, { code: string; path?: string }>();
+    const partials = new Map<string, { code: string; path?: string }>();
+
+    // Counters for numeric filenames
+    let headIx = 0;
+    let tailIx = 0;
+    let pageIx = 0;
+
+    const withNl = (s: string) => (s.endsWith("\n") ? s : s + "\n");
+    const now = () => new Date();
+
+    const out: SqlPageFileEntry[] = [];
+
+    // ---------- PASS 1: shells/partials + head/tail ----------
+    for (const f of all) {
+      const attrsSafe =
+        (f as { attrsSafe?: Record<string, unknown> }).attrsSafe;
+      const merged = (f.resolvedAttrs ?? f.attrs ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const kindVal = (attrsSafe?.kind ?? merged.kind) as unknown;
+      const kind = typeof kindVal === "string" ? kindVal : undefined;
+
+      if (kind === "shell" || kind === "partial") {
+        const id = this.asString(
+          (attrsSafe?.identifier ?? merged.identifier) as unknown,
+        );
+        const pth = this.asString((attrsSafe?.path ?? merged.path) as unknown);
+
+        if (id) {
+          const reg = { code: f.code, path: pth };
+          if (kind === "shell") shells.set(id, reg);
+          else partials.set(id, reg);
+        }
+        if (pth) {
+          const outRel = pth.endsWith(".sql") ? pth : `${pth}.sql`;
+          out.push({
+            path: sanitizeName(outRel),
+            contents: withNl(f.code),
+            lastModified: now(),
+          });
+        }
+        continue;
+      }
+
+      if (kind === "head") {
+        // IMPORTANT: name from RAW attrs only (ignore section defaults)
+        const rawName = this.asString(
+          ((f as AnyFence<M>).attrs ?? {} as Record<string, unknown>)
+            .name as unknown,
+        );
+        const base = rawName ? sanitizeName(rawName) : zero(headIx++, pad);
+        out.push({
+          path: `sql.d/head/${base}.sql`,
+          contents: withNl(f.code),
+          lastModified: now(),
+          kind: "head_sql",
+        });
+        continue;
+      }
+
+      if (kind === "tail") {
+        // IMPORTANT: name from RAW attrs only (ignore section defaults)
+        const rawName = this.asString(
+          ((f as AnyFence<M>).attrs ?? {} as Record<string, unknown>)
+            .name as unknown,
+        );
+        const base = rawName ? sanitizeName(rawName) : zero(tailIx++, pad);
+        out.push({
+          path: `sql.d/tail/${base}.sql`,
+          contents: withNl(f.code),
+          lastModified: now(),
+          kind: "tail_sql",
+        });
+        continue;
+      }
+    }
+
+    // ---------- PASS 2: pages (prepend shell if referenced) ----------
+    for (const f of all) {
+      const attrsSafe =
+        (f as { attrsSafe?: Record<string, unknown> }).attrsSafe;
+      const merged = (f.resolvedAttrs ?? f.attrs ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const kindVal = (attrsSafe?.kind ?? merged.kind) as unknown;
+      const kind = typeof kindVal === "string" ? kindVal : undefined;
+
+      if (kind !== "page") continue;
+
+      const pathAttr = this.asString(
+        (attrsSafe?.path ?? merged.path) as unknown,
+      );
+      const shellId = this.asString(
+        (attrsSafe as { shell?: unknown })?.shell ??
+          (merged as { shell?: unknown })?.shell,
+      );
+
+      const fileStem = pathAttr ? sanitizeName(pathAttr) : zero(pageIx++, pad);
+      const outRel = fileStem.endsWith(".sql") ? fileStem : `${fileStem}.sql`;
+
+      const shell = shellId ? shells.get(shellId) : undefined;
+      const contents = shell ? `${shell.code}\n${f.code}` : f.code;
+
+      out.push({
+        path: outRel,
+        contents: withNl(contents),
+        lastModified: now(),
+      });
+    }
+
+    // ---------- PASS 3: unknown kinds (hook) ----------
+    for (const f of all) {
+      const attrsSafe =
+        (f as { attrsSafe?: Record<string, unknown> }).attrsSafe;
+      const merged = (f.resolvedAttrs ?? f.attrs ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const kindVal = (attrsSafe?.kind ?? merged.kind) as unknown;
+      const kind = typeof kindVal === "string" ? kindVal : undefined;
+
+      if (
+        !kind ||
+        (kind !== "head" && kind !== "tail" && kind !== "page" &&
+          kind !== "shell" && kind !== "partial")
+      ) {
+        await this.handleUnknownKind(f as SqlFenceTyped<M>);
+      }
+    }
+
+    this.#entriesCache = out;
+    return out;
   }
 }
