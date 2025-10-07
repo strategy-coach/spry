@@ -297,7 +297,19 @@ export function SQL(strings: TemplateStringsArray, ...exprs: Interp[]): SQL {
   );
 }
 
-/** Ensure a string ends with exactly one semicolon. */
+/**
+ * Ensures that the given string ends with exactly one semicolon,
+ * removing any extra semicolons or trailing whitespace, and
+ * appending a single semicolon if necessary.
+ *
+ * @param str - The input string to check and modify.
+ * @returns - The modified string that ends with a single semicolon.
+ *
+ * @example
+ * ensureTrailingSemicolon('let x = 10'); // returns 'let x = 10;'
+ * ensureTrailingSemicolon('let x = 10; '); // returns 'let x = 10;'
+ * ensureTrailingSemicolon('let x = 10;;; '); // returns 'let x = 10;'
+ */
 export const ensureTrailingSemicolon = (str: string) =>
   str.replace(/;*\s*$/, ";");
 
