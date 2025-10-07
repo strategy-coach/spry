@@ -1,10 +1,8 @@
 // deno-lint-ignore-file no-explicit-any
 // Path: lib/sqlpage/notebook_test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { join as pathJoin } from "jsr:@std/path@1";
 import {
   type SqlFenceTyped,
-  SqlPageCLI,
   SqlPageContentBuilder,
   SqlPageMaterializer,
 } from "./notebook.ts";
@@ -89,24 +87,6 @@ Deno.test("SqlPageContent: parses and validates fences", async (t) => {
       assert(f.code.length > 0);
     }
   });
-});
-
-/* ------------------------------------------------------------------------- */
-/* Unrelated area: CLI wrapper integrates content + writes conf               */
-/* ------------------------------------------------------------------------- */
-
-Deno.test("SqlPageCLI: run() drains fences and writes sqlpage.json (optional)", async () => {
-  const content = await makeContentFromFixture("notebook_test-01.fixture.md");
-  const tmp = await Deno.makeTempDir();
-
-  const emitConfPath = pathJoin(tmp, "sqlpage", "sqlpage.json");
-  const cli = new SqlPageCLI(content, { emitConfPath });
-
-  const res = await cli.run();
-  assertEquals(res.error, false);
-  // head, page(kind), page(no kind), tail => 4 typed
-  assertEquals(res.typedCount, 4);
-  assertEquals(res.totalCount, 5);
 });
 
 // NEW top-level test

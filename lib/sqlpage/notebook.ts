@@ -1,3 +1,4 @@
+#!/usr/bin/env -S deno run -A
 /**
  * @module sqlpage/notebook
  *
@@ -110,6 +111,7 @@
  * const summary = await cli.run();
  * console.log(summary);
  */
+import { Command } from "jsr:@cliffy/command@1.0.0-rc.8";
 import { dirname, join as pathJoin } from "jsr:@std/path@1";
 import { z } from "jsr:@zod/zod@4";
 import type { Root } from "npm:@types/mdast@^4";
@@ -121,6 +123,7 @@ import {
   type IssueDisposition,
   NotebookBuilder,
 } from "../universal/md-notebook.ts";
+import { HelpCommand } from "jsr:@cliffy/command@1.0.0-rc.8/help";
 
 /* ---------------------------------- Types -------------------------------- */
 
@@ -396,19 +399,19 @@ export class SqlPageContent<
   FM = z.infer<typeof defaultFmSchema>,
   M extends AttrMap = { sql: z.infer<typeof defaultSqlAttrs> },
 > {
-  protected fmSchema: z.ZodType<FM>;
-  protected attrSchemaMap: Map<string, AttrSchemaEntry<FM>>;
-  protected readonly delimiter: InstructionsDelimiter;
-  protected readonly strictAttrValidation: boolean;
-  protected readonly enableAttrResolution: boolean;
-  protected readonly mirrorFrontmatter: boolean;
-  protected readonly confKey: string;
-  protected readonly provenance: AsyncGenerator<
+  readonly fmSchema: z.ZodType<FM>;
+  readonly attrSchemaMap: Map<string, AttrSchemaEntry<FM>>;
+  readonly delimiter: InstructionsDelimiter;
+  readonly strictAttrValidation: boolean;
+  readonly enableAttrResolution: boolean;
+  readonly mirrorFrontmatter: boolean;
+  readonly confKey: string;
+  readonly provenance: AsyncGenerator<
     { identifier: string; markdown: string | BinaryStream }
   >;
 
-  protected readonly allIssues: SqlPageContentIssue[] = [];
-  protected readonly frontmatters: Array<{ sourceId: string; fm: FM }> = [];
+  readonly allIssues: SqlPageContentIssue[] = [];
+  readonly frontmatters: Array<{ sourceId: string; fm: FM }> = [];
 
   constructor(init: {
     fmSchema: z.ZodType<FM>;
@@ -640,62 +643,86 @@ export class SqlPageContent<
   }
 }
 
-/* ----------------------------------- CLI ---------------------------------- */
+// ---------------------- CLI wrapper ----------------------
 
-export interface SqlPageCLIRunResult<M extends AttrMap> {
-  fences: readonly SqlFenceTyped<M>[];
-  issues: readonly ReturnType<SqlPageContent["issues"]>[number][];
-  error: boolean;
-  typedCount: number;
-  totalCount: number;
-}
-
-export interface SqlPageCLIOptions {
-  emitConfPath?: string;
-  failOnError?: boolean;
-}
-
-export class SqlPageCLI<
+export class SqlPageNotebookCLI<
   FM,
   M extends AttrMap = Record<PropertyKey, never>,
 > {
   constructor(
-    protected readonly content: SqlPageContent<FM, M>,
-    protected readonly opts: SqlPageCLIOptions = {},
+    private readonly builder?: SqlPageContentBuilder<FM, M>,
   ) {}
 
-  async run() {
-    const fences: SqlFenceTyped<M>[] = [];
-    for await (const f of this.content.SQL()) fences.push(f);
+  async run(argv: string[] = Deno.args) {
+    const enc = new TextEncoder();
 
-    const issues = this.content.issues();
-    const error = issues.some((i) =>
-      (i as { disposition?: string }).disposition === "error"
-    );
+    await new Command()
+      .name("notebook.ts")
+      .version("0.1.0")
+      .description(
+        "SQLPage Markdown Notebook: emit SQL package, write sqlpage.json, or materialize filesystem.",
+      )
+      // Emit SQL package (sqlite) to stdout; accepts md path
+      .option("-m, --md <mdPath:string>", "Use the given Markdown source", {
+        required: true,
+      })
+      // Emit SQL package (sqlite) to stdout; accepts md path
+      .option(
+        "-p, --package",
+        "Emit SQL package (sqlite) to stdout from the given markdown path.",
+      )
+      // Materialize files to a target directory
+      .option(
+        "--fs <srcHome:string>",
+        "Materialize SQL files under this directory.",
+      )
+      // Write sqlpage.json to the given path
+      .option(
+        "-c, --conf <confPath:string>",
+        "Write sqlpage.json to this path (generated from frontmatter sqlpage-conf).",
+      )
+      // Allow positional mdPath (useful with --fs/--conf)
+      .action(async (opts) => {
+        async function* sources() {
+          yield {
+            identifier: "prime",
+            markdown: await Deno.readTextFile(opts.md),
+          };
+        }
+        const b = this.builder ?? new SqlPageContentBuilder<FM, M>();
+        const content = b.build(sources());
 
-    if (this.opts.failOnError && error) {
-      throw Object.assign(new Error("SqlPageCLI detected error issues."), {
-        details: { issues },
-      });
-    }
+        // If --fs is present, materialize files under that root
+        if (typeof opts.fs === "string" && opts.fs.length > 0) {
+          const mat = new SqlPageMaterializer<FM, M>(content, {});
+          const { emitted } = await mat.materializeFs(opts.fs);
+          await Deno.stderr.write(
+            enc.encode(`Wrote ${emitted.length} files under ${opts.fs}\n`),
+          );
+        }
 
-    const typedCount =
-      fences.filter((f) =>
-        (f as { attrsSafe?: unknown }).attrsSafe !== undefined
-      ).length;
+        // If -p/--package is present (i.e., user requested SQL package), emit to stdout
+        if (opts.package) {
+          const mat = new SqlPageMaterializer<FM, M>(content, {});
+          for await (const chunk of mat.emitSqlPackage("sqlite", true)) {
+            console.log(chunk);
+          }
+        }
 
-    const result: SqlPageCLIRunResult<M> = {
-      fences,
-      issues,
-      error,
-      typedCount,
-      totalCount: fences.length,
-    };
-    return result;
-  }
-
-  protected normalizeIssues() {
-    return this.content.issues();
+        // If --conf is present, write sqlpage.json
+        const fm = content.frontmatters.at(0)?.fm;
+        if (typeof opts.conf === "string" && opts.conf.length > 0 && fm) {
+          const json = content.sqlPageConf(fm);
+          const dest = opts.conf;
+          await ensureDir(dirname(dest));
+          await Deno.writeTextFile(
+            dest,
+            JSON.stringify(json, null, 2),
+          );
+        }
+      })
+      .command("help", new HelpCommand().global())
+      .parse(argv);
   }
 }
 
@@ -781,11 +808,7 @@ export class SqlPageMaterializer<
    * If contents are identical, the row is left unchanged.
    */
   // 1) Ensure upserts include tails by ordering the batch
-  async emitSqlPageFilesUpsertDML(
-    dialect: "sqlite",
-  ): Promise<
-    Array<{ kind: "sqlpage_file_insert"; path: string; statement: string }>
-  > {
+  async emitSqlPageFilesUpsertDML(dialect: "sqlite") {
     if (dialect !== "sqlite") {
       throw new Error(`Unsupported dialect: ${dialect}`);
     }
@@ -833,10 +856,12 @@ export class SqlPageMaterializer<
    * then run tails.
    */
   // 2) Build the package from the ordered upserts so tails are present
-  async *emitSqlPackage(
-    dialect: "sqlite",
-  ): AsyncGenerator<string, void, unknown> {
+  async *emitSqlPackage(dialect: "sqlite", includeSqlPageFilesTable = false) {
     const list = await this.#getEntries();
+
+    if (includeSqlPageFilesTable) {
+      yield `CREATE TABLE IF NOT EXISTS "sqlpage_files" ("path" VARCHAR PRIMARY KEY NOT NULL, "contents" TEXT NOT NULL, "last_modified" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);\n`;
+    }
 
     // (a) HEADS first
     for (const e of list) {
@@ -1029,4 +1054,9 @@ export class SqlPageMaterializer<
     this.#entriesCache = out;
     return out;
   }
+}
+
+if (import.meta.main) {
+  const cli = new SqlPageNotebookCLI();
+  await cli.run();
 }
