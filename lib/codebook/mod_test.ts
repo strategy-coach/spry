@@ -18,15 +18,16 @@ function isCode<T extends Record<string, unknown>>(
 ): c is CodeCell<T> {
   return c.kind === "code";
 }
+
 function isMarkdown<T extends Record<string, unknown>>(
   c: Cell<T>,
 ): c is MarkdownCell {
   return c.kind === "markdown";
 }
 
-Deno.test("Markdown Notebook core – complex fixture", async (t) => {
+Deno.test("Markdown Notebook core - complex fixture", async (t) => {
   // Load the complex fixture
-  const url = new URL("./core_test-fixture-01.md", import.meta.url);
+  const url = new URL("./mod_test-fixture-01.md", import.meta.url);
   const md = await Deno.readTextFile(url);
 
   // Parse with the core — pass a single string (valid Source)
@@ -68,7 +69,7 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
     ]);
   });
 
-  await t.step("sql code cell – language, info, attrs, and content", () => {
+  await t.step("sql code cell - language, info, attrs, and content", () => {
     const cell = nb.cells[3];
     assert(isCode(cell));
     assertEquals(cell.language, "sql");
@@ -80,7 +81,7 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
     );
   });
 
-  await t.step("markdown after sql – narrative preserved", () => {
+  await t.step("markdown after sql - narrative preserved", () => {
     const cell = nb.cells[4];
     assert(isMarkdown(cell));
     assertMatch(cell.text, /After the SQL code fence/);
@@ -90,7 +91,7 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
   });
 
   await t.step(
-    "bash code cell – malformed JSON5 yields empty attrs and warning issue",
+    "bash code cell - malformed JSON5 yields empty attrs and warning issue",
     () => {
       const cell = nb.cells[5];
       assert(isCode(cell));
@@ -104,14 +105,14 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
     },
   );
 
-  await t.step("json code cell – language and payload", () => {
+  await t.step("json code cell - language and payload", () => {
     const cell = nb.cells[7];
     assert(isCode(cell));
     assertEquals(cell.language, "json");
     assertMatch(cell.source, /"sku":\s*"ABC-123"/);
   });
 
-  await t.step("xml code cell – language and structure", () => {
+  await t.step("xml code cell - language and structure", () => {
     const cell = nb.cells[9];
     assert(isCode(cell));
     assertEquals(cell.language, "xml");
@@ -119,14 +120,14 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
     assertMatch(cell.source, /<item id="2"/);
   });
 
-  await t.step("csv code cell – language and header line", () => {
+  await t.step("csv code cell - language and header line", () => {
     const cell = nb.cells[11];
     assert(isCode(cell));
     assertEquals(cell.language, "csv");
     assertMatch(cell.source, /^id,name,qty/m);
   });
 
-  await t.step("fish code cell – info meta and content", () => {
+  await t.step("fish code cell - info meta and content", () => {
     const cell = nb.cells[13];
     assert(isCode(cell));
     assertEquals(cell.language, "fish");
@@ -134,14 +135,14 @@ Deno.test("Markdown Notebook core – complex fixture", async (t) => {
     assertMatch(cell.source, /echo "hello from fish"/);
   });
 
-  await t.step("raw text code cell – treated as language 'text'", () => {
+  await t.step("raw text code cell - treated as language 'text'", () => {
     const cell = nb.cells[14];
     assert(isCode(cell));
     assertEquals(cell.language, "text");
     assertMatch(cell.source, /raw code block without an explicit language/);
   });
 
-  await t.step("final markdown cell – trailing paragraph after HR", () => {
+  await t.step("final markdown cell - trailing paragraph after HR", () => {
     const cell = nb.cells[15];
     assert(isMarkdown(cell));
     assertMatch(cell.text, /trailing paragraph/);
