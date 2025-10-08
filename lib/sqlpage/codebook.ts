@@ -302,7 +302,7 @@ export class SqlPageCodebook {
    * On conflict when contents differ, last_modified is set by the SQL engine (CURRENT_TIMESTAMP).
    * If contents are identical, the row is left unchanged.
    */
-  async emitSqlPageFilesUpsertDML(
+  async sqlPageFilesUpsertDML(
     dialect: "sqlite",
     opts: { md: string[]; includeSqlPageFilesTable?: boolean },
   ) {
@@ -404,9 +404,6 @@ export class SqlPageCodebook {
         "Write sqlpage.json to this path (generated from frontmatter sqlpage-conf).",
       )
       .action(async (opts) => {
-        // const b = this.cb ?? SqlPageContentBuilder.typical<FM, M>();
-        // const content = b.build(sources());
-
         // If --fs is present, materialize files under that root
         if (typeof opts.fs === "string" && opts.fs.length > 0) {
           Array.fromAsync(this.materializeFs({ md: opts.md, fs: opts.fs }));
@@ -415,7 +412,7 @@ export class SqlPageCodebook {
         // If -p/--package is present (i.e., user requested SQL package), emit to stdout
         if (opts.package) {
           for (
-            const chunk of await this.emitSqlPageFilesUpsertDML("sqlite", {
+            const chunk of await this.sqlPageFilesUpsertDML("sqlite", {
               md: opts.md,
               includeSqlPageFilesTable: true,
             })
@@ -434,6 +431,7 @@ export class SqlPageCodebook {
                 opts.conf,
                 JSON.stringify(json, null, 2),
               );
+              break; // only pick from the first file
             }
           }
         }
