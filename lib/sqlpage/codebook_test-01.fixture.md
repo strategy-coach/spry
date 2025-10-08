@@ -18,22 +18,27 @@ sqlpage-conf:
 
 ## Intro
 
-```sql { kind: "head", name: "pragma" }
+```sql HEAD
+-- head at start
 PRAGMA foreign_keys = ON;
 ```
 
-```sql { role: "section-defaults" }
-{ name: "defaults-ignored" }
-```
-
-```sql { kind: "page", path: "admin/index", route: { caption: "test" } }
+```sql admin/index.sql { route: { caption: "test" } }
 select 1;
 ```
 
-```sql { path: "users/list" }
+```sql users/list.sql
 select 2;
 ```
 
-```sql { kind: "tail" }
+## Explanation
+
+```sql HEAD
+-- head 2, near TAIL
+```
+
+```sql TAIL
 -- done
 ```
+
+## Appendix
