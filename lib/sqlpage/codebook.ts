@@ -12,9 +12,11 @@ import {
 } from "../assembler/mod.ts";
 import {
   CodeCell,
+  DocCodeCellMutator,
   documentedNotebooks,
-  enrichDocCodeCells,
+  mutateDocCodeCells,
   notebooks,
+  pipedDocCodeCellMutators,
   safeFrontmatter,
 } from "../codebook/mod.ts";
 
@@ -68,14 +70,12 @@ const defaultFmSchema = z.object({
   "sqlpage-conf": sqlPageConfSchema.optional(),
 }).catchall(z.unknown());
 
-export type SqlPageFileEntry = {
-  kind: "head_sql" | "tail_sql" | "sqlpage_file_insert";
+export type SqlPageFile = {
+  kind: "head_sql" | "tail_sql" | "sqlpage_file_upsert";
   path: string; // relative path (e.g., "sql.d/head/001.sql", "admin/index.sql")
   contents: string; // file contents
   lastModified?: Date; // optional timestamp (not used in DML; engine time is used)
 };
-
-export type DocCodeCellEnricher = Parameters<typeof enrichDocCodeCells>[0];
 
 export const isRouteSupplier = (o: unknown): o is { route: AnnotatedRoute } =>
   o && typeof o === "object" && "route" in o &&
@@ -83,48 +83,49 @@ export const isRouteSupplier = (o: unknown): o is { route: AnnotatedRoute } =>
     ? true
     : false;
 
-export const enrichRoute: DocCodeCellEnricher = (
+export const enrichRoute: DocCodeCellMutator<string> = (
   cell,
   { nb, registerIssue },
 ) => {
-  if (isRouteSupplier(cell.attrs)) {
-    const route = cell.attrs.route as AnnotatedRoute;
-    if (!route.path && cell.info) {
-      route.path = cell.info;
-    }
-    const extensions = pathExtensions(route.path);
-    route.pathBasename = extensions.basename;
-    route.pathBasenameNoExtn = extensions.basename.split(".")[0];
-    route.pathDirname = dirname(route.path);
-    route.pathExtnTerminal = extensions.terminal;
-    route.pathExtns = extensions.extensions;
-    const parsed = z.safeParse(routeAnnSchema, route);
-    if (!parsed.success) {
-      registerIssue({
-        kind: "fence-attrs-json5-parse",
-        disposition: "error",
-        error: parsed.error,
-        message: `Zod error parsing route: ${z.prettifyError(parsed.error)}`,
-        provenance: nb.notebook.provenance,
-        startLine: cell.startLine,
-        endLine: cell.endLine,
-      });
-    }
+  if (!isRouteSupplier(cell.attrs)) return;
+  const route = cell.attrs.route as AnnotatedRoute;
+  if (!route.path && cell.info) {
+    route.path = cell.info;
+  }
+  const extensions = pathExtensions(route.path);
+  route.pathBasename = extensions.basename;
+  route.pathBasenameNoExtn = extensions.basename.split(".")[0];
+  route.pathDirname = dirname(route.path);
+  route.pathExtnTerminal = extensions.terminal;
+  route.pathExtns = extensions.extensions;
+  const parsed = z.safeParse(routeAnnSchema, route);
+  if (!parsed.success) {
+    registerIssue({
+      kind: "fence-attrs-json5-parse",
+      disposition: "error",
+      error: parsed.error,
+      message: `Zod error parsing route: ${z.prettifyError(parsed.error)}`,
+      provenance: nb.notebook.provenance,
+      startLine: cell.startLine,
+      endLine: cell.endLine,
+    });
   }
 };
 
 export class SqlPageCodebook {
-  protected docCodeCellEnrichers: DocCodeCellEnricher[] = [];
+  protected readonly docCodeCellMutators: DocCodeCellMutator<string>[] = [];
+  protected pipedMutators = pipedDocCodeCellMutators(this.docCodeCellMutators);
   protected constructor() {
-    this.setupDocCodeCellEnrichers();
+    this.setupDocCodeCellMutators();
   }
 
-  withDocCodeCellEnricher(dcce: DocCodeCellEnricher) {
-    this.docCodeCellEnrichers.push(dcce);
+  withDocCodeCellMutator(dcce: DocCodeCellMutator<string>) {
+    this.docCodeCellMutators.push(dcce);
+    this.pipedMutators = pipedDocCodeCellMutators(this.docCodeCellMutators);
   }
 
-  setupDocCodeCellEnrichers() {
-    this.withDocCodeCellEnricher(enrichRoute);
+  setupDocCodeCellMutators() {
+    this.withDocCodeCellMutator(enrichRoute);
   }
 
   async *notebooks(opts: { md: string[] }) {
@@ -149,12 +150,10 @@ export class SqlPageCodebook {
   }
 
   async *sqlPageCodebooks(opts: { md: string[] }) {
-    return yield* enrichDocCodeCells(async (cell, ctx) => {
-      for await (const e of this.docCodeCellEnrichers) {
-        // deno-lint-ignore no-explicit-any
-        e(cell, ctx as any); // TODO: figure out why "as any" is needed
-      }
-    }, documentedNotebooks(this.notebooks(opts), { kind: "hr" }));
+    return yield* mutateDocCodeCells(
+      this.pipedMutators,
+      documentedNotebooks(this.notebooks(opts), { kind: "hr" }),
+    );
   }
 
   async *codeCells(opts: { md: string[] }) {
@@ -198,9 +197,9 @@ export class SqlPageCodebook {
           if (cc.info && cc.info === "NOTEBOOK_ISSUES") {
             yield {
               path: `spry.d/issues/${cc.provenance}.auto.json`,
-              kind: "sqlpage_file_insert",
+              kind: "sqlpage_file_upsert",
               contents: cc.source,
-            } satisfies SqlPageFileEntry;
+            } satisfies SqlPageFile;
           }
           break;
         }
@@ -219,22 +218,22 @@ export class SqlPageCodebook {
                 : `sql.d/tail/${tailCount.next()}.sql`,
               kind: path === "HEAD" ? "head_sql" : "tail_sql",
               contents: cc.source,
-            } satisfies SqlPageFileEntry;
+            } satisfies SqlPageFile;
           } else {
             yield {
               path,
-              kind: "sqlpage_file_insert",
+              kind: "sqlpage_file_upsert",
               contents: cc.source,
-            } satisfies SqlPageFileEntry;
+            } satisfies SqlPageFile;
             if (Object.entries(cc.attrs).length) {
-              if ("route" in cc.attrs) {
+              if (isRouteSupplier(cc.attrs)) {
                 pageRoutes.push(cc.attrs.route as AnnotatedRoute);
               }
               yield {
                 path: `spry.d/auto/resource/${path}.auto.json`,
-                kind: "sqlpage_file_insert",
+                kind: "sqlpage_file_upsert",
                 contents: JSON.stringify(this.dropUndef(cc.attrs), null, 2),
-              } satisfies SqlPageFileEntry;
+              } satisfies SqlPageFile;
             }
           }
           break;
@@ -250,23 +249,23 @@ export class SqlPageCodebook {
         showPath: true,
         includeCounts: true,
       }),
-      kind: "sqlpage_file_insert",
-    } satisfies SqlPageFileEntry;
+      kind: "sqlpage_file_upsert",
+    } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/forest.auto.json",
       contents: JSON.stringify(forest, null, 2),
-      kind: "sqlpage_file_insert",
-    } satisfies SqlPageFileEntry;
+      kind: "sqlpage_file_upsert",
+    } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/breadcrumbs.auto.json",
       contents: JSON.stringify(breadcrumbs, null, 2),
-      kind: "sqlpage_file_insert",
-    } satisfies SqlPageFileEntry;
+      kind: "sqlpage_file_upsert",
+    } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/edges.auto.json",
       contents: JSON.stringify(edges, null, 2),
-      kind: "sqlpage_file_insert",
-    } satisfies SqlPageFileEntry;
+      kind: "sqlpage_file_upsert",
+    } satisfies SqlPageFile;
   }
 
   async materializeContent(
@@ -323,7 +322,7 @@ export class SqlPageCodebook {
         ? `CREATE TABLE IF NOT EXISTS "sqlpage_files" ("path" VARCHAR PRIMARY KEY NOT NULL, "contents" TEXT NOT NULL, "last_modified" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);`
         : "-- sqlpage_files DDL not requested",
       ...list.filter((e) => e.kind === "head_sql").map((spf) => spf.contents),
-      ...list.filter((e) => e.kind === "sqlpage_file_insert").map((f) => {
+      ...list.filter((e) => e.kind === "sqlpage_file_upsert").map((f) => {
         const pathLit = `'${esc(f.path)}'`;
         const bodyLit = `'${esc(f.contents)}'`;
         return `INSERT INTO sqlpage_files (path, contents, last_modified) VALUES (${pathLit}, ${bodyLit}, CURRENT_TIMESTAMP) ` +

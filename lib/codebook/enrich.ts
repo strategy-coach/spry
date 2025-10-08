@@ -90,7 +90,7 @@ export async function* safeFrontmatter<
  * Enrich each code cell via callback; mutate in place; register issues.
  * Supports custom issue shape `I` on the target notebook (extends base Issue).
  */
-export async function* enrichCodeCells<
+export async function* mutateCodeCells<
   Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
@@ -128,7 +128,7 @@ export async function* enrichCodeCells<
  * issues. Supports custom issue shape `I` on the target notebook (extends
  * base Issue).
  */
-export async function* enrichDocCodeCells<
+export async function* mutateDocCodeCells<
   Provenance,
   FM extends Record<string, unknown>,
   Attrs extends Record<string, unknown>,
@@ -155,4 +155,27 @@ export async function* enrichDocCodeCells<
 
     yield nb;
   }
+}
+
+export type DocCodeCellMutator<Provenance> = Parameters<
+  typeof mutateDocCodeCells<
+    Provenance,
+    Record<string, unknown>,
+    Record<string, unknown>
+  >
+>[0];
+
+/**
+ * Create a mutator from a list of mutators
+ * @param mutators the iteratable of mutators
+ * @returns a single mutator which loops through the list
+ */
+export function pipedDocCodeCellMutators<Provenance>(
+  mutators: Iterable<DocCodeCellMutator<Provenance>>,
+): DocCodeCellMutator<Provenance> {
+  return async (cell, ctx) => {
+    for await (const e of mutators) {
+      e(cell, ctx);
+    }
+  };
 }
