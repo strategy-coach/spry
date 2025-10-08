@@ -67,47 +67,6 @@ const defaultFmSchema = z.object({
   "sqlpage-conf": sqlPageConfSchema.optional(),
 }).catchall(z.unknown());
 
-export const defaultSqlAttrs = z.union([
-  // head: strict; optional name
-  z.object({
-    kind: z.literal("head"),
-    name: z.string().min(1).optional(),
-  }).strict(),
-
-  // tail: allow extras; optional name
-  z.object({
-    kind: z.literal("tail"),
-    name: z.string().min(1).optional(),
-  }).catchall(z.unknown()),
-
-  // control fence: never typed
-  z.object({
-    role: z.literal("section-defaults"),
-  }).catchall(z.unknown()),
-
-  // NEW: shell (regular SQLPage file), track by identifier and path
-  z.object({
-    kind: z.literal("shell"),
-    identifier: z.string().min(1),
-    path: z.string().min(1),
-  }).catchall(z.unknown()),
-
-  // NEW: partial (regular SQLPage file), track by identifier and path
-  z.object({
-    kind: z.literal("partial"),
-    identifier: z.string().min(1),
-    path: z.string().min(1),
-  }).catchall(z.unknown()),
-
-  // page: kind optional; REQUIRED path; may reference a shell by identifier
-  z.object({
-    kind: z.literal("page").optional().default("page"),
-    path: z.string().min(1),
-    shell: z.string().min(1).optional(),
-    route: routeAnnSchema.optional(),
-  }).catchall(z.unknown()),
-]);
-
 export type SqlPageFileEntry = {
   kind: "head_sql" | "tail_sql" | "sqlpage_file_insert";
   path: string; // relative path (e.g., "sql.d/head/001.sql", "admin/index.sql")
