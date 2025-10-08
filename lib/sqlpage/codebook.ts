@@ -13,6 +13,7 @@ import {
 import {
   CodeCell,
   documentedNotebooks,
+  enrichDocCodeCells,
   notebooks,
   safeFrontmatter,
 } from "../codebook/mod.ts";
@@ -74,8 +75,57 @@ export type SqlPageFileEntry = {
   lastModified?: Date; // optional timestamp (not used in DML; engine time is used)
 };
 
+export type DocCodeCellEnricher = Parameters<typeof enrichDocCodeCells>[0];
+
+export const isRouteSupplier = (o: unknown): o is { route: AnnotatedRoute } =>
+  o && typeof o === "object" && "route" in o &&
+    typeof o.route === "object"
+    ? true
+    : false;
+
+export const enrichRoute: DocCodeCellEnricher = (
+  cell,
+  { nb, registerIssue },
+) => {
+  if (isRouteSupplier(cell.attrs)) {
+    const route = cell.attrs.route as AnnotatedRoute;
+    if (!route.path && cell.info) {
+      route.path = cell.info;
+    }
+    const extensions = pathExtensions(route.path);
+    route.pathBasename = extensions.basename;
+    route.pathBasenameNoExtn = extensions.basename.split(".")[0];
+    route.pathDirname = dirname(route.path);
+    route.pathExtnTerminal = extensions.terminal;
+    route.pathExtns = extensions.extensions;
+    const parsed = z.safeParse(routeAnnSchema, route);
+    if (!parsed.success) {
+      registerIssue({
+        kind: "fence-attrs-json5-parse",
+        disposition: "error",
+        error: parsed.error,
+        message: `Zod error parsing route: ${z.prettifyError(parsed.error)}`,
+        provenance: nb.notebook.provenance,
+        startLine: cell.startLine,
+        endLine: cell.endLine,
+      });
+    }
+  }
+};
+
 export class SqlPageCodebook {
-  protected constructor() {}
+  protected docCodeCellEnrichers: DocCodeCellEnricher[] = [];
+  protected constructor() {
+    this.setupDocCodeCellEnrichers();
+  }
+
+  withDocCodeCellEnricher(dcce: DocCodeCellEnricher) {
+    this.docCodeCellEnrichers.push(dcce);
+  }
+
+  setupDocCodeCellEnrichers() {
+    this.withDocCodeCellEnricher(enrichRoute);
+  }
 
   async *notebooks(opts: { md: string[] }) {
     const sources = async function* () {
@@ -99,43 +149,23 @@ export class SqlPageCodebook {
   }
 
   async *sqlPageCodebooks(opts: { md: string[] }) {
-    return yield* documentedNotebooks(this.notebooks(opts), { kind: "hr" });
+    return yield* enrichDocCodeCells(async (cell, ctx) => {
+      for await (const e of this.docCodeCellEnrichers) {
+        // deno-lint-ignore no-explicit-any
+        e(cell, ctx as any); // TODO: figure out why "as any" is needed
+      }
+    }, documentedNotebooks(this.notebooks(opts), { kind: "hr" }));
   }
 
   async *codeCells(opts: { md: string[] }) {
-    for await (const nb of this.notebooks(opts)) {
-      for (const cell of nb.cells) {
+    for await (const spnb of this.sqlPageCodebooks(opts)) {
+      for (const cell of spnb.cells) {
         if (cell.kind === "code") {
-          if ("route" in cell.attrs) {
-            const route = cell.attrs.route as AnnotatedRoute;
-            if (!route.path && cell.info) {
-              route.path = cell.info;
-            }
-            const extensions = pathExtensions(route.path);
-            route.pathBasename = extensions.basename;
-            route.pathBasenameNoExtn = extensions.basename.split(".")[0];
-            route.pathDirname = dirname(route.path);
-            route.pathExtnTerminal = extensions.terminal;
-            route.pathExtns = extensions.extensions;
-            const parsed = z.safeParse(routeAnnSchema, route);
-            if (!parsed.success) {
-              nb.issues.push({
-                kind: "fence-attrs-json5-parse",
-                disposition: "error",
-                error: parsed.error,
-                message: `Zod error parsing route: ${
-                  z.prettifyError(parsed.error)
-                }`,
-                provenance: nb.provenance,
-                startLine: cell.startLine,
-                endLine: cell.endLine,
-              });
-            }
-          }
           yield cell;
         }
       }
 
+      const { notebook: nb } = spnb;
       if (nb.issues.length) {
         yield {
           kind: "code",

@@ -99,7 +99,7 @@ export async function* enrichCodeCells<
   callback: (
     cell: CodeCell<Provenance, Attrs>,
     ctx: {
-      fm: FM;
+      nb: Notebook<Provenance, FM, Attrs, I>;
       cellIndex: number;
       registerIssue: (issue: I) => void;
     },
@@ -113,7 +113,7 @@ export async function* enrichCodeCells<
       const c = nb.cells[i];
       if (c.kind !== "code") continue;
       await callback(c as CodeCell<Provenance, Attrs>, {
-        fm: nb.fm,
+        nb,
         cellIndex: i,
         registerIssue,
       });
