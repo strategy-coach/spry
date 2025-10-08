@@ -102,7 +102,7 @@
 export type ImportSpec = { spec: string; as: string };
 export type AllowList = boolean | string[];
 
-export interface TsEvalInit<
+export interface SafeDenoEvalInit<
   G extends Record<string, unknown> = Record<string, unknown>,
 > {
   // Security (default: deny unless using unstable worker options explicitly):
@@ -152,10 +152,10 @@ function assertCloneable(name: string, value: unknown) {
  * Create a sandboxed TypeScript evaluator.
  * `ctx` is generic and must be structured-cloneable at runtime.
  */
-export function createTsEvaluator<
+export function safeDenoEvaluator<
   Ctx extends Record<string, unknown> = Record<string, unknown>,
   G extends Record<string, unknown> = Record<string, unknown>,
->(init: TsEvalInit<G> = {}) {
+>(init: SafeDenoEvalInit<G> = {}) {
   const timeoutMs = init.timeoutMs ?? 1000;
 
   // Validate globals up front
@@ -328,6 +328,106 @@ export async function run(ctx: Ctx, globals: Globals): Promise<string> {
     const runner = compile(code);
     if (arguments.length === 2) return runner(ctx as Ctx);
     return runner;
+  }
+
+  return { evaluate };
+}
+
+/**
+ * Unsafe, in-process JS/TS template evaluator (NO sandbox, NO workers).
+ *
+ * API (matches safeDenoEvaluator’s shape):
+ *   const { evaluate } = unsafeJsEvaluator<Ctx, G>(init);
+ *   // 1) compile once, run many
+ *   const run = await evaluate(code);
+ *   const out1 = await run(ctx1);
+ *   const out2 = await run(ctx2);
+ *   // 2) one-shot
+ *   const out = await evaluate(code, ctx);
+ *
+ * Notes:
+ * - Executes with full access to the host (Deno, env, fs, net, etc.).
+ * - `imports` are resolved once at compile time and passed in by alias.
+ * - Template body is returned as a single string (must be a template string body).
+ * - No structured-clone checks; pass anything you want (functions allowed).
+ */
+export function unsafeJsEvaluator<
+  Ctx extends Record<string, unknown> = Record<string, unknown>,
+  G extends Record<string, unknown> = Record<string, unknown>,
+>(init?: {
+  /**
+   * ESM helper modules exposed inside templates under given aliases.
+   * Example: [{ spec: "jsr:@std/uuid", as: "uuid" }]
+   * Then usable in template as: ${ uuid.v1.generate() }
+   */
+  imports?: { spec: string; as: string }[];
+  /**
+   * Values merged into the template scope via `globals` param.
+   * Accessible as `globals.whatever` (same convention as safe evaluator).
+   */
+  globals?: G;
+}) {
+  type ImportSpec = { spec: string; as: string };
+
+  const importsSpec = (init?.imports ?? []) as ImportSpec[];
+  const globals = (init?.globals ?? {}) as G;
+
+  // Load and cache imports once per "compile"
+  async function loadImports() {
+    const entries = await Promise.all(
+      importsSpec.map(async ({ spec, as }) => {
+        const m = await import(spec);
+        return [as, m] as const;
+      }),
+    );
+    const byAlias: Record<string, unknown> = {};
+    for (const [as, mod] of entries) byAlias[as] = mod;
+    return byAlias;
+  }
+
+  // Build an async runner using Function for maximum flexibility (unsafe by design).
+  function buildRunner(
+    code: string,
+    imported: Record<string, unknown>,
+  ): (ctx: Ctx) => Promise<string> {
+    const aliasNames = Object.keys(imported);
+    const paramNames = ["ctx", "globals", ...aliasNames];
+    const formalParams = paramNames.join(",");
+
+    // Important: escape backslashes first, then backticks.
+    const bodyEscaped = code
+      .replace(/\\/g, "\\\\")
+      .replace(/`/g, "\\`");
+
+    // Avoid putting `body` inside a nested template literal; build it as "`...`" via concatenation.
+    const src = `return (async function(${formalParams}){
+    const __tpl = \`` + bodyEscaped + `\`;
+    return __tpl;
+  }).apply(null, arguments);`;
+
+    // biome-ignore lint/suspicious/noFunction: unsafe by design
+    const factory = new Function(...paramNames, src) as (
+      ...args: unknown[]
+    ) => Promise<string>;
+
+    return async (ctx: Ctx) => {
+      const args = [ctx, globals, ...aliasNames.map((k) => imported[k])];
+      const out = await factory(...args);
+      if (typeof out !== "string") {
+        throw new Error("Template result must be a string.");
+      }
+      return out;
+    };
+  }
+
+  // Overloads:
+  async function evaluate(code: string): Promise<(ctx: Ctx) => Promise<string>>;
+  async function evaluate(code: string, ctx: Ctx): Promise<string>;
+  async function evaluate(code: string, ctx?: Ctx) {
+    const imported = await loadImports();
+    const run = buildRunner(code, imported);
+    if (arguments.length === 2) return run(ctx as Ctx);
+    return run;
   }
 
   return { evaluate };
