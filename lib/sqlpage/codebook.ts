@@ -298,7 +298,7 @@ export class SqlPageCodebook {
         const bodyLit = `'${esc(f.contents)}'`;
         return `INSERT INTO sqlpage_files (path, contents, last_modified) VALUES (${pathLit}, ${bodyLit}, CURRENT_TIMESTAMP) ` +
           `ON CONFLICT(path) DO UPDATE SET contents = excluded.contents, last_modified = CURRENT_TIMESTAMP ` +
-          `WHERE sqlpage_files.contents <> excluded.contents`;
+          `WHERE sqlpage_files.contents <> excluded.contents;`;
       }), // pages, shells, partials, etc.
       ...list.filter((e) => e.kind === "tail_sql").map((spf) => spf.contents),
     ];
