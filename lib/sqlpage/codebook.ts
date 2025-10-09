@@ -112,6 +112,12 @@ export const enrichRoute: DocCodeCellMutator<string> = (
   }
 };
 
+export const enrichFrontmatter: DocCodeCellMutator<string> = (cell, { nb }) => {
+  if ("frontmatter" in cell) return;
+  // deno-lint-ignore no-explicit-any
+  (cell as any).frontmatter = nb.notebook.fm;
+};
+
 export class SqlPageCodebook {
   protected readonly docCodeCellMutators: DocCodeCellMutator<string>[] = [];
   protected pipedMutators = pipedDocCodeCellMutators(this.docCodeCellMutators);
@@ -126,6 +132,7 @@ export class SqlPageCodebook {
 
   setupDocCodeCellMutators() {
     this.withDocCodeCellMutator(enrichRoute);
+    this.withDocCodeCellMutator(enrichFrontmatter);
   }
 
   async *notebooks(opts: { md: string[] }) {
