@@ -36,6 +36,10 @@ select 2;
 -- this is the frontmatter in the cell's notebook: ${JSON.stringify(ctx.cell.frontmatter)}
 ```
 
+```sql debug.sql
+-- full context: ${JSON.stringify(ctx)}
+```
+
 The following `LAYOUT` will be prefixed across every SQLPage page because no
 paths are provided (`sql LAYOUT` without path is same as `sql LAYOUT **/*`).
 
