@@ -62,6 +62,17 @@ export type FrontmatterIssue<Provenance> = {
   disposition: IssueDisposition;
 };
 
+export type FenceIssue<Provenance> = {
+  kind: "fence-issue";
+  provenance: Provenance;
+  message: string;
+  metaText?: string;
+  error: unknown;
+  startLine?: number;
+  endLine?: number;
+  disposition: IssueDisposition;
+};
+
 export type FenceAttrsIssue<Provenance> = {
   kind: "fence-attrs-json5-parse";
   provenance: Provenance;
@@ -76,6 +87,7 @@ export type FenceAttrsIssue<Provenance> = {
 /** Base Issue union (non-generic) */
 export type Issue<Provenance> =
   | FrontmatterIssue<Provenance>
+  | FenceIssue<Provenance>
   | FenceAttrsIssue<Provenance>;
 
 /**

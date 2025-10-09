@@ -7,9 +7,9 @@ import type {
   Notebook,
 } from "./core.ts";
 
-type Asyncish<T> = AsyncIterable<T> | Iterable<T>;
+export type Asyncish<T> = AsyncIterable<T> | Iterable<T>;
 
-function isAsyncIterable<T>(obj: unknown): obj is AsyncIterable<T> {
+export function isAsyncIterable<T>(obj: unknown): obj is AsyncIterable<T> {
   return (
     typeof obj === "object" &&
     obj !== null &&
@@ -19,7 +19,7 @@ function isAsyncIterable<T>(obj: unknown): obj is AsyncIterable<T> {
   );
 }
 
-function toAsync<T>(it: Asyncish<T>): AsyncIterable<T> {
+export function toAsync<T>(it: Asyncish<T>): AsyncIterable<T> {
   if (isAsyncIterable<T>(it)) return it;
   return (async function* () {
     for (const x of it as Iterable<T>) yield x;
