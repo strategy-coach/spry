@@ -20,6 +20,7 @@ import {
   pipedDocCodeCellMutators,
   safeFrontmatter,
 } from "../codebook/mod.ts";
+import { unsafeJsEvaluator } from "../universal/template.ts";
 
 // ----- SQLPage configuration schema (frontmatter-friendly) -----
 export const sqlPageConfSchema = z
@@ -301,6 +302,7 @@ export class SqlPageCodebook {
     }
 
     const { findShell } = this.layoutFinder(layouts);
+    const { evaluate } = unsafeJsEvaluator();
     for await (const cc of codeCells) {
       switch (cc.language) {
         case "json": {
@@ -325,7 +327,10 @@ export class SqlPageCodebook {
           yield {
             path,
             kind: "sqlpage_file_upsert",
-            contents: shell ? shell.wrap(cc.source) : cc.source,
+            contents: await evaluate(
+              shell ? shell.wrap(cc.source) : cc.source,
+              { path, ...cc.attrs },
+            ),
           } satisfies SqlPageFile;
           if (Object.entries(cc.attrs).length) {
             if (isRouteSupplier(cc.attrs)) {

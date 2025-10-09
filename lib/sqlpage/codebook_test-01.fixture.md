@@ -32,16 +32,23 @@ select 2;
 ```
 
 The following `LAYOUT` will be prefixed across every SQLPage page because no
-paths are provided (`sql LAYOUT` without path is same as `sql LAYOUT **/*`):
+paths are provided (`sql LAYOUT` without path is same as `sql LAYOUT **/*`).
+
+The `${ctx.path}` will be replaced with the path of the page. `${ctx.*}` are all
+variables like `${ctx.route}`, etc.
 
 ```sql LAYOUT
--- global LAYOUT
+-- global LAYOUT (defaults to **/*)
+SET resource_json = sqlpage.read_file_as_text('spry.d/auto/resource/${ctx.path}.auto.json');
+-- add shell, etc. here
 ```
 
 The following `LAYOUT` will be prefixed only for the admin paths:
 
 ```sql LAYOUT admin/**
 -- admin/** LAYOUT
+SET resource_json = sqlpage.read_file_as_text('spry.d/auto/resource/${ctx.path}.auto.json');
+-- add shell, etc. here
 ```
 
 ## Explanation
