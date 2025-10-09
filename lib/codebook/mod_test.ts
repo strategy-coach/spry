@@ -84,7 +84,7 @@ Deno.test("Markdown Notebook core - complex fixture", async (t) => {
     assert(isCode(cell as Cell<string, Record<string, unknown>>));
     if (isCode(cell)) {
       assertEquals(cell.language, "sql");
-      assertEquals(cell.info, "attrs");
+      assertEquals(cell.info, "INFO MORE_INFO");
       assertEquals(cell.attrs, { id: 1, name: "patients", dryRun: true });
       assertMatch(cell.source, /SELECT\s+id/i);
       assert(

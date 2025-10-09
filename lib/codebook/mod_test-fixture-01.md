@@ -26,7 +26,7 @@ This section introduces a SQL example with attributes and info in the fence
 meta. The heading must start a new markdown cell and the heading itself should
 be included in that cell.
 
-```sql attrs { id: 1, name: 'patients', dryRun: true }
+```sql INFO MORE_INFO { id: 1, name: 'patients', dryRun: true }
 SELECT id, given_name, family_name
 FROM patients
 WHERE active = true;
