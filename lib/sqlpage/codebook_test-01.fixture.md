@@ -31,6 +31,19 @@ select 1;
 select 2;
 ```
 
+The following `LAYOUT` will be prefixed across every SQLPage page because no
+paths are provided (`sql LAYOUT` without path is same as `sql LAYOUT **/*`):
+
+```sql LAYOUT
+-- global LAYOUT
+```
+
+The following `LAYOUT` will be prefixed only for the admin paths:
+
+```sql LAYOUT admin/**
+-- admin/** LAYOUT
+```
+
 ## Explanation
 
 ```sql HEAD
