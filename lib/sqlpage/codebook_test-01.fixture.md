@@ -25,6 +25,8 @@ PRAGMA foreign_keys = ON;
 
 ```sql admin/index.sql { route: { caption: "test" } }
 select 1;
+-- this is the path: ${ctx.path}
+-- this is the caption: ${ctx.route.caption}
 ```
 
 ```sql users/list.sql
