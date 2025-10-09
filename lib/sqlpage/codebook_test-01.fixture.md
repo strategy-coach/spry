@@ -32,11 +32,15 @@ select 1;
 ```sql users/list.sql
 select 2;
 -- this is the path: ${ctx.path}
--- this is the cell: ${ctx.cell.kind}
+-- this is the cell: ${ctx.cell?.kind}
 -- this is the frontmatter in the cell's notebook: ${JSON.stringify(ctx.cell.frontmatter)}
 ```
 
 ```sql debug.sql
+-- site prefixed: ${ctx.sitePrefixed("'test'")}
+
+-- site prefixed: ${ctx.partial("test")}
+
 -- full context: ${JSON.stringify(ctx)}
 ```
 

@@ -20,7 +20,9 @@ import {
   pipedDocCodeCellMutators,
   safeFrontmatter,
 } from "../codebook/mod.ts";
-import { unsafeJsEvaluator } from "../universal/template.ts";
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
 
 // ----- SQLPage configuration schema (frontmatter-friendly) -----
 export const sqlPageConfSchema = z
@@ -70,11 +72,164 @@ const defaultFmSchema = z.object({
   "sqlpage-conf": sqlPageConfSchema.optional(),
 }).catchall(z.unknown());
 
+/** Schema for typed InfoDirective from `Cell.info?` property */
+export const sqlInfoDirectiveSchema = z.discriminatedUnion("nature", [
+  z.object({
+    nature: z.enum(["HEAD", "TAIL"]),
+    identity: z.string().min(1).optional(), // optional for HEAD/TAIL
+  }).strict(),
+  z.object({
+    nature: z.literal("sqlpage_file"),
+    path: z.string().min(1),
+  }).strict(),
+  z.object({
+    nature: z.literal("LAYOUT"),
+    glob: z.string().min(1).default("**/*"), // default glob
+  }).strict(),
+  z.object({
+    nature: z.literal("PARTIAL"),
+    identity: z.string().min(1), // required for PARTIAL
+  }).strict(),
+]);
+
+export type SqlInfoDirective = z.infer<typeof sqlInfoDirectiveSchema>;
+
+export const isSqlInfoDirectiveSupplier = (
+  o: unknown,
+): o is { infoDirective: SqlInfoDirective } =>
+  o && typeof o === "object" && "infoDirective" in o &&
+    typeof o.infoDirective === "object"
+    ? true
+    : false;
+
+type DocCodeCellWithDirective<N extends SqlInfoDirective["nature"]> =
+  & DocumentedCodeCell<string>
+  & { infoDirective: Extract<SqlInfoDirective, { nature: N }> };
+
+function docCodeCellHasNature<N extends SqlInfoDirective["nature"]>(
+  cell: DocumentedCodeCell<string> & { infoDirective: SqlInfoDirective },
+  nature: N,
+): cell is DocCodeCellWithDirective<N> {
+  return cell.infoDirective.nature === nature;
+}
+
+export class Layouts {
+  readonly layouts: (DocumentedCodeCell<string> & {
+    infoDirective: Extract<SqlInfoDirective, { nature: "LAYOUT" }>;
+  })[] = [];
+  protected cached: {
+    layout: DocumentedCodeCell<string> & {
+      infoDirective: Extract<SqlInfoDirective, { nature: "LAYOUT" }>;
+    };
+    glob: string;
+    g: string;
+    re: RegExp;
+    wc: number;
+    len: number;
+  }[] = [];
+
+  register(cell: DocumentedCodeCell<string>) {
+    // assume the enrichInfoDirective has already been run
+    if (isSqlInfoDirectiveSupplier(cell)) {
+      if (docCodeCellHasNature(cell, "LAYOUT")) {
+        this.layouts.push(cell);
+        this.rebuildCaches();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Build a matcher once; use findLayout(path) to get the closest matching glob. */
+  protected rebuildCaches() {
+    function toRegex(glob: string): RegExp {
+      if (!isGlob(glob)) {
+        // Treat literal as exact match (normalize + escape)
+        const exact = posix.normalize(glob).replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
+        return new RegExp(`^${exact}$`);
+      }
+      return globToRegExp(glob, {
+        extended: true,
+        globstar: true,
+        caseInsensitive: false,
+      });
+    }
+
+    function wildcardCount(g: string): number {
+      // Penalize '**' heavier so it's considered less specific
+      const starStar = (g.match(/\*\*/g) ?? []).length * 2;
+      const singles = (g.replace(/\*\*/g, "").match(/[*?]/g) ?? []).length;
+      return starStar + singles;
+    }
+
+    this.cached = this.layouts.map((layout) => {
+      const { glob } = layout.infoDirective;
+      const gg = posix.normalize(glob);
+      return {
+        layout,
+        glob,
+        g: gg,
+        re: toRegex(gg),
+        wc: wildcardCount(gg),
+        len: gg.length,
+      };
+    });
+  }
+
+  findLayout(path: string) {
+    const p = posix.normalize(path);
+    const hits = this.cached.filter((c) => c.re.test(p));
+    if (!hits.length) return undefined;
+    hits.sort((a, b) => (a.wc - b.wc) || (b.len - a.len));
+    const cell = hits[0].layout;
+    return { cell, wrap: (text: string) => `${cell.source}\n${text}` };
+  }
+}
+
+export class InfoDirectiveCells {
+  readonly layouts = new Layouts();
+  readonly heads: (DocumentedCodeCell<string> & {
+    infoDirective: Extract<SqlInfoDirective, { nature: "HEAD" }>;
+  })[] = [];
+  readonly tails: (DocumentedCodeCell<string> & {
+    infoDirective: Extract<SqlInfoDirective, { nature: "TAIL" }>;
+  })[] = [];
+  readonly partials: (DocumentedCodeCell<string> & {
+    infoDirective: Extract<SqlInfoDirective, { nature: "PARTIAL" }>;
+  })[] = [];
+
+  register(cell: DocumentedCodeCell<string>) {
+    if (this.layouts.register(cell)) return true;
+
+    // assume the enrichInfoDirective has already been run
+    if (isSqlInfoDirectiveSupplier(cell)) {
+      if (docCodeCellHasNature(cell, "HEAD")) {
+        this.heads.push(cell);
+        return true;
+      } else if (docCodeCellHasNature(cell, "TAIL")) {
+        this.tails.push(cell);
+        return true;
+      } else if (docCodeCellHasNature(cell, "PARTIAL")) {
+        this.partials.push(cell);
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
 export type SqlPageFile = {
-  kind: "head_sql" | "tail_sql" | "sqlpage_file_upsert";
-  path: string; // relative path (e.g., "sql.d/head/001.sql", "admin/index.sql")
-  contents: string; // file contents
-  lastModified?: Date; // optional timestamp (not used in DML; engine time is used)
+  readonly kind: "head_sql" | "tail_sql" | "sqlpage_file_upsert";
+  readonly path: string; // relative path (e.g., "sql.d/head/001.sql", "admin/index.sql")
+  readonly contents: string; // file contents
+  readonly lastModified?: Date; // optional timestamp (not used in DML; engine time is used)
+  readonly cell?: DocumentedCodeCell<string>;
+  readonly asErrorContents: (text: string, error: unknown) => string;
+  readonly isUnsafeInterpolatable?: boolean;
+  readonly isLayoutCandidate?: boolean;
 };
 
 export const isRouteSupplier = (o: unknown): o is { route: AnnotatedRoute } =>
@@ -82,6 +237,70 @@ export const isRouteSupplier = (o: unknown): o is { route: AnnotatedRoute } =>
     typeof o.route === "object"
     ? true
     : false;
+
+/**
+ * Transform that parses a Cell.info string into an InfoDirective.
+ * - HEAD/TAIL → optional identity
+ * - LAYOUT → glob defaults to "**\/*" if missing
+ * - PARTIAL → requires identity
+ * - unknown → defaults to { nature: "sqlpage_file", path: first token }
+ */
+export const enrichInfoDirective: DocCodeCellMutator<string> = (
+  cell,
+  { nb, registerIssue },
+) => {
+  if (isSqlInfoDirectiveSupplier(cell)) return;
+  if (!cell.info) return;
+
+  let info = cell.info;
+  info = info?.trim() ?? "";
+  if (info.length === 0) return undefined;
+
+  const [first, ...rest] = info.split(/\s+/);
+  const remainder = rest.join(" ").trim();
+
+  let candidate: unknown;
+  switch (first.toLocaleUpperCase()) {
+    case "HEAD":
+    case "TAIL":
+      candidate = remainder
+        ? { nature: first, identity: remainder }
+        : { nature: first };
+      break;
+
+    case "LAYOUT":
+      candidate = { nature: "LAYOUT", glob: remainder || "**/*" };
+      break;
+
+    case "PARTIAL":
+      candidate = { nature: "PARTIAL", identity: remainder };
+      break;
+
+    default:
+      candidate = { nature: "sqlpage_file", path: first };
+      break;
+  }
+
+  const parsed = z.safeParse(sqlInfoDirectiveSchema, candidate);
+  if (parsed.success) {
+    (cell as Any).infoDirective = parsed.data;
+    if (!isSqlInfoDirectiveSupplier(cell)) {
+      throw Error("This should never happen");
+    }
+  } else {
+    registerIssue({
+      kind: "fence-issue",
+      disposition: "error",
+      error: parsed.error,
+      message: `Zod error parsing info directive '${cell.info}': ${
+        z.prettifyError(parsed.error)
+      }`,
+      provenance: nb.notebook.provenance,
+      startLine: cell.startLine,
+      endLine: cell.endLine,
+    });
+  }
+};
 
 export const enrichRoute: DocCodeCellMutator<string> = (
   cell,
@@ -114,23 +333,28 @@ export const enrichRoute: DocCodeCellMutator<string> = (
 
 export const enrichFrontmatter: DocCodeCellMutator<string> = (cell, { nb }) => {
   if ("frontmatter" in cell) return;
-  // deno-lint-ignore no-explicit-any
-  (cell as any).frontmatter = nb.notebook.fm;
+  (cell as Any).frontmatter = nb.notebook.fm;
 };
 
 export class SqlPageCodebook {
   protected readonly docCodeCellMutators: DocCodeCellMutator<string>[] = [];
-  protected pipedMutators = pipedDocCodeCellMutators(this.docCodeCellMutators);
+  protected pipedDocCCMutators = pipedDocCodeCellMutators(
+    this.docCodeCellMutators,
+  );
   protected constructor() {
     this.setupDocCodeCellMutators();
   }
 
   withDocCodeCellMutator(dcce: DocCodeCellMutator<string>) {
     this.docCodeCellMutators.push(dcce);
-    this.pipedMutators = pipedDocCodeCellMutators(this.docCodeCellMutators);
+    this.pipedDocCCMutators = pipedDocCodeCellMutators(
+      this.docCodeCellMutators,
+    );
   }
 
   setupDocCodeCellMutators() {
+    // the order of these mutators matter!
+    this.withDocCodeCellMutator(enrichInfoDirective);
     this.withDocCodeCellMutator(enrichRoute);
     this.withDocCodeCellMutator(enrichFrontmatter);
   }
@@ -158,104 +382,22 @@ export class SqlPageCodebook {
 
   async *sqlPageCodebooks(opts: { md: string[] }) {
     return yield* mutateDocCodeCells(
-      this.pipedMutators,
+      this.pipedDocCCMutators,
       documentedNotebooks(this.notebooks(opts), { kind: "hr" }),
     );
   }
 
-  /** Build a matcher once; use findPath(path) to get the closest matching glob. */
-  layoutFinder(layouts: DocumentedCodeCell<string, Record<string, unknown>>[]) {
-    function toRegex(glob: string): RegExp {
-      if (!isGlob(glob)) {
-        // Treat literal as exact match (normalize + escape)
-        const exact = posix.normalize(glob).replace(
-          /[.*+?^${}()|[\]\\]/g,
-          "\\$&",
-        );
-        return new RegExp(`^${exact}$`);
-      }
-      return globToRegExp(glob, {
-        extended: true,
-        globstar: true,
-        caseInsensitive: false,
-      });
-    }
-
-    function wildcardCount(g: string): number {
-      // Penalize '**' heavier so it's considered less specific
-      const starStar = (g.match(/\*\*/g) ?? []).length * 2;
-      const singles = (g.replace(/\*\*/g, "").match(/[*?]/g) ?? []).length;
-      return starStar + singles;
-    }
-
-    const cached = layouts.map((layout) => {
-      const tokens = layout.info?.split(/\s+/);
-      if (tokens && tokens.length == 1) layout.info += " **/*";
-      const glob = tokens && tokens.length > 1 ? tokens[1] : "**/*";
-      const gg = posix.normalize(glob);
-      return {
-        layout,
-        glob,
-        g: gg,
-        re: toRegex(gg),
-        wc: wildcardCount(gg),
-        len: gg.length,
-      };
-    });
-
-    function findShell(path: string) {
-      const p = posix.normalize(path);
-      const hits = cached.filter((c) => c.re.test(p));
-      if (!hits.length) return undefined;
-      hits.sort((a, b) => (a.wc - b.wc) || (b.len - a.len));
-      const cell = hits[0].layout;
-      return { cell, wrap: (text: string) => `${cell.source}\n${text}` };
-    }
-
-    return {
-      findShell: (layouts.length == 0 ? (_: string) => undefined : findShell),
-    };
-  }
-
   async *codeCells(
     opts: { md: string[] },
-    extracted: {
-      layouts: DocumentedCodeCell<string>[];
-      heads: DocumentedCodeCell<string>[];
-      tails: DocumentedCodeCell<string>[];
-    },
+    directives: InfoDirectiveCells,
   ) {
     const spBooks = await Array.fromAsync(this.sqlPageCodebooks(opts));
-    const { layouts, heads, tails } = extracted;
-
-    const isExtracted = (o: unknown): o is { extracted: true } =>
-      o && typeof o === "object" && "extracted" in o && o.extracted
-        ? true
-        : false;
-
-    const extract = (
-      cell: DocumentedCodeCell<string>,
-      to: DocumentedCodeCell<string>[],
-    ) => {
-      to.push(cell);
-      // deno-lint-ignore no-explicit-any
-      (cell as any).extracted = true;
-    };
-
+    const EXTRACTED = ".extractedInCodeCells" as const;
     for await (const spnb of spBooks) {
       for (const cell of spnb.cells) {
         if (cell.kind === "code") {
-          if (cell.info?.startsWith("LAYOUT")) {
-            extract(cell, layouts);
-          } else {
-            switch (cell.info) {
-              case "HEAD":
-                extract(cell, heads);
-                break;
-              case "TAIL":
-                extract(cell, tails);
-                break;
-            }
+          if (directives.register(cell)) {
+            (cell as Any)[EXTRACTED] = true;
           }
         }
       }
@@ -263,7 +405,7 @@ export class SqlPageCodebook {
 
     for await (const spnb of spBooks) {
       for (const cell of spnb.cells) {
-        if (cell.kind === "code" && !isExtracted(cell)) {
+        if (cell.kind === "code" && !(EXTRACTED in cell)) {
           yield cell;
         }
       }
@@ -282,11 +424,15 @@ export class SqlPageCodebook {
     }
   }
 
-  async *sqlPageFileEntries(opts: { md: string[] }) {
+  async *rawSqlPageFileEntries(
+    opts: { md: string[] },
+    directives: InfoDirectiveCells,
+  ) {
     const pageRoutes: AnnotatedRoute[] = [];
-    const layouts: DocumentedCodeCell<string>[] = [];
-    const heads: DocumentedCodeCell<string>[] = [];
-    const tails: DocumentedCodeCell<string>[] = [];
+    const errorAsSqlComments = (text: string, _error: unknown) =>
+      text.replaceAll(/^/gm, "-- ");
+    const errorAsJSON = (text: string, error: unknown) =>
+      JSON.stringify({ text, error });
 
     function counter<Identifier>(identifier: Identifier, padValue = 4) {
       let value = -1;
@@ -296,20 +442,20 @@ export class SqlPageCodebook {
     }
 
     const codeCells = await Array.fromAsync(
-      this.codeCells(opts, { layouts, heads: tails, tails }),
+      this.codeCells(opts, directives),
     );
 
     const headCount = counter("head");
-    for (const head of heads) {
+    for (const head of directives.heads) {
       yield {
         path: `sql.d/head/${headCount.next()}.sql`,
         kind: "head_sql",
         contents: head.source,
+        cell: head,
+        asErrorContents: errorAsSqlComments,
       } satisfies SqlPageFile;
     }
 
-    const { findShell } = this.layoutFinder(layouts);
-    const { evaluate } = unsafeJsEvaluator();
     for await (const cc of codeCells) {
       switch (cc.language) {
         case "json": {
@@ -318,6 +464,8 @@ export class SqlPageCodebook {
               path: `spry.d/issues/${cc.provenance}.auto.json`,
               kind: "sqlpage_file_upsert",
               contents: cc.source,
+              cell: cc,
+              asErrorContents: errorAsJSON,
             } satisfies SqlPageFile;
           }
           break;
@@ -330,14 +478,14 @@ export class SqlPageCodebook {
             continue;
           }
           const { info: path } = cc;
-          const shell = findShell(path);
           yield {
             path,
             kind: "sqlpage_file_upsert",
-            contents: await evaluate(
-              shell ? shell.wrap(cc.source) : cc.source,
-              { path, cell: cc, ...cc.attrs },
-            ),
+            contents: cc.source,
+            cell: cc,
+            asErrorContents: errorAsSqlComments,
+            isUnsafeInterpolatable: true,
+            isLayoutCandidate: true,
           } satisfies SqlPageFile;
           if (Object.entries(cc.attrs).length) {
             if (isRouteSupplier(cc.attrs)) {
@@ -347,6 +495,8 @@ export class SqlPageCodebook {
               path: `spry.d/auto/resource/${path}.auto.json`,
               kind: "sqlpage_file_upsert",
               contents: JSON.stringify(this.dropUndef(cc.attrs), null, 2),
+              cell: cc,
+              asErrorContents: errorAsJSON,
             } satisfies SqlPageFile;
           }
           break;
@@ -355,20 +505,24 @@ export class SqlPageCodebook {
     }
 
     const layoutCount = counter("layout");
-    for (const lo of layouts) {
+    for (const lo of directives.layouts.layouts) {
       yield {
         path: `spry.d/auto/layout/${layoutCount.next()}.auto.sql`,
         kind: "sqlpage_file_upsert",
-        contents: `-- ${lo.info}\n${lo.source}`,
+        contents: `-- ${JSON.stringify(lo.infoDirective)}\n${lo.source}`,
+        cell: lo,
+        asErrorContents: errorAsSqlComments,
       } satisfies SqlPageFile;
     }
 
     const tailCount = counter("tail");
-    for (const tail of tails) {
+    for (const tail of directives.tails) {
       yield {
         path: `sql.d/tail/${tailCount.next()}.sql`,
         kind: "tail_sql",
         contents: tail.source,
+        cell: tail,
+        asErrorContents: errorAsSqlComments,
       } satisfies SqlPageFile;
     }
 
@@ -381,22 +535,84 @@ export class SqlPageCodebook {
         includeCounts: true,
       }),
       kind: "sqlpage_file_upsert",
+      asErrorContents: errorAsSqlComments,
     } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/forest.auto.json",
       contents: JSON.stringify(forest, null, 2),
       kind: "sqlpage_file_upsert",
+      asErrorContents: errorAsJSON,
     } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/breadcrumbs.auto.json",
       contents: JSON.stringify(breadcrumbs, null, 2),
       kind: "sqlpage_file_upsert",
+      asErrorContents: errorAsJSON,
     } satisfies SqlPageFile;
     yield {
       path: "spry.d/auto/route/edges.auto.json",
       contents: JSON.stringify(edges, null, 2),
       kind: "sqlpage_file_upsert",
+      asErrorContents: errorAsJSON,
     } satisfies SqlPageFile;
+  }
+
+  async *finalSqlPageFileEntries(opts: { md: string[] }) {
+    const directives = new InfoDirectiveCells();
+    const baseCtx = {
+      sitePrefixed: (sqlClause: string) =>
+        `(sqlpage.environment_variable('SQLPAGE_SITE_PREFIX') || ${sqlClause})`,
+      partial: (name: string) =>
+        directives.partials.find((p) => p.infoDirective.identity == name)
+          ?.source ?? `/* partial '${name}' not found in directives */`,
+    };
+
+    for await (const spf of this.rawSqlPageFileEntries(opts, directives)) {
+      const { path } = spf;
+
+      // ctx is for interpolation so it won't be used locally but in the interpolation (maybe)
+      const ctx = { ...spf, ...spf.cell?.attrs, ...baseCtx };
+      try {
+        const layout = spf.isLayoutCandidate
+          ? directives.layouts.findLayout(path)
+          : undefined;
+
+        if (spf.isUnsafeInterpolatable) {
+          const source = layout ? layout.wrap(spf.contents) : spf.contents;
+
+          // Escape backticks and backslashes so we can embed `source` inside a template literal
+          const safe = source.replace(/\\/g, "\\\\").replace(/`/g, "\\`");
+
+          // Direct eval runs in the current scope (locals in this block) and we .call(this)
+          // so `${this.*}` inside the template works too.
+          // NOTE: This is intentionally unsafe. Do not feed untrusted content.
+          const mutated = eval(
+            `(function() { return \`${safe}\`; }).call(this)`,
+          );
+
+          if (mutated !== spf.contents) {
+            (spf as Any).contents = String(mutated);
+            (spf as Any).isInterpolated = true;
+          }
+        } else if (layout) {
+          (spf as Any).contents = layout.wrap(spf.contents);
+        }
+
+        if (layout) (spf as Any).layout = layout;
+        yield spf;
+      } catch (error) {
+        (spf as Any).isSqlPageFileError = error;
+        yield {
+          ...spf,
+          contents: spf.asErrorContents(
+            `finalSqlPageFileEntries error: ${String(error)}\n*****\n${
+              JSON.stringify({ ctx, spf }, null, 2)
+            }`,
+            error,
+          ),
+        };
+      }
+    }
   }
 
   async materializeContent(
@@ -410,7 +626,7 @@ export class SqlPageCodebook {
   }
 
   async *materializeFs(opts: { md: string[]; fs: string }) {
-    for await (const spf of this.sqlPageFileEntries(opts)) {
+    for await (const spf of this.finalSqlPageFileEntries(opts)) {
       const absPath = this.materializeContent({
         fs: opts.fs,
         path: spf.path,
@@ -445,7 +661,7 @@ export class SqlPageCodebook {
     }
 
     const esc = (s: string) => s.replace(/'/g, "''");
-    const list = await Array.fromAsync(this.sqlPageFileEntries(opts));
+    const list = await Array.fromAsync(this.finalSqlPageFileEntries(opts));
 
     // Deterministic order: heads → non-head/tail → tails
     return [
