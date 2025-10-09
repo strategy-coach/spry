@@ -329,7 +329,7 @@ export class SqlPageCodebook {
             kind: "sqlpage_file_upsert",
             contents: await evaluate(
               shell ? shell.wrap(cc.source) : cc.source,
-              { path, ...cc.attrs },
+              { path, cell: cc, ...cc.attrs },
             ),
           } satisfies SqlPageFile;
           if (Object.entries(cc.attrs).length) {

@@ -31,6 +31,8 @@ select 1;
 
 ```sql users/list.sql
 select 2;
+-- this is the path: ${ctx.path}
+-- this is the cell: ${JSON.stringify(ctx.cell)}
 ```
 
 The following `LAYOUT` will be prefixed across every SQLPage page because no
